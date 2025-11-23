@@ -1,0 +1,12 @@
+# --- Data & Logs (Local Only) ---
+market_data/
+logs/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.vscode/
+
+# --- Keep these! ---
+!market_data/.gitkeep
+!logs/.gitkeep

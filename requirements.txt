@@ -1,0 +1,8 @@
+duckdb>=0.9.0
+pandas>=2.0.0
+yfinance>=0.2.30
+requests>=2.31.0
+scipy>=1.10.0
+dash>=2.14.0
+plotly>=5.18.0
+pytz>=2023.3
