@@ -1,81 +1,35 @@
-# 🏛️ Quant Trading Pipeline (v2.0 Architecture)
+🏛️ Quant Trading Pipeline (v2.0 Architecture)
+"UTC in the Vault, Local on the Glass."
+This repository hosts a professional-grade quantitative trading pipeline designed for $\text{VIX/SPX}$ signals and $\text{XSP}$ Option execution. It adheres to strict data integrity and timezone normalization laws, supporting a five-tool ecosystem for validation, forecasting, and training.
+________________________________________
+📜 The Project Constitution (The Golden Laws)
+•	The Timezone Law: ALL timestamps in $\text{DuckDB}$ are stored as UTC. Display conversion to $\text{US/Pacific (PST)}$ happens only at the visualization layer.
+•	The Data Integrity Law: Tables enforce strict types and utilize Composite Primary Keys ($\text{datetime\_utc + ticker}$) to prevent data corruption and duplication.
+•	The Observability Law: Every script uses centralized logging for audit trails, ensuring no silent failures.
+________________________________________
+📂 Workflow & Scripts (The Five-Tool Ecosystem)
+The system operates on a four-phase data pipeline, which feeds five distinct consumption tools.
+Phase	Script File	Function	Output Table(s)
+Phase 1: Foundation	$\text{00\_setup\_database.py}$	Initializes the empty, strict Golden Schema.	N/A
+Phase 2: Ingestion	$\text{01\_ingest\_indices.py}$	Harvests $\text{SPX, VIX, ES=F}$, and $\text{^IRX}$. Converts all to UTC.	$\text{indices\_1m, futures\_1m, risk\_free\_rate\_daily}$
+Phase 3: Processing	$\text{02\_scan\_signals.py}$	Calculates $\text{VIX}$ indicators and detects the $\text{VIX\_MACD\_BEAR\_CROSS}$ signal.	$\text{trade\_manifest}$
+	$\text{03\_fetch\_options.py}$	Fetches $\text{XSP}$ Option Chains (ATM $\pm 2$ strikes) from $\text{Polygon.io}$.	$\text{options\_1m}$
+	$\text{04\_calc\_greeks.py}$	Calculates $\text{IV, Delta, Gamma, Vega, Theta}$ using Dynamic Interest Rates.	Updates $\text{options\_1m}$
+________________________________________
+📊 Consumption Tools (The Five Independent Programs)
+Each tool is a separate program, enabling a clean executable package for distribution.
+ID	Tool Name	Script	Role & Key Feature
+1	Historical Backtester	$\text{10\_backtest.py}$	Forensic Validation: Determines actual historical $\text{P\&L}$ and risk metrics (e.g., Hybrid ATR Stop).
+2	Trajectory Forecaster	$\text{11\_forecaster\_gui.py}$ (New)	Goal-Oriented Simulation: $\text{GUI}$-driven analysis to chart required $\text{ROI}$ to hit future targets.
+3	Analysis Dashboard	$\text{08\_dashboard.py}$	Post-Mortem Review: Visualizes $\text{VIX}$ signals against price action for review (Future: Greek Hovercards).
+4	Flight Simulator	$\text{09\_simulator.py}$	Training Environment: Interactive, "fog of war" practice on past data (Future: Click-to-Mark entry).
+5	Live Dashboard	$\text{12\_live\_dashboard.py}$ (New)	Operational Awareness: Future state for real-time monitoring and $\text{VIX}$-based status display.
+________________________________________
+🛠️ Setup Instructions
+To ensure a functional environment and prepare for the final packaging, follow this sequence:
+1.	Dependencies: Ensure all required libraries are installed from $\text{requirements.txt}$.
+2.	Configuration: Add $\text{API}$ Keys and core constants (like the $\text{Section 1256 Tax Rate}$) to $\text{src/utils/config.py}$.
+3.	Initialize DB: $\text{python 00\_setup\_database.py}$
+4.	Run Pipeline: $\text{python 00\_daily\_update.py}$ (Triggers Steps 1-4)
+5.	Launch Tools: $\text{python [Script Name].py}$ (e.g., $\text{python 09\_simulator.py}$)
 
-**"UTC in the Vault, Local on the Glass."**
-
-This repository hosts a professional-grade quantitative trading pipeline designed for VIX/SPX signals and XSP Option execution. It prioritizes data integrity, strict timezone normalization, and total observability.
-
----
-
-## 📜 The Project Constitution (The Laws)
-
-### 1. The Timezone Law
-* **Storage:** ALL timestamps in the database (`DuckDB`) are stored as **UTC**. No exceptions.
-* **Ingestion:** Data is converted to UTC *immediately* upon entry.
-    * Yahoo Finance (SPX/VIX) → Assumed `America/New_York` → Converted to UTC.
-    * Polygon.io (Options) → Native UTC → Stored as UTC.
-* **Display:** Conversion to Local Time (`US/Pacific`) happens *only* at the visualization layer (Dashboard/Simulator).
-
-### 2. The Data Integrity Law
-* **Golden Schema:** Tables enforce strict types (`TIMESTAMP`, `DOUBLE`, `BIGINT`).
-* **Uniqueness:** Composite Primary Keys (e.g., `datetime_utc + ticker`) prevent duplicate rows.
-* **Sanitization:** Dirty data is rejected before insertion. We do not "patch" data errors in the UI; we fix them at the source.
-
-### 3. The Observability Law
-* **No Silent Failures:** Every script uses the centralized `src.utils.logger`.
-* **Forensics:** All execution logs are saved to `logs/pipeline.log` for audit trails.
-
----
-
-## 📂 Workflow & Scripts
-
-### Phase 1: Foundation
-* **`src/utils/config.py`**: The single source of truth for Paths, Keys, and Constants.
-* **`00_setup_database.py`**: The "Big Bang." Wipes the database and rebuilds the empty Golden Schema tables.
-
-### Phase 2: Ingestion (The Gatekeeper)
-* **`01_ingest_indices.py`**: Fetches Context Data.
-    * **SPX/VIX:** Market Hours context.
-    * **ES=F (Futures):** Overnight/24h context.
-    * **^IRX (Rates):** Daily Risk-Free Rate for Greek calculations.
-
-### Phase 3: Processing (The Engine)
-* **`02_scan_signals.py`**:
-    * Loads VIX data.
-    * Calculates Technicals (Standard MACD 12/26/9 + Wilder's RSI 14).
-    * Detects `VIX_MACD_BEAR_CROSS` events.
-    * Writes signals to `trade_manifest`.
-* **`03_fetch_options.py`**:
-    * Reads the Manifest.
-    * Performs **Hybrid Price Lookup** (Uses SPX during day, Futures during night) to determine ATM Strike.
-    * Fetches Option Chains (ATM +/- 2) from Polygon.io.
-* **`04_calc_greeks.py`**:
-    * Calculates IV, Delta, Gamma, Vega, Theta using Newton-Raphson.
-    * Uses **Dynamic Interest Rates** (from `^IRX`) for historical accuracy.
-
-### Phase 4: Visualization (The Fruit)
-* **`08_dashboard.py`**: Post-Mortem Analysis. 4-Row layout (Price, SPX/Futures, MACD, RSI).
-* **`09_simulator.py`**: Training Environment. 5-Row layout. "Fog of War" replay mode.
-
----
-
-## 💾 Database Schema
-
-| Table | PK | Content | Source |
-| :--- | :--- | :--- | :--- |
-| **`indices_1m`** | `datetime_utc`, `ticker` | SPX, VIX Price History | Yahoo |
-| **`futures_1m`** | `datetime_utc`, `ticker` | /ES Futures Price History | Yahoo |
-| **`options_1m`** | `datetime_utc`, `ticker` | XSP Option Chains (OHLCV) | Polygon |
-| **`trade_manifest`** | `entry_timestamp_utc` | Signal Events & Metadata | Calculated |
-| **`risk_free_rate_daily`**| `date` | 13-Week T-Bill Yields | Yahoo |
-
----
-
-## 🛠️ Setup Instructions
-
-1.  **Configure:** Add API Keys to `src/utils/config.py`.
-2.  **Initialize:** `python 00_setup_database.py`
-3.  **Ingest:** `python 01_ingest_indices.py`
-4.  **Scan:** `python 02_scan_signals.py`
-5.  **Fetch:** `python 03_fetch_options.py`
-6.  **Calc:** `python 04_calc_greeks.py`
-7.  **Run:** `python 09_simulator.py`
