@@ -43,9 +43,10 @@ def get_status_ui(status_type, message=None):
 # --- LAYOUT ---
 layout = dbc.Container([
     
-    # 1. CLEAN HEADER (No "Tool ID")
+    # 1. CLEAN HEADER (Now with Tool ID: 1)
     dbc.Row([
         dbc.Col([
+            html.H6("TOOL ID: 1", className="text-muted mb-0"),
             html.H2("HISTORICAL BACKTESTER", className="display-6 fw-bold text-info"),
             html.Hr(className="my-2")
         ], width=12)
