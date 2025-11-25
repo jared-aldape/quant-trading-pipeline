@@ -1,40 +1,65 @@
 import dash
 from dash import dcc, html, Input, Output, register_page, callback
+import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
 import yfinance as yf
-import dash_bootstrap_components as dbc
-from datetime import datetime
-import pytz
-import logging
 import requests
 import xml.etree.ElementTree as ET
+import logging
+from datetime import datetime
+import pytz
 
+# ==========================================
+# 1. SETUP
+# ==========================================
 register_page(__name__, path='/periscope', name='Periscope')
 
-TZ_UTC = pytz.utc
-TZ_LOCAL = pytz.timezone('US/Pacific')
 logger = logging.getLogger("MarketPeriscope")
+TZ_LOCAL = pytz.timezone('US/Pacific')
+TZ_UTC = pytz.utc
 
-# --- DATA FETCHING (Same Logic, Refactored) ---
+# ==========================================
+# 2. HELPER FUNCTIONS
+# ==========================================
 def fetch_market_snapshot():
-    tickers = {'^GSPC': 'S&P 500', '^VIX': 'VIX'}
+    tickers = {'^GSPC': 'S&P 500', '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq', '^VIX': 'VIX'}
     data = {}
     try:
         df = yf.download(list(tickers.keys()), period="5d", interval="1d", progress=False)
-        # Extract logic simplified for brevity but robust
+        is_multi = isinstance(df.columns, pd.MultiIndex)
         for sym, name in tickers.items():
-            if isinstance(df.columns, pd.MultiIndex):
-                price = df['Close'][sym].iloc[-1]
-                prev = df['Close'][sym].iloc[-2]
-            else:
-                price = df['Close'].iloc[-1]
-                prev = df['Close'].iloc[-2]
-            
+            closes = df['Close'][sym].dropna() if is_multi else df['Close'].dropna()
+            if len(closes) < 2: continue
+            price, prev = closes.iloc[-1], closes.iloc[-2]
             change = price - prev
             data[sym] = {'name': name, 'price': price, 'change': change, 'pct': (change/prev)*100, 'color': '#00E676' if change >= 0 else '#FF1744'}
-    except Exception: return None
+    except Exception as e: return None
     return data
+
+def fetch_news():
+    """
+    Fetches Yahoo Finance TOP STORIES (Broad Market News).
+    """
+    news_items = []
+    rss_url = "https://finance.yahoo.com/rss/topstories" 
+    
+    try:
+        response = requests.get(rss_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            for item in root.findall('.//item')[:6]:
+                pub_date = item.find('pubDate')
+                time_str = "Recent"
+                if pub_date is not None:
+                    try:
+                        dt = pd.to_datetime(pub_date.text)
+                        if dt.tzinfo is None: dt = dt.tz_localize(TZ_UTC)
+                        time_str = dt.astimezone(TZ_LOCAL).strftime('%H:%M PST')
+                    except: pass
+                news_items.append({'title': item.find('title').text, 'link': item.find('link').text, 'time': time_str})
+    except: pass
+    return news_items
 
 def create_gauge(vix_price):
     val = float(vix_price)
@@ -45,56 +70,88 @@ def create_gauge(vix_price):
     
     fig = go.Figure(go.Indicator(
         mode = "gauge+number", value = val,
-        title = {'text': f"{label}", 'font': {'size': 20, 'color': color}},
+        title = {'text': label, 'font': {'size': 20, 'color': color}},
         gauge = {'axis': {'range': [10, 45]}, 'bar': {'color': color}, 'bgcolor': "white"}
     ))
-    fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"}, height=250, margin=dict(l=30, r=30, t=30, b=30))
+    fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"}, height=300, margin=dict(l=30, r=30, t=30, b=30))
     return fig
 
-def fetch_news():
-    news = []
-    try:
-        r = requests.get("https://finance.yahoo.com/rss/headline?s=SPY", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        root = ET.fromstring(r.content)
-        for item in root.findall('.//item')[:4]:
-            news.append({'title': item.find('title').text, 'link': item.find('link').text})
-    except: pass
-    return news
-
-# --- LAYOUT ---
+# ==========================================
+# 3. LAYOUT
+# ==========================================
 layout = dbc.Container([
-    dcc.Interval(id='peri-interval', interval=60*1000, n_intervals=0),
-    dbc.Row([dbc.Col(html.H2("🔭 Market Periscope", className="text-center text-light mt-4 mb-4"), width=12)]),
-    
-    html.Div(id='peri-content')
+    # HEADER: Standardized Teal Theme
+    dbc.Row([
+        dbc.Col([
+            html.H6("TOOL ID: 6", className="text-muted mb-0"),
+            html.H2("MARKET PERISCOPE", className="display-6 fw-bold", style={'color': '#20c997'}),
+            html.Hr(className="my-2")
+        ], width=12)
+    ], className="mb-4"),
+
+    # ROW 1: INDICES
+    html.Div(id='peri-indices-row'),
+
+    # ROW 2: GAUGE + NEWS
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader([html.I(className="bi bi-speedometer2 me-2"), "Volatility Regime"]),
+                dbc.CardBody([dcc.Graph(id='peri-gauge')], className="p-0")
+            ], className="shadow mb-4")
+        ], width=12, lg=6),
+
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader([html.I(className="bi bi-newspaper me-2"), "Global Top Stories"]),
+                dbc.CardBody(id='peri-news-feed', style={'maxHeight': '350px', 'overflowY': 'auto'})
+            ], className="shadow mb-4")
+        ], width=12, lg=6)
+    ]),
+
+    dcc.Interval(id='peri-interval', interval=60*1000, n_intervals=0)
 ], fluid=True)
 
-# --- CALLBACK ---
-@callback(Output('peri-content', 'children'), Input('peri-interval', 'n_intervals'))
+# ==========================================
+# 4. CALLBACKS
+# ==========================================
+@callback(
+    [Output('peri-indices-row', 'children'), Output('peri-gauge', 'figure'), Output('peri-news-feed', 'children')],
+    [Input('peri-interval', 'n_intervals')]
+)
 def update_periscope(n):
-    data = fetch_market_snapshot()
-    news = fetch_news()
+    market_data = fetch_market_snapshot()
+    news_items = fetch_news()
     
-    if not data: return html.Div("Data Fetch Failed", className="text-danger")
+    if market_data:
+        cards = []
+        for sym in ['^GSPC', '^DJI', '^IXIC', '^VIX']:
+            if sym in market_data:
+                d = market_data[sym]
+                cards.append(dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H6(d['name'], className="text-muted text-uppercase small mb-1"),
+                            html.H3(f"{d['price']:,.2f}", className="metric-value text-white"),
+                            html.P(f"{d['change']:+.2f} ({d['pct']:+.2f}%)", style={'color': d['color'], 'fontWeight': 'bold', 'marginBottom': 0})
+                        ])
+                    ], className="mb-3 border-secondary")
+                ], width=12, sm=6, lg=3))
+        indices_layout = dbc.Row(cards)
+        gauge_fig = create_gauge(market_data['^VIX']['price'])
+    else:
+        indices_layout = html.Div("Data Link Offline", className="text-danger text-center")
+        gauge_fig = go.Figure()
 
-    # Indices
-    indices = dbc.Row([
-        dbc.Col(dbc.Card(dbc.CardBody([html.H5(d['name']), html.H3(f"{d['price']:.2f}"), html.P(f"{d['pct']:+.2f}%", style={'color': d['color']})]), color="dark", outline=True), width=6)
-        for d in data.values()
-    ], className="mb-4")
+    news_layout = []
+    if news_items:
+        for item in news_items:
+            news_layout.append(html.Div([
+                html.A(item['title'], href=item['link'], target="_blank", className="text-decoration-none fw-bold text-white d-block mb-1", style={'fontSize': '0.95rem'}),
+                html.Small(item['time'], className="text-muted"),
+                html.Hr(className="border-secondary my-2")
+            ]))
+    else:
+        news_layout = html.Div("Connecting to Wire...", className="text-muted small")
 
-    # Gauge & News
-    content = dbc.Row([
-        dbc.Col([dcc.Graph(figure=create_gauge(data['^VIX']['price']))], width=12, md=6),
-        dbc.Col([
-            html.H4("Live Wire (SPY)", className="text-muted mb-3"),
-            html.Div([
-                html.Div([
-                    html.A(item['title'], href=item['link'], target="_blank", className="text-decoration-none text-info fw-bold"),
-                    html.Hr(className="my-2")
-                ]) for item in news
-            ])
-        ], width=12, md=6)
-    ])
-    
-    return [indices, content]
+    return indices_layout, gauge_fig, news_layout

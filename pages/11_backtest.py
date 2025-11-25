@@ -6,7 +6,7 @@ import sys
 import json
 import logging
 from datetime import datetime, date
-from src.utils import config # Import centralized config
+from src.utils import config
 
 register_page(__name__, path='/backtester', name='Backtester')
 
@@ -15,29 +15,51 @@ log = logging.getLogger("BackendGUI")
 # --- UI HELPER ---
 def get_status_ui(status_type, message=None):
     if status_type == "ready":
-        return html.Div([html.Div("📊", className="display-4"), html.H4("Ready for Analysis", className="text-muted")], className="text-center")
+        return html.Div([
+            html.Div("📊", className="display-4"),
+            html.H4("Ready for Analysis", className="text-muted")
+        ], className="text-center")
     elif status_type == "running":
-        return html.Div([dbc.Spinner(color="primary", type="grow"), html.H4("Running Forensic Backtest...", className="text-primary mt-2")], className="text-center")
+        return html.Div([
+            dbc.Spinner(color="primary", type="grow"),
+            html.H4("Running Forensic Backtest...", className="text-primary mt-2")
+        ], className="text-center")
     elif status_type == "success":
-        return html.Div([html.Div("✅", className="display-4"), html.H4(message, className="text-success")], className="text-center")
+        return html.Div([
+            html.Div("✅", className="display-4"),
+            html.H4(message, className="text-success")
+        ], className="text-center")
     elif status_type == "failure":
-        return html.Div([html.Div("⚠️", className="display-4"), html.H4(message, className="text-warning")], className="text-center")
+        return html.Div([
+            html.Div("⚠️", className="display-4"),
+            html.H4(message, className="text-warning")
+        ], className="text-center")
     elif status_type == "crash":
-        return html.Div([html.Div("💀", className="display-4"), html.H4("Execution Crash", style={"color": "#a855f7"})], className="text-center")
+        return html.Div([
+            html.Div("💀", className="display-4"),
+            html.H4("Execution Crash", style={"color": "#a855f7"})
+        ], className="text-center")
 
 # --- LAYOUT ---
 layout = dbc.Container([
-    dbc.Row([dbc.Col(html.H2("Historical Backtester (Tool 1)", className="text-center text-light mb-4"), width=12)]),
+    
+    # 1. CLEAN HEADER (No "Tool ID")
+    dbc.Row([
+        dbc.Col([
+            html.H2("HISTORICAL BACKTESTER", className="display-6 fw-bold text-info"),
+            html.Hr(className="my-2")
+        ], width=12)
+    ], className="mb-4"),
 
     dbc.Row([
         # COLUMN 1: Inputs
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader("1. Historical Context"),
+                dbc.CardHeader("Historical Context"),
                 dbc.CardBody([
                     html.Label("Backtest Period"),
                     dcc.DatePickerRange(
-                        id='bt-date-range', # ID namespaces to avoid collision
+                        id='bt-date-range',
                         min_date_allowed=date(2020, 1, 1),
                         max_date_allowed=datetime.now().date(),
                         start_date=date(2025, 11, 1),
@@ -58,7 +80,7 @@ layout = dbc.Container([
             ], className="mb-3 shadow"),
             
             dbc.Card([
-                dbc.CardHeader("2. Risk Management"),
+                dbc.CardHeader("Risk Management"),
                 dbc.CardBody([
                     dbc.Row([
                         dbc.Col([html.Label("ATR Sensitivity"), dcc.Input(id='bt-atr-sens', type='number', value=0.5, step=0.1, className="form-control")], width=6),
@@ -71,7 +93,7 @@ layout = dbc.Container([
         # COLUMN 2: Execution & Results
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader("3. Execution & Results"),
+                dbc.CardHeader("Execution & Results"),
                 dbc.CardBody([
                     dbc.Button("🚀 Run Forensic Analysis", id='bt-run-btn', color="primary", size="lg", className="w-100 mb-3"),
                     dbc.Checklist(options=[{"label": " Archive Report", "value": True}], value=[True], id="bt-archive-toggle", switch=True, className="mb-4 text-center text-info"),
@@ -89,7 +111,7 @@ layout = dbc.Container([
             ], className="mb-3 shadow"),
             
             dbc.Card([
-                dbc.CardHeader("4. Ledger Logs"),
+                dbc.CardHeader("Ledger Logs"),
                 dbc.CardBody([
                     html.Pre(id='bt-log-output', children="Waiting...", style={'backgroundColor': '#0a0a0a', 'color': '#00ff41', 'padding': '15px', 'height': '200px', 'overflowY': 'scroll', 'fontSize': '12px', 'border': '1px solid #333'})
                 ])

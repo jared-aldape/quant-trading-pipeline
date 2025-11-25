@@ -11,7 +11,9 @@ app = dash.Dash(
 )
 server = app.server
 
-# --- THE SIDEBAR (Navigation) ---
+# ==========================================
+# 1. DESKTOP SIDEBAR (Visible on PC)
+# ==========================================
 sidebar = html.Div(
     [
         html.H2("QUANT OS", className="display-5 fw-bold"),
@@ -20,12 +22,12 @@ sidebar = html.Div(
         dbc.Nav(
             [
                 dbc.NavLink("🏠 Home", href="/", active="exact"),
-                dbc.NavLink("📉 Backtester", href="/backtester", active="exact"),
-                dbc.NavLink("🔮 Forecaster", href="/forecaster", active="exact"),
-                dbc.NavLink("🕵️ Analysis", href="/analysis", active="exact"),
-                dbc.NavLink("🕹️ Simulator", href="/simulator", active="exact"),
-                dbc.NavLink("🔴 Live Ops", href="/live", active="exact"),
-                dbc.NavLink("🔭 Periscope", href="/periscope", active="exact"),
+                dbc.NavLink("1. Backtester", href="/backtester", active="exact"),
+                dbc.NavLink("2. Forecaster", href="/forecaster", active="exact"),
+                dbc.NavLink("3. Analysis", href="/analysis", active="exact"),
+                dbc.NavLink("4. Simulator", href="/simulator", active="exact"),
+                dbc.NavLink("5. Live Ops", href="/live", active="exact"),
+                dbc.NavLink("6. Periscope", href="/periscope", active="exact"),
             ],
             vertical=True,
             pills=True,
@@ -43,45 +45,44 @@ sidebar = html.Div(
         "backgroundColor": "#050505", "borderRight": "1px solid #333",
         "zIndex": 1000
     },
-    className="d-none d-md-block" # Hide on mobile, show on desktop
+    className="d-none d-md-block" # CSS: Hide on mobile, show on desktop
 )
 
-# --- MOBILE HEADER (Visible only on XS/SM screens) ---
+# ==========================================
+# 2. MOBILE HEADER (Visible on Phone)
+# ==========================================
 mobile_header = dbc.NavbarSimple(
     brand="QUANT OS v2.0",
     brand_href="/",
     color="dark",
     dark=True,
     children=[
-        dbc.NavItem(dbc.NavLink("Backtester", href="/backtester")),
-        dbc.NavItem(dbc.NavLink("Live Ops", href="/live")),
-        dbc.NavItem(dbc.NavLink("Periscope", href="/periscope")),
+        dbc.NavItem(dbc.NavLink("1. Backtester", href="/backtester")),
+        dbc.NavItem(dbc.NavLink("2. Forecaster", href="/forecaster")),
+        dbc.NavItem(dbc.NavLink("3. Analysis", href="/analysis")),
+        dbc.NavItem(dbc.NavLink("4. Simulator", href="/simulator")),
+        dbc.NavItem(dbc.NavLink("5. Live Ops", href="/live")),
+        dbc.NavItem(dbc.NavLink("6. Periscope", href="/periscope")),
     ],
-    className="d-md-none mb-3"
+    className="d-md-none mb-3" # CSS: Hide on desktop, show on mobile
 )
 
-# --- CONTENT AREA ---
-content = html.Div(
-    dash.page_container,
-    style={"padding": "2rem"},
-    className="ms-md-64" 
-)
-
-# Desktop Content Margin
-desktop_content_style = {"marginLeft": "16rem", "padding": "2rem"}
-# Mobile Content Margin
-mobile_content_style = {"padding": "1rem"}
-
+# ==========================================
+# 3. APP LAYOUT SHELL
+# ==========================================
 app.layout = html.Div([
     dcc.Location(id="url"),
     sidebar,
+    # The 'content-responsive' class (in assets/style.css) handles the margins
     html.Div([
         mobile_header,
         dash.page_container
-    ], style=desktop_content_style, className="content-responsive")
+    ], className="content-responsive")
 ])
 
+# ==========================================
+# 4. EXECUTION
+# ==========================================
 if __name__ == "__main__":
-    # Host 0.0.0.0 enables LAN access for Mobile PWA testing
-    # Port 8080 is the standard port for the Master Launcher
+    # Host 0.0.0.0 allows access from other devices (like your Pixel) on the network
     app.run(debug=True, host='0.0.0.0', port=8080)

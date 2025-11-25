@@ -1,0 +1,118 @@
+/* =========================================
+   QUANT OS v2.0 GLOBAL THEME
+   (Cyber-Financial Terminal Style)
+   ========================================= */
+
+/* -----------------------------------------
+   1. RESPONSIVE LAYOUT ENGINE
+   ----------------------------------------- */
+/* Default (Mobile): Full width, no margin */
+.content-responsive {
+    margin-left: 0 !important;
+    padding: 10px;
+    width: 100%;
+    transition: margin-left 0.3s ease;
+}
+
+/* Desktop (Screens wider than 768px): Add Sidebar margin */
+@media (min-width: 768px) {
+    .content-responsive {
+        margin-left: 16rem !important;
+        padding: 2rem;
+    }
+}
+
+/* -----------------------------------------
+   2. HIGH CONTRAST INPUTS (Readability Fix)
+   ----------------------------------------- */
+/* Force all inputs to be White Box / Black Text */
+.form-control, 
+.Select-control, 
+.DateInput_input, 
+input {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    border: 1px solid #ccc !important;
+    font-family: 'Roboto Mono', 'Courier New', monospace; /* Data Feel */
+    font-weight: 600;
+}
+
+/* React-Select Dropdown Fixes */
+.Select-value-label {
+    color: #000000 !important;
+}
+.Select-menu-outer {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    border: 1px solid #ccc;
+}
+.Select-placeholder {
+    color: #666 !important;
+}
+
+/* DatePicker Specifics */
+.DateInput_input {
+    text-align: center;
+    font-size: 0.9rem;
+}
+
+/* -----------------------------------------
+   3. COMPONENT UNIFICATION (Cards & Containers)
+   ----------------------------------------- */
+/* Deep Black Cards with subtle borders */
+.card {
+    border: 1px solid #333 !important;
+    background-color: #0b0b0b !important; /* Slightly lighter than pure black */
+    box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+    margin-bottom: 20px;
+}
+
+.card-header {
+    background-color: #111 !important;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 1.5px;
+    border-bottom: 1px solid #333;
+    color: #aaa;
+}
+
+/* -----------------------------------------
+   4. TYPOGRAPHY
+   ----------------------------------------- */
+body {
+    background-color: #000000 !important; /* True Black Background */
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    letter-spacing: -0.5px;
+}
+
+/* Monospace Numbers for Financial Data */
+.metric-value {
+    font-family: 'Roboto Mono', monospace;
+    font-weight: 700;
+    letter-spacing: -1px;
+}
+
+/* -----------------------------------------
+   5. UTILITY CLASSES & ANIMATIONS
+   ----------------------------------------- */
+/* Live Ops "Pulse" Animation */
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.4; }
+    100% { opacity: 1; }
+}
+
+.pulse-animation {
+    animation: pulse 2s infinite ease-in-out;
+}
+
+/* Status Colors (Overrides) */
+.text-success { color: #00E676 !important; } /* Bright Green */
+.text-danger { color: #FF1744 !important; }  /* Bright Red */
+.text-warning { color: #FF9100 !important; } /* Amber */
+.text-info { color: #2979FF !important; }    /* Electric Blue */
+.text-primary { color: #d500f9 !important; } /* Neon Purple */
