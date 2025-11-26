@@ -22,6 +22,30 @@ STRIKE_RANGE = 2
 # 2. HELPER FUNCTIONS
 # ==========================================
 def clean_dataframe(df):
+    # 1. Normalize Columns FIRST (Before checking empty)
+    # This ensures the 'dt' column exists even if there are 0 rows
+    if df is None: return pd.DataFrame()
+    
+    df.columns = df.columns.str.strip().str.lower()
+    df = df.loc[:, ~df.columns.duplicated()]
+    
+    rename_map = {'datetime_utc': 'dt', 'datetime': 'dt', 'close': 'close', 'vix_close': 'close'}
+    df.rename(columns=rename_map, inplace=True)
+    
+    # 2. NOW check empty
+    if df.empty: return df
+    
+    # 3. Timezone Logic
+    if 'dt' in df.columns:
+        if not pd.api.types.is_datetime64_any_dtype(df['dt']):
+            df['dt'] = pd.to_datetime(df['dt'])
+        if df['dt'].dt.tz is None:
+            df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC)
+        else:
+            df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
+    return df
+
+def clean_dataframe(df):
     if df.empty: return df
     df.columns = df.columns.str.strip().str.lower()
     df = df.loc[:, ~df.columns.duplicated()]
@@ -281,8 +305,8 @@ def render_simulation(ts, ticker, mins, reveal):
     # ROW 4: VIX RSI
     if not vix_slice.empty:
         fig.add_trace(go.Scatter(x=vix_slice['dt'], y=vix_slice['vix_rsi'], line=dict(color='#D500F9', width=2), name="RSI"), row=4, col=1)
-        fig.add_hline(y=70, line_dash="dot", line_color="#EF5350", row=4, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="#26A69A", row=4, col=1)
+        fig.add_hline(y=80, line_dash="dot", line_color="#EF5350", row=4, col=1)
+        fig.add_hline(y=20, line_dash="dot", line_color="#26A69A", row=4, col=1)
 
     # STYLING
     fig.update_layout(
