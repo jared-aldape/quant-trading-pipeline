@@ -1,3 +1,5 @@
+import sys
+import os
 import dash
 from dash import dcc, html, Input, Output, register_page, callback
 import dash_bootstrap_components as dbc
@@ -9,22 +11,41 @@ import numpy as np
 import logging
 from datetime import timedelta
 import pytz
-from src.utils import config
+from pathlib import Path
 
-# ==========================================
-# 1. SETUP
-# ==========================================
+# ==============================================================================
+# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# ==============================================================================
+# We are in: quant-trading-pipeline/src/tools/
+# We need to reach: quant-trading-pipeline/ (Root)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Add Root to System Path to allow imports from 'src.utils'
+sys.path.append(str(ROOT_DIR))
+
+from src.utils import config
+from src.utils.logger import get_logger
+
+# ==============================================================================
+# 2. SETUP
+# ==============================================================================
 register_page(__name__, path='/analysis', name='Analysis')
 
 logger = logging.getLogger("Dashboard")
 UTC_TZ = pytz.utc
 STRIKE_RANGE = 2
 
-# ==========================================
-# 2. HELPER FUNCTIONS (Restored)
-# ==========================================
+# ==============================================================================
+# 3. HELPER FUNCTIONS
+# ==============================================================================
 def clean_df(df):
+    """
+    Standardizes DataFrames for display.
+    ENFORCES TIMEZONE LAW: Converts UTC Storage -> Local Display (PST).
+    """
     if df.empty: return df
+    
+    # Normalize Columns
     df.columns = df.columns.str.strip().str.lower()
     df = df.loc[:, ~df.columns.duplicated()]
     
@@ -35,11 +56,14 @@ def clean_df(df):
         if not pd.api.types.is_datetime64_any_dtype(df['dt']):
             df['dt'] = pd.to_datetime(df['dt'])
         
-        # Enforce UTC Awareness -> Convert to UTC
+        # 1. Ensure UTC Awareness (Vault Standard)
         if df['dt'].dt.tz is None:
             df['dt'] = df['dt'].dt.tz_localize(UTC_TZ)
         else:
             df['dt'] = df['dt'].dt.tz_convert(UTC_TZ)
+            
+        # 2. TIMEZONE LAW: CONVERT TO LOCAL FOR DISPLAY ("Local on the Glass")
+        df['dt'] = df['dt'].dt.tz_convert(config.TZ_LOCAL)
             
         df = df.drop_duplicates(subset=['dt'])
     return df
@@ -69,11 +93,13 @@ def calculate_indicators(df):
 def get_signal_events():
     con = duckdb.connect(str(config.DB_FILE))
     try:
-        query = f"SELECT date, entry_timestamp_utc, xsp_price FROM {config.TBL_MANIFEST} ORDER BY date DESC"
+        # Sort by latest signals
+        query = f"SELECT date, entry_timestamp_utc, xsp_price FROM {config.TBL_MANIFEST} ORDER BY entry_timestamp_utc DESC"
         df = con.execute(query).df()
     except Exception: return []
     con.close()
     
+    # We display the UTC Date, but the ID is the timestamp
     return [{'label': f"{row['date']} | Est. ATM: ${row['xsp_price']:.2f}", 'value': row['entry_timestamp_utc']} for _, row in df.iterrows()]
 
 def get_tickers_for_event(event_ts):
@@ -101,15 +127,15 @@ def get_tickers_for_event(event_ts):
         con.close()
         return [], None
 
-# ==========================================
-# 3. LAYOUT (Unified Design System)
-# ==========================================
+# ==============================================================================
+# 4. LAYOUT (Unified Design System)
+# ==============================================================================
 layout = dbc.Container([
     # HEADER
     dbc.Row([
         dbc.Col([
             html.H6("TOOL ID: 3", className="text-muted mb-0"),
-            html.H2("ANALYSIS DASHBOARD", className="display-6 fw-bold text-info"), # Blue Theme for History
+            html.H2("ANALYSIS DASHBOARD", className="display-6 fw-bold text-info"),
             html.Hr(className="my-2")
         ], width=12)
     ], className="mb-4"),
@@ -139,22 +165,22 @@ layout = dbc.Container([
         ], width=12)
     ]),
 
-    # GRAPH (The Original Complex Chart)
+    # GRAPH
     dbc.Row([
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
                     dcc.Graph(id='an-replay-chart', style={'height': '1200px'})
-                ], className="p-1") # Minimal padding for max chart space
+                ], className="p-1") 
             ], className="shadow mb-5")
         ], width=12)
     ])
 
 ], fluid=True)
 
-# ==========================================
-# 4. CALLBACKS (Restored Logic)
-# ==========================================
+# ==============================================================================
+# 5. CALLBACKS
+# ==============================================================================
 @callback(
     [Output('an-strike-selector', 'options'), Output('an-strike-selector', 'value'), Output('an-strike-selector', 'disabled')],
     [Input('an-event-selector', 'value')]
@@ -192,11 +218,12 @@ def update_chart(ts, ticker):
         opt_df = con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df()
         opt_df = clean_df(opt_df)
         
-        # VIX Indicators (60 day lookback for calculation)
+        # VIX Indicators (60 day lookback)
         start_date = str(trade_date - timedelta(days=60))
         vix_raw = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) BETWEEN '{start_date}' AND '{trade_date}' ORDER BY datetime_utc ASC").df()
         vix_raw = clean_df(vix_raw)
         vix_raw = calculate_indicators(vix_raw)
+        # Filter strictly for display date after calculation
         vix_plot = vix_raw[vix_raw['dt'].dt.date == trade_date].copy()
         
     except Exception as e:
@@ -208,8 +235,11 @@ def update_chart(ts, ticker):
     if opt_df.empty: return go.Figure(), "No Option Data Found"
 
     # --- ENTRY & P&L LOGIC ---
-    signal_dt = pd.to_datetime(ts, unit='ms', utc=True)
-    entry_slice = opt_df[opt_df['dt'] >= signal_dt]
+    # Signal Timestamp is UTC. We need to convert to Local for comparison because clean_df converted DFs to Local.
+    signal_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
+    signal_dt_local = signal_dt_utc.tz_convert(config.TZ_LOCAL)
+    
+    entry_slice = opt_df[opt_df['dt'] >= signal_dt_local]
     
     if not entry_slice.empty:
         entry_row = entry_slice.iloc[0]
@@ -231,7 +261,7 @@ def update_chart(ts, ticker):
         row_heights=[0.4, 0.3, 0.15, 0.15], 
         vertical_spacing=0.03,
         specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
-        subplot_titles=("Context: SPX vs /ES Futures", "Strategy: Option Price vs P&L", "VIX MACD (Momentum)", "VIX RSI (Trend)")
+        subplot_titles=("Context: SPX vs /ES Futures (Local Time)", "Strategy: Option Price vs P&L", "VIX MACD (Momentum)", "VIX RSI (Trend)")
     )
 
     # ROW 1: SPX & FUTURES
@@ -252,9 +282,8 @@ def update_chart(ts, ticker):
 
     # ROW 3: VIX MACD
     if not vix_plot.empty:
-        # Custom Color Logic for Histogram
         vix_plot['hist_prev'] = vix_plot['hist'].shift(1)
-        colors = ['#26A69A' if v >= 0 else '#EF5350' for v in vix_plot['hist']] # Simplified color logic for performance
+        colors = ['#26A69A' if v >= 0 else '#EF5350' for v in vix_plot['hist']] 
         
         fig.add_trace(go.Bar(x=vix_plot['dt'], y=vix_plot['hist'], name="Hist", marker_color=colors), row=3, col=1)
         fig.add_trace(go.Scatter(x=vix_plot['dt'], y=vix_plot['macd'], name="MACD", line=dict(color='#2962FF', width=1.5)), row=3, col=1)

@@ -1,61 +1,82 @@
+import sys
+import os
 import dash
 from dash import dcc, html, Input, Output, register_page, callback
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
-import pytz
-import logging
+from pathlib import Path
 
-# ==========================================
-# 1. SETUP
-# ==========================================
+# ==============================================================================
+# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# ==============================================================================
+# We are in: quant-trading-pipeline/src/tools/
+# We need to reach: quant-trading-pipeline/ (Root)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Add Root to System Path to allow imports from 'src.utils'
+sys.path.append(str(ROOT_DIR))
+
+from src.utils import config
+from src.utils.logger import get_logger
+
+# ==============================================================================
+# 2. SETUP
+# ==============================================================================
 register_page(__name__, path='/live', name='Live Ops')
+logger = get_logger("LiveOps")
 
-logger = logging.getLogger("LiveOps")
-TZ_LOCAL = pytz.timezone('US/Pacific')
-TZ_NY = pytz.timezone('America/New_York')
-
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
+# ==============================================================================
+# 3. HELPER FUNCTIONS
+# ==============================================================================
 def fetch_live_data():
     """
     Fetches the last 1 day of 5-minute bars for SPX and VIX.
+    ENFORCES TIMEZONE LAW: Returns data localized to Config.TZ_LOCAL.
     """
     try:
         # Fetch both tickers at once
+        # yfinance returns DatetimeIndex (usually localized to NY or UTC)
         df = yf.download(['^GSPC', '^VIX'], period='1d', interval='5m', progress=False)
         
         if df.empty: return None, None
         
-        # Flatten MultiIndex if present
+        # Flatten MultiIndex if present (Handling yfinance format variations)
         if isinstance(df.columns, pd.MultiIndex):
-            spx = df['Close']['^GSPC'].dropna()
-            vix = df['Close']['^VIX'].dropna()
-            
-            # Get full OHLC for SPX chart
+            # Extract SPX OHLC
             spx_ohlc = pd.DataFrame({
                 'Open': df['Open']['^GSPC'],
                 'High': df['High']['^GSPC'],
                 'Low': df['Low']['^GSPC'],
                 'Close': df['Close']['^GSPC']
             }).dropna()
+            
+            # Extract VIX Close
+            vix_close = df['Close']['^VIX'].dropna().iloc[-1]
+            
         else:
-            # Fallback if single ticker (rare)
+            # Fallback (rare single ticker case, unlikely with list request)
             return None, None
+            
+        # --- TIMEZONE CONVERSION (CRITICAL) ---
+        # 1. Ensure UTC awareness (if naive, assume NY as per yfinance standard)
+        if spx_ohlc.index.tz is None:
+            spx_ohlc.index = spx_ohlc.index.tz_localize(config.TZ_NY)
+            
+        # 2. Convert to LOCAL (Glass)
+        spx_ohlc.index = spx_ohlc.index.tz_convert(config.TZ_LOCAL)
 
-        return spx_ohlc, vix.iloc[-1]
+        return spx_ohlc, vix_close
         
     except Exception as e:
         logger.error(f"Live Data Error: {e}")
         return None, None
 
-# ==========================================
-# 3. LAYOUT
-# ==========================================
+# ==============================================================================
+# 4. LAYOUT
+# ==============================================================================
 layout = dbc.Container([
     
     # HEADER
@@ -143,9 +164,9 @@ layout = dbc.Container([
 
 ], fluid=True)
 
-# ==========================================
-# 4. LOGIC
-# ==========================================
+# ==============================================================================
+# 5. LOGIC
+# ==============================================================================
 @callback(
     [Output('live-chart', 'figure'),
      Output('live-target-strike', 'children'),
@@ -157,10 +178,10 @@ layout = dbc.Container([
 )
 def update_live_cockpit(n, refresh_clicks):
     # 1. Clock
-    now = datetime.now(TZ_LOCAL)
+    now = datetime.now(config.TZ_LOCAL)
     time_str = now.strftime("%H:%M:%S PST")
     
-    # 2. Fetch Data
+    # 2. Fetch Data (Already Localized)
     spx_ohlc, current_vix = fetch_live_data()
     
     if spx_ohlc is None or spx_ohlc.empty:
@@ -172,8 +193,6 @@ def update_live_cockpit(n, refresh_clicks):
     current_spx = spx_ohlc['Close'].iloc[-1]
     
     # Calculate XSP Equivalent ATM Strike (SPX / 10)
-    # XSP strikes are integers (e.g., 580, 581). SPX is ~5800.
-    # XSP Price = SPX / 10.
     xsp_ref_price = current_spx / 10.0
     atm_strike = round(xsp_ref_price) 
     
@@ -189,14 +208,13 @@ def update_live_cockpit(n, refresh_clicks):
     ))
     
     # ATM Line (Theoretical Target)
-    # We project the strike back to SPX terms (Strike * 10) for the visual
     strike_line_spx = atm_strike * 10
     fig.add_hline(y=strike_line_spx, line_dash="dash", line_color="#00E676", annotation_text="ATM TARGET")
 
     fig.update_layout(
         template="plotly_dark",
         height=600,
-        title=f"S&P 500 Intraday (5m) | {spx_ohlc.index[-1].strftime('%H:%M')}",
+        title=f"S&P 500 Intraday (5m) | {spx_ohlc.index[-1].strftime('%H:%M PST')}",
         margin=dict(l=40, r=40, t=40, b=40),
         xaxis_rangeslider_visible=False,
         showlegend=False

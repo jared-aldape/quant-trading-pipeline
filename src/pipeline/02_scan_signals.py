@@ -1,6 +1,20 @@
+import sys
+import os
 import duckdb
 import pandas as pd
 import numpy as np
+from pathlib import Path
+
+# ==============================================================================
+# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# ==============================================================================
+# We are in: quant-trading-pipeline/src/pipeline/
+# We need to reach: quant-trading-pipeline/ (Root)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Add Root to System Path to allow imports from 'src.utils'
+sys.path.append(str(ROOT_DIR))
+
 from src.utils import config
 from src.utils.logger import get_logger
 
@@ -33,13 +47,14 @@ def scan_signals():
     log.info(f"🔌 Connecting to Vault: {config.DB_FILE}")
     con = duckdb.connect(str(config.DB_FILE))
     
-    # 1. CLEAR OLD DATA
+    # 1. CLEAR OLD DATA (Integrity Law: Re-scan to ensure purity)
     con.execute(f"DELETE FROM {config.TBL_MANIFEST}")
     log.info("🧹 Cleared old manifest entries.")
 
-    # 2. LOAD VIX DATA
+    # 2. LOAD VIX DATA (UTC)
     log.info("📈 Loading VIX data...")
     try:
+        # We order by datetime_utc to ensure technicals are calculated chronologically
         vix_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker = 'VIX' ORDER BY datetime_utc ASC").df()
     except Exception as e:
         log.error(f"❌ Database Error: {e}")
@@ -64,16 +79,20 @@ def scan_signals():
     if not signals.empty:
         manifest_data = pd.DataFrame()
         
-        # FIX: Convert Microseconds (from DB) to Milliseconds (for PK)
-        # datetime64[us] -> int64 gives microseconds. Divide by 1000 -> milliseconds.
-        manifest_data['entry_timestamp_utc'] = signals['datetime_utc'].astype('int64') // 1000
+        # --- TIMEZONE LAW ENFORCEMENT ---
+        # Generate ID using explicit UTC timestamp (Milliseconds).
+        manifest_data['entry_timestamp_utc'] = signals['datetime_utc'].apply(lambda x: int(x.timestamp() * 1000))
         
+        # Log the Date (UTC) for partition/reference
         manifest_data['date'] = signals['datetime_utc'].dt.date
+        
         manifest_data['signal_type'] = 'VIX_MACD_BEAR_CROSS'
         manifest_data['vix_close'] = signals['close']
         manifest_data['vix_rsi'] = signals['vix_rsi']
         manifest_data['vix_macd'] = signals['vix_macd']
-        manifest_data['xsp_price'] = 0.0 # Placeholder
+        
+        # Placeholder for XSP Price (filled by Backtester/Simulator)
+        manifest_data['xsp_price'] = 0.0 
 
         # Write to DB
         con.register('df_signals', manifest_data)

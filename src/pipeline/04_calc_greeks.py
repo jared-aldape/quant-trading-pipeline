@@ -1,7 +1,21 @@
+import sys
+import os
 import duckdb
 import pandas as pd
 import numpy as np
 from scipy.stats import norm
+from pathlib import Path
+
+# ==============================================================================
+# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# ==============================================================================
+# We are in: quant-trading-pipeline/src/pipeline/
+# We need to reach: quant-trading-pipeline/ (Root)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Add Root to System Path to allow imports from 'src.utils'
+sys.path.append(str(ROOT_DIR))
+
 from src.utils import config
 from src.utils.logger import get_logger
 
@@ -14,6 +28,9 @@ def black_scholes_call(S, K, T, r, sigma):
     return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
 
 def calculate_iv_newton(price, S, K, T, r):
+    """
+    Newton-Raphson method to imply volatility from price.
+    """
     sigma = 0.5
     for i in range(10):
         price_est = black_scholes_call(S, K, T, r, sigma)
@@ -32,14 +49,25 @@ def calculate_greeks(row):
         K = row['strike']
         r = row['risk_free_rate']
         
+        # 1. Handle Current Time (Ensure UTC)
+        # We explicitly convert to UTC to match the Timezone Law
         if row['datetime_utc'].tz is None:
-            current_dt = row['datetime_utc'].tz_localize('UTC')
+            current_dt = row['datetime_utc'].tz_localize(config.TZ_UTC)
         else:
-            current_dt = row['datetime_utc']
+            current_dt = row['datetime_utc'].tz_convert(config.TZ_UTC)
             
-        exp_dt = pd.to_datetime(row['expiration']).tz_localize('UTC') + pd.Timedelta(hours=20)
+        # 2. Handle Expiry Time (DST-Aware Fix)
+        # Logic: Expiration is always 4:00 PM ET (16:00).
+        # We localize to NY first to let Pandas handle the DST offset (UTC-4 vs UTC-5)
+        exp_date = pd.to_datetime(row['expiration'])
+        exp_ny = exp_date.tz_localize(config.TZ_NY) + pd.Timedelta(hours=16)
         
+        # Then convert to UTC for the "Time to Expiry" math
+        exp_dt = exp_ny.tz_convert(config.TZ_UTC)
+        
+        # Calculate Time to Expiry (in Years)
         T = (exp_dt - current_dt).total_seconds() / (3600 * 24 * 365)
+        
         if T <= 0.001: return pd.Series([None]*5)
 
         price = row['close']
@@ -55,7 +83,7 @@ def calculate_greeks(row):
         theta = (- (S * norm.pdf(d1) * iv) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
 
         return pd.Series([iv, delta, gamma, vega, theta])
-    except:
+    except Exception as e:
         return pd.Series([None]*5)
 
 def run_greek_calculation():
@@ -70,9 +98,8 @@ def run_greek_calculation():
         SELECT date, rate/100.0 as rate_decimal FROM {config.TBL_IRX}
     """)
     
-    # 2. CORRECTED ASOF JOIN QUERY
-    # We filter SPX first to make the join cleaner
-    # We use '>=' for ASOF JOIN to find the most recent SPX price relative to Option time
+    # 2. QUERY JOIN
+    # Ensure SPX and Option times are aligned
     query = f"""
     SELECT 
         o.datetime_utc,
@@ -100,7 +127,7 @@ def run_greek_calculation():
         log.info("✅ No options need Greek calculation.")
         return
 
-    # Handle missing IRX rates
+    # Handle missing IRX rates (Fallback to 4.5%)
     missing_rates = df['risk_free_rate'].isna().sum()
     if missing_rates > 0:
         log.warning(f"⚠️ {missing_rates} rows missing IRX rate. Using 4.5% fallback.")
@@ -108,6 +135,7 @@ def run_greek_calculation():
 
     log.info(f"🧮 Calculating Greeks for {len(df)} rows...")
     
+    # Ensure correct types for Pandas apply
     df['datetime_utc'] = pd.to_datetime(df['datetime_utc'])
     df['expiration'] = pd.to_datetime(df['expiration'])
     
@@ -119,6 +147,7 @@ def run_greek_calculation():
     log.info("💾 Saving Greeks to Database...")
     con.register('greeks_source', result)
     
+    # Update back to the table
     update_q = f"""
     UPDATE {config.TBL_OPTIONS}
     SET 

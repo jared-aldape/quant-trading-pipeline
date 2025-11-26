@@ -1,4 +1,18 @@
+import sys
+import os
 import duckdb
+from pathlib import Path
+
+# ==============================================================================
+# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# ==============================================================================
+# We are in: quant-trading-pipeline/src/pipeline/
+# We need to reach: quant-trading-pipeline/ (Root)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Add Root to System Path to allow imports from 'src.utils'
+sys.path.append(str(ROOT_DIR))
+
 from src.utils import config
 from src.utils.logger import get_logger
 
@@ -31,6 +45,7 @@ def initialize_database():
     )""")
 
     # 3. OPTIONS (XSP)
+    # UPDATED: Matches the composite key used in 03_fetch_options.py
     log.info(f"🔨 Initializing: {config.TBL_OPTIONS}")
     con.execute(f"DROP TABLE IF EXISTS {config.TBL_OPTIONS}")
     con.execute(f"""
@@ -40,7 +55,7 @@ def initialize_database():
         expiration DATE, strike DOUBLE, type VARCHAR,
         open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume BIGINT,
         iv DOUBLE, delta DOUBLE, gamma DOUBLE, vega DOUBLE, theta DOUBLE,
-        PRIMARY KEY (datetime_utc, ticker)
+        PRIMARY KEY (datetime_utc, ticker, strike, type, expiry)
     )""")
 
     # 4. RISK FREE RATE (IRX)

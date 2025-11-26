@@ -1,9 +1,22 @@
+import sys
+import os
 import requests
 import pandas as pd
 import duckdb
 import time
-import sys
 from datetime import datetime, timedelta
+from pathlib import Path
+
+# ==============================================================================
+# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# ==============================================================================
+# We are in: quant-trading-pipeline/src/pipeline/
+# We need to reach: quant-trading-pipeline/ (Root)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Add Root to System Path to allow imports from 'src.utils'
+sys.path.append(str(ROOT_DIR))
+
 from src.utils import config
 from src.utils.logger import get_logger
 
@@ -49,7 +62,18 @@ def get_polygon_data(ticker, date_str):
             
         df = pd.DataFrame(data['results'])
         df.rename(columns={'t': 'datetime_utc', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
+        
+        # --- TIMEZONE TRANSFORMATION: ENFORCING THE TIMEZONE LAW ---
+        # 1. Convert UNIX ms to Datetime Object (Explicitly UTC)
         df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms', utc=True)
+        
+        # 2. Safety Check: If for any reason it's naive (e.g. source change), Localize from NY.
+        if df['datetime_utc'].dt.tz is None:
+             df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(config.TZ_NY)
+        
+        # 3. Final Conversion to Vault Standard (UTC)
+        df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_UTC)
+
         df['ticker'] = ticker
         return df
         
@@ -109,8 +133,6 @@ def fetch_options():
         price, source = get_underlying_price(con, signal_ts)
         
         if price is None:
-            # Log on same line to save space, or distinct warning
-            # log.warning(f"{progress_str} ⚠️ No Price Data for {signal_ts}. Skipping.")
             continue
             
         xsp_price = price / 10.0

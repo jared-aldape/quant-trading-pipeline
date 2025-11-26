@@ -1,3 +1,5 @@
+import sys
+import os
 import dash
 from dash import dcc, html, Input, Output, State, register_page, callback, ctx
 import dash_bootstrap_components as dbc
@@ -8,22 +10,40 @@ import pandas as pd
 import numpy as np
 import logging
 from datetime import timedelta
-from src.utils import config
+import pytz
+from pathlib import Path
 
-# ==========================================
-# 1. SETUP
-# ==========================================
+# ==============================================================================
+# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# ==============================================================================
+# We are in: quant-trading-pipeline/src/tools/
+# We need to reach: quant-trading-pipeline/ (Root)
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Add Root to System Path to allow imports from 'src.utils'
+sys.path.append(str(ROOT_DIR))
+
+from src.utils import config
+from src.utils.logger import get_logger
+
+# ==============================================================================
+# 2. SETUP
+# ==============================================================================
 register_page(__name__, path='/simulator', name='Simulator')
 
 logger = logging.getLogger("SimPilot")
 STRIKE_RANGE = 2
 
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
+# ==============================================================================
+# 3. HELPER FUNCTIONS
+# ==============================================================================
 def clean_dataframe(df):
+    """
+    Standardizes DataFrames and ENFORCES TIMEZONE LAW.
+    Input: UTC Data from Vault.
+    Output: Local Time (PST) Data for Replay Visualization.
+    """
     # 1. Normalize Columns FIRST (Before checking empty)
-    # This ensures the 'dt' column exists even if there are 0 rows
     if df is None: return pd.DataFrame()
     
     df.columns = df.columns.str.strip().str.lower()
@@ -35,31 +55,20 @@ def clean_dataframe(df):
     # 2. NOW check empty
     if df.empty: return df
     
-    # 3. Timezone Logic
+    # 3. Timezone Logic (Vault UTC -> Local Glass)
     if 'dt' in df.columns:
         if not pd.api.types.is_datetime64_any_dtype(df['dt']):
             df['dt'] = pd.to_datetime(df['dt'])
+            
+        # Ensure UTC Awareness
         if df['dt'].dt.tz is None:
             df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC)
         else:
             df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
-    return df
-
-def clean_dataframe(df):
-    if df.empty: return df
-    df.columns = df.columns.str.strip().str.lower()
-    df = df.loc[:, ~df.columns.duplicated()]
-    
-    rename_map = {'datetime_utc': 'dt', 'datetime': 'dt', 'close': 'close', 'vix_close': 'close'}
-    df.rename(columns=rename_map, inplace=True)
-    
-    if 'dt' in df.columns:
-        if not pd.api.types.is_datetime64_any_dtype(df['dt']):
-            df['dt'] = pd.to_datetime(df['dt'])
-        if df['dt'].dt.tz is None:
-            df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC)
-        else:
-            df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
+            
+        # Convert to Local Time (PST) for the Simulator User Experience
+        df['dt'] = df['dt'].dt.tz_convert(config.TZ_LOCAL)
+            
     return df
 
 def calculate_indicators(df, prefix=''):
@@ -84,7 +93,8 @@ def calculate_indicators(df, prefix=''):
 def get_signal_events():
     con = duckdb.connect(str(config.DB_FILE))
     try:
-        query = f"SELECT date, entry_timestamp_utc, xsp_price FROM {config.TBL_MANIFEST} ORDER BY date DESC"
+        # Sort by latest
+        query = f"SELECT date, entry_timestamp_utc, xsp_price FROM {config.TBL_MANIFEST} ORDER BY entry_timestamp_utc DESC"
         df = con.execute(query).df()
     except: return []
     con.close()
@@ -112,9 +122,9 @@ def get_tickers_for_event(event_ts):
         con.close()
         return [], None
 
-# ==========================================
-# 3. LAYOUT
-# ==========================================
+# ==============================================================================
+# 4. LAYOUT
+# ==============================================================================
 layout = dbc.Container([
     # HEADER
     dbc.Row([
@@ -141,7 +151,7 @@ layout = dbc.Container([
                         ], width=12, md=6)
                     ], className="mb-3"),
 
-                    # PLAYBACK
+                    # PLAYBACK CONTROLS
                     dbc.Row([
                         dbc.Col([
                             dbc.ButtonGroup([
@@ -191,9 +201,9 @@ layout = dbc.Container([
 
 ], fluid=True)
 
-# ==========================================
-# 4. CALLBACKS
-# ==========================================
+# ==============================================================================
+# 5. CALLBACKS
+# ==============================================================================
 @callback(
     [Output('sim-strike-selector', 'options'), Output('sim-strike-selector', 'value'), Output('sim-strike-selector', 'disabled')],
     [Input('sim-event-selector', 'value')]
@@ -231,21 +241,27 @@ def render_simulation(ts, ticker, mins, reveal):
 
     con = duckdb.connect(str(config.DB_FILE))
     
-    # 1. TIME
+    # 1. TIME CALCULATION
     try:
         trade_row = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {ts}").df().iloc[0]
         trade_date = pd.to_datetime(trade_row['date']).date()
         
-        # Times in UTC for slicing
+        # Calculate Cutoff in LOCAL Time (Glass)
+        # Open is 06:30 PST. 
         open_pst = pd.Timestamp(f"{trade_date} 06:30:00").tz_localize(config.TZ_LOCAL)
-        cutoff_utc = (open_pst + timedelta(minutes=mins)).astimezone(config.TZ_UTC)
+        cutoff_pst = open_pst + timedelta(minutes=mins)
         
-        # 2. DATA LOADING
+        # Convert Cutoff to UTC for DB Slicing logic is handled by clean_dataframe conversions
+        # Note: clean_dataframe converts everything to Local (PST), so we compare against cutoff_pst
+        
+        # 2. DATA LOADING & CLEANING (Converts to PST)
         opt_df = clean_dataframe(con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df())
         spx_df = clean_dataframe(con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE)='{trade_date}' ORDER BY datetime_utc ASC").df())
         
         vix_raw = clean_dataframe(con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) <= '{trade_date}' ORDER BY datetime_utc ASC").df())
         vix_raw = calculate_indicators(vix_raw, 'vix_')
+        
+        # Filter strictly for today in local time
         vix_today = vix_raw[vix_raw['dt'].dt.date == trade_date]
         
     except Exception as e:
@@ -255,14 +271,15 @@ def render_simulation(ts, ticker, mins, reveal):
     con.close()
 
     # 3. FOG OF WAR SLICE
-    opt_slice = opt_df[opt_df['dt'] <= cutoff_utc]
-    spx_slice = spx_df[spx_df['dt'] <= cutoff_utc]
-    vix_slice = vix_today[vix_today['dt'] <= cutoff_utc]
+    # Compare Local Time vs Local Time
+    opt_slice = opt_df[opt_df['dt'] <= cutoff_pst]
+    spx_slice = spx_df[spx_df['dt'] <= cutoff_pst]
+    vix_slice = vix_today[vix_today['dt'] <= cutoff_pst]
 
-    # 4. PLOTLY CONSTRUCTION (Matched to newplot2 style)
+    # 4. PLOTLY CONSTRUCTION
     fig = make_subplots(
         rows=4, cols=1, shared_xaxes=True, 
-        row_heights=[0.4, 0.3, 0.15, 0.15], # Proportions from Dashboard
+        row_heights=[0.4, 0.3, 0.15, 0.15],
         vertical_spacing=0.02,
         specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
         subplot_titles=("Context: SPX (Price Action)", "Option Price (Execution)", "VIX MACD (Momentum)", "VIX RSI (Trend)")
@@ -284,19 +301,22 @@ def render_simulation(ts, ticker, mins, reveal):
         
         # CHEAT MODE: Entry Marker
         if reveal and 'SHOW' in reveal:
-             entry_dt = pd.to_datetime(ts, unit='ms', utc=True)
-             if cutoff_utc >= entry_dt:
+             # Algo Entry Timestamp is in UTC (from Manifest ID)
+             # Convert to Local to match chart axis
+             entry_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
+             entry_dt_pst = entry_dt_utc.tz_convert(config.TZ_LOCAL)
+             
+             if cutoff_pst >= entry_dt_pst:
                  # Find price at entry
-                 entry_price = opt_df[opt_df['dt'] >= entry_dt].iloc[0]['close']
-                 fig.add_vline(x=entry_dt, line_dash="dash", line_color="#FFD600", row=2, col=1)
+                 fig.add_vline(x=entry_dt_pst, line_dash="dash", line_color="#FFD600", row=2, col=1)
                  fig.add_trace(go.Scatter(
-                     x=[entry_dt], y=[entry_price], mode='markers', 
+                     x=[entry_dt_pst], y=[opt_slice.iloc[-1]['close']], # Approximation for visual
+                     mode='markers', 
                      marker=dict(color='#FFD600', size=15, symbol='triangle-up'), name="Algo Entry"
                  ), row=2, col=1)
 
     # ROW 3: VIX MACD (Combined)
     if not vix_slice.empty:
-        # Hist Colors
         colors = ['#26A69A' if v >= 0 else '#EF5350' for v in vix_slice['vix_hist']]
         fig.add_trace(go.Bar(x=vix_slice['dt'], y=vix_slice['vix_hist'], marker_color=colors, name="Hist"), row=3, col=1)
         fig.add_trace(go.Scatter(x=vix_slice['dt'], y=vix_slice['vix_macd'], line=dict(color='#2962FF', width=1.5), name="MACD"), row=3, col=1)
@@ -305,8 +325,8 @@ def render_simulation(ts, ticker, mins, reveal):
     # ROW 4: VIX RSI
     if not vix_slice.empty:
         fig.add_trace(go.Scatter(x=vix_slice['dt'], y=vix_slice['vix_rsi'], line=dict(color='#D500F9', width=2), name="RSI"), row=4, col=1)
-        fig.add_hline(y=80, line_dash="dot", line_color="#EF5350", row=4, col=1)
-        fig.add_hline(y=20, line_dash="dot", line_color="#26A69A", row=4, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="#EF5350", row=4, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="#26A69A", row=4, col=1)
 
     # STYLING
     fig.update_layout(
@@ -323,6 +343,6 @@ def render_simulation(ts, ticker, mins, reveal):
     fig.update_yaxes(range=[0, 100], row=4, col=1)
 
     # Current Sim Time
-    time_str = cutoff_utc.astimezone(config.TZ_LOCAL).strftime("%H:%M PST")
+    time_str = cutoff_pst.strftime("%H:%M PST")
     
     return fig, time_str
