@@ -43,7 +43,7 @@ def get_status_ui(status_type, message=None):
 # --- LAYOUT ---
 layout = dbc.Container([
     
-    # 1. CLEAN HEADER (Now with Tool ID: 1)
+    # 1. HEADER
     dbc.Row([
         dbc.Col([
             html.H6("TOOL ID: 1", className="text-muted mb-0"),
@@ -150,6 +150,7 @@ def execute_simulation(n, start, end, bal, pos, max_inv, tax, rth, atr, trail, a
         "--max_invest", str(max_inv), "--tax_rate", str(tax),
         "--atr_sensitivity", str(atr), "--trailing_stop_pct", str(trail / 100.0),
         "--enforce_rth", str(bool(rth)), "--archive_report", str(bool(archive)),
+        # FORENSIC MODE: Disable Risk Buckets
         "--stop_period_days", "9999", "--max_period_dd", "1.0"
     ]
 
@@ -163,7 +164,13 @@ def execute_simulation(n, start, end, bal, pos, max_inv, tax, rth, atr, trail, a
         else:
             return "ERR", "ERR", "ERR", "ERR", get_status_ui("crash"), "No JSON", full_output
 
-        formatted_logs = [html.Span(line + "\n", style={'color': '#ff5555'} if "SKIPPED" in line else {'color': '#00ff41'}) for line in log_text.splitlines()]
+        # LOG COLORING LOGIC (Updated)
+        formatted_logs = []
+        for line in log_text.splitlines():
+            style = {'color': '#00ff41'} # Green default
+            if "SKIPPED" in line or "| -" in line: # Red for Skips and Loss
+                style = {'color': '#ff5555'}
+            formatted_logs.append(html.Span(line + "\n", style=style))
 
         if "error" in json_data:
              return "ERR", "ERR", "ERR", "ERR", get_status_ui("failure", "No Trades"), "", formatted_logs
