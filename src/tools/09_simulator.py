@@ -16,10 +16,6 @@ from pathlib import Path
 # ==============================================================================
 # 1. PATH CONSTITUTION
 # ==============================================================================
-# File is in: src/tools/09_simulator.py
-# .parents[0] = tools
-# .parents[1] = src
-# .parents[2] = PROJECT ROOT
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
@@ -36,29 +32,41 @@ STRIKE_RANGE = 2
 # ==============================================================================
 # 3. HELPER FUNCTIONS
 # ==============================================================================
-def clean_dataframe(df):
+def clean_dataframe(df, tz_source=config.TZ_UTC):
     """
     Standardizes DataFrames to UTC.
-    Does NOT convert to Local yet (we do that strictly for display).
+    Robustly handles Naive vs Aware timestamps.
     """
     if df is None or df.empty: return pd.DataFrame()
     
+    # 1. Normalize Columns
     df.columns = df.columns.str.strip().str.lower()
     df = df.loc[:, ~df.columns.duplicated()]
     
     rename_map = {'datetime_utc': 'dt', 'datetime': 'dt', 'close': 'close', 'vix_close': 'close'}
     df.rename(columns=rename_map, inplace=True)
     
-    if 'dt' in df.columns:
-        if not pd.api.types.is_datetime64_any_dtype(df['dt']):
-            df['dt'] = pd.to_datetime(df['dt'])
-            
-        # FORCE UTC for calculation consistency
-        if df['dt'].dt.tz is None:
-            df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC)
-        else:
-            df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
-            
+    if 'dt' not in df.columns: return pd.DataFrame()
+    
+    # 2. Convert to Datetime (Coerce errors to NaT)
+    if not pd.api.types.is_datetime64_any_dtype(df['dt']):
+        df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
+    
+    df = df.dropna(subset=['dt']) 
+    
+    # 3. Timezone Alignment
+    if df['dt'].dt.tz is None:
+        # If Naive, localize to the SOURCE
+        df['dt'] = df['dt'].dt.tz_localize(tz_source, ambiguous='NaT', nonexistent='shift_forward')
+    else:
+        # If already Aware, convert to SOURCE first (safety) then to UTC
+        df['dt'] = df['dt'].dt.tz_convert(tz_source)
+    
+    # Finally, Standardize EVERYTHING to UTC
+    df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
+    
+    # 4. Deduplicate & Sort
+    df = df.drop_duplicates(subset=['dt'])
     return df.sort_values('dt')
 
 def calculate_indicators(df, prefix=''):
@@ -104,10 +112,9 @@ def get_tickers_for_event(event_ts):
         
         for offset in range(-STRIKE_RANGE, STRIKE_RANGE + 1):
             strike = atm + offset
-            # Formatting ticker logic might need adjustment based on your data provider (ThetaData vs Polygon)
-            # Assuming standard OSI format: O:XSP251012C00400000
             ticker = f"O:XSP{date_str}C{int(strike*1000):08d}" 
             lbl = f"{ticker} ({'ATM' if offset==0 else 'OTM' if offset>0 else 'ITM'} ${strike})"
+            # FIXED TYPO: 'label': lbl
             tickers.append({'label': lbl, 'value': ticker})
             if offset == 0: best = ticker
             
@@ -138,11 +145,23 @@ layout = dbc.Container([
                     dbc.Row([
                         dbc.Col([
                             html.Label("1. Select Session"),
-                            dcc.Dropdown(id='sim-event-selector', options=get_signal_events(), clearable=False, className="mb-2")
+                            dcc.Dropdown(
+                                id='sim-event-selector', 
+                                options=get_signal_events(), 
+                                clearable=False, 
+                                className="mb-2", 
+                                style={'color': '#000000'}
+                            )
                         ], width=12, md=6),
                         dbc.Col([
                             html.Label("2. Select Strike"),
-                            dcc.Dropdown(id='sim-strike-selector', options=[], disabled=True, clearable=False)
+                            dcc.Dropdown(
+                                id='sim-strike-selector', 
+                                options=[], 
+                                disabled=True, 
+                                clearable=False, 
+                                style={'color': '#000000'}
+                            )
                         ], width=12, md=6)
                     ], className="mb-3"),
 
@@ -238,30 +257,50 @@ def render_simulation(ts, ticker, mins, reveal):
     
     try:
         # 1. ESTABLISH TIMELINE (The Anchor)
-        # We calculate Market Open in NY Time (09:30 ET), then convert to UTC.
-        # This handles DST transitions correctly automatically.
         trade_row = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {ts}").df().iloc[0]
-        trade_date = pd.to_datetime(trade_row['date']).date()
+        trade_date_str = str(pd.to_datetime(trade_row['date']).date())
         
-        # Define 9:30 AM in NY for that specific date
+        # A. Market Open in NY (For Slider Logic only)
         ny_tz = pytz.timezone("America/New_York")
-        market_open_ny = ny_tz.localize(pd.Timestamp(f"{trade_date} 09:30:00"))
+        market_open_ny = ny_tz.localize(pd.Timestamp(f"{trade_date_str} 09:30:00"))
         
-        # Calculate Cutoff in UTC (This is our "Fog of War" barrier)
+        # B. Cutoff in UTC (The Fog of War Barrier)
         cutoff_utc = (market_open_ny + timedelta(minutes=mins)).astimezone(pytz.utc)
         
+        # C. Day Clipper (Midnight Local -> UTC)
+        local_start_of_day = pd.Timestamp(f"{trade_date_str} 00:00:00").tz_localize(config.TZ_LOCAL)
+        clip_start_utc = local_start_of_day.astimezone(config.TZ_UTC)
+
         # 2. DATA LOADING (UTC)
-        # Load FULL day first to calc indicators correctly, THEN slice.
-        opt_df = clean_dataframe(con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df())
-        spx_df = clean_dataframe(con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE)='{trade_date}' ORDER BY datetime_utc ASC").df())
+        # OPTION DATA = UTC (Polygon)
+        opt_df = clean_dataframe(
+            con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df(),
+            tz_source=config.TZ_UTC
+        )
         
-        # VIX: Load context (up to end of day to calculate hist indicators, but we slice display later)
-        vix_raw = clean_dataframe(con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) <= '{trade_date}' ORDER BY datetime_utc ASC").df())
+        # SPX DATA = UTC (yfinance numbers in Vault are already UTC)
+        # FIXED: tz_source=config.TZ_UTC (prevents the 5hr double shift)
+        spx_df = clean_dataframe(
+            con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE)='{trade_date_str}' ORDER BY datetime_utc ASC").df(),
+            tz_source=config.TZ_UTC
+        )
+        
+        # VIX DATA = UTC (yfinance numbers in Vault are already UTC)
+        vix_raw = clean_dataframe(
+            con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) <= '{trade_date_str}' ORDER BY datetime_utc ASC").df(),
+            tz_source=config.TZ_UTC
+        )
         vix_raw = calculate_indicators(vix_raw, 'vix_')
         
-        # Filter VIX to just today for the chart
-        vix_today = vix_raw[vix_raw['dt'].dt.date == cutoff_utc.date()]
+        # --- APPLY THE DAY CLIPPER ---
+        # Filters out yesterday's tail so chart starts at 00:00 Local
+        opt_df = opt_df[opt_df['dt'] >= clip_start_utc]
+        spx_df = spx_df[spx_df['dt'] >= clip_start_utc]
+        vix_today = vix_raw[vix_raw['dt'] >= clip_start_utc]
         
+        # Further restrict VIX to Fog of War
+        vix_today = vix_today[vix_today['dt'].dt.date <= cutoff_utc.date()]
+
     except Exception as e:
         logger.error(f"Sim Render Error: {e}")
         con.close()
@@ -270,13 +309,12 @@ def render_simulation(ts, ticker, mins, reveal):
     con.close()
 
     # 3. FOG OF WAR (Slice Data)
-    # Filter using UTC timestamps.
-    opt_slice = opt_df[opt_df['dt'] <= cutoff_utc]
-    spx_slice = spx_df[spx_df['dt'] <= cutoff_utc]
-    vix_slice = vix_today[vix_today['dt'] <= cutoff_utc]
+    # Use .copy() to prevent SettingWithCopyWarning
+    opt_slice = opt_df[opt_df['dt'] <= cutoff_utc].copy()
+    spx_slice = spx_df[spx_df['dt'] <= cutoff_utc].copy()
+    vix_slice = vix_today[vix_today['dt'] <= cutoff_utc].copy()
 
     # 4. DISPLAY CONVERSION (Localize for Chart)
-    # Now that we've filtered, we convert to user's Local Time (PST) for display.
     if not opt_slice.empty: opt_slice['dt'] = opt_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
     if not spx_slice.empty: spx_slice['dt'] = spx_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
     if not vix_slice.empty: vix_slice['dt'] = vix_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
@@ -306,13 +344,12 @@ def render_simulation(ts, ticker, mins, reveal):
         ), row=2, col=1, secondary_y=False)
         
         if reveal and 'SHOW' in reveal:
-             # Algo Entry is stored in UTC. Convert to Local for display alignment.
              entry_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
+             
              if cutoff_utc >= entry_dt_utc:
                  entry_dt_local = entry_dt_utc.tz_convert(config.TZ_LOCAL)
                  fig.add_vline(x=entry_dt_local, line_dash="dash", line_color="#FFD600", row=2, col=1)
                  
-                 # Get price at entry moment if available
                  try:
                      price_at_entry = opt_df[opt_df['dt'] >= entry_dt_utc].iloc[0]['close']
                      fig.add_trace(go.Scatter(

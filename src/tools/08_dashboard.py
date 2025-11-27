@@ -16,8 +16,6 @@ from pathlib import Path
 # ==============================================================================
 # 1. PATH CONSTITUTION
 # ==============================================================================
-# We are in: quant-trading-pipeline/src/tools/
-# We need to reach: quant-trading-pipeline/ (Root)
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
@@ -25,10 +23,8 @@ from src.utils import config
 from src.utils.logger import get_logger
 
 # ==============================================================================
-# 2. MPA PAGE REGISTRATION (FIX: Reverted to MPA Page)
+# 2. MPA PAGE REGISTRATION
 # ==============================================================================
-# REMOVED: app = Dash(...)
-# ADDED: MPA Page Registration
 register_page(__name__, path='/analysis', name='Analysis')
 logger = get_logger("Dashboard")
 UTC_TZ = pytz.utc
@@ -42,7 +38,7 @@ def clean_df(df):
     Standardizes DataFrames for display.
     ENFORCES TIMEZONE LAW: Converts UTC Storage -> Local Display (PST).
     """
-    if df.empty: return df
+    if df is None or df.empty: return pd.DataFrame()
     
     # Normalize Columns
     df.columns = df.columns.str.strip().str.lower()
@@ -51,21 +47,26 @@ def clean_df(df):
     rename_map = {'datetime_utc': 'dt', 'datetime': 'dt', 'date': 'dt', 'timestamp': 'dt', 'close': 'close'}
     df.rename(columns=rename_map, inplace=True)
     
-    if 'dt' in df.columns:
-        if not pd.api.types.is_datetime64_any_dtype(df['dt']):
-            df['dt'] = pd.to_datetime(df['dt'])
+    if 'dt' not in df.columns: return pd.DataFrame()
+
+    # 1. Convert to Datetime
+    if not pd.api.types.is_datetime64_any_dtype(df['dt']):
+        df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
+    
+    df = df.dropna(subset=['dt'])
+    
+    # 2. Ensure UTC Awareness (Vault Standard)
+    if df['dt'].dt.tz is None:
+        # Assume Vault is UTC
+        df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC, ambiguous='NaT')
+    else:
+        df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
         
-        # 1. Ensure UTC Awareness (Vault Standard)
-        if df['dt'].dt.tz is None:
-            df['dt'] = df['dt'].dt.tz_localize(UTC_TZ)
-        else:
-            df['dt'] = df['dt'].dt.tz_convert(UTC_TZ)
-            
-        # 2. TIMEZONE LAW: CONVERT TO LOCAL FOR DISPLAY ("Local on the Glass")
-        df['dt'] = df['dt'].dt.tz_convert(config.TZ_LOCAL)
-            
-        df = df.drop_duplicates(subset=['dt'])
-    return df
+    # 3. TIMEZONE LAW: CONVERT TO LOCAL FOR DISPLAY ("Local on the Glass")
+    df['dt'] = df['dt'].dt.tz_convert(config.TZ_LOCAL)
+        
+    df = df.drop_duplicates(subset=['dt'])
+    return df.sort_values('dt')
 
 def calculate_indicators(df):
     if 'close' not in df.columns: return df
@@ -145,11 +146,23 @@ layout = dbc.Container([
                     dbc.Row([
                         dbc.Col([
                             html.Label("1. Signal Event"),
-                            dcc.Dropdown(id='an-event-selector', options=get_signal_events(), clearable=False, className="mb-2")
+                            dcc.Dropdown(
+                                id='an-event-selector', 
+                                options=get_signal_events(), 
+                                clearable=False, 
+                                className="mb-2",
+                                style={'color': '#000000'}
+                            )
                         ], width=12, md=6),
                         dbc.Col([
                             html.Label("2. Strike Selection"),
-                            dcc.Dropdown(id='an-strike-selector', options=[], disabled=True, clearable=False)
+                            dcc.Dropdown(
+                                id='an-strike-selector', 
+                                options=[], 
+                                disabled=True, 
+                                clearable=False,
+                                style={'color': '#000000'}
+                            )
                         ], width=12, md=6)
                     ])
                 ])
@@ -199,29 +212,43 @@ def update_chart(ts, ticker):
     # --- DATA LOADING ---
     try:
         trade_info = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {ts}").df().iloc[0]
-        trade_date = pd.to_datetime(trade_info['date']).date()
+        trade_date_str = str(pd.to_datetime(trade_info['date']).date())
+        
+        # --- RTH CLIPPER LOGIC (START 09:30 EST, END 16:00 EST) ---
+        # 1. Define Market Open/Close in NY Time
+        ny_open = pd.Timestamp(f"{trade_date_str} 09:30:00").tz_localize(config.TZ_NY)
+        ny_close = pd.Timestamp(f"{trade_date_str} 16:00:00").tz_localize(config.TZ_NY)
+        
+        # 2. Convert to LOCAL Time (for filtering the clean_df output)
+        rth_start_local = ny_open.tz_convert(config.TZ_LOCAL)
+        rth_end_local = ny_close.tz_convert(config.TZ_LOCAL)
         
         # SPX
-        spx_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE) = '{trade_date}' ORDER BY datetime_utc ASC").df()
+        spx_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE) = '{trade_date_str}' ORDER BY datetime_utc ASC").df()
         spx_df = clean_df(spx_df)
+        spx_df = spx_df[(spx_df['dt'] >= rth_start_local) & (spx_df['dt'] <= rth_end_local)] # RTH Clip
         
         # Futures (Optional)
         try:
-            es_df = con.execute(f"SELECT * FROM {config.TBL_FUTURES} WHERE ticker='ES' AND CAST(datetime_utc AS DATE) = '{trade_date}' ORDER BY datetime_utc ASC").df()
+            es_df = con.execute(f"SELECT * FROM {config.TBL_FUTURES} WHERE ticker='ES' AND CAST(datetime_utc AS DATE) = '{trade_date_str}' ORDER BY datetime_utc ASC").df()
             es_df = clean_df(es_df)
+            es_df = es_df[(es_df['dt'] >= rth_start_local) & (es_df['dt'] <= rth_end_local)] # RTH Clip
         except: es_df = pd.DataFrame()
 
         # Options
         opt_df = con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df()
         opt_df = clean_df(opt_df)
+        opt_df = opt_df[(opt_df['dt'] >= rth_start_local) & (opt_df['dt'] <= rth_end_local)] # RTH Clip
         
-        # VIX Indicators (60 day lookback)
-        start_date = str(trade_date - timedelta(days=60))
-        vix_raw = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) BETWEEN '{start_date}' AND '{trade_date}' ORDER BY datetime_utc ASC").df()
+        # VIX Indicators
+        start_date = str(pd.to_datetime(trade_date_str) - timedelta(days=60))
+        vix_raw = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) BETWEEN '{start_date}' AND '{trade_date_str}' ORDER BY datetime_utc ASC").df()
         vix_raw = clean_df(vix_raw)
         vix_raw = calculate_indicators(vix_raw)
-        # Filter strictly for display date after calculation
-        vix_plot = vix_raw[vix_raw['dt'].dt.date == trade_date].copy()
+        
+        # Filter for display date AND apply RTH clipper
+        vix_plot = vix_raw[vix_raw['dt'].dt.date == pd.to_datetime(trade_date_str).date()].copy()
+        vix_plot = vix_plot[(vix_plot['dt'] >= rth_start_local) & (vix_plot['dt'] <= rth_end_local)]
         
     except Exception as e:
         con.close()
@@ -232,7 +259,6 @@ def update_chart(ts, ticker):
     if opt_df.empty: return go.Figure(), "No Option Data Found"
 
     # --- ENTRY & P&L LOGIC ---
-    # Signal Timestamp is UTC. We need to convert to Local for comparison because clean_df converted DFs to Local.
     signal_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
     signal_dt_local = signal_dt_utc.tz_convert(config.TZ_LOCAL)
     
@@ -256,7 +282,7 @@ def update_chart(ts, ticker):
     fig = make_subplots(
         rows=4, cols=1, shared_xaxes=True, 
         row_heights=[0.4, 0.3, 0.15, 0.15], 
-        vertical_spacing=0.03,
+        vertical_spacing=0.08,
         specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
         subplot_titles=("Context: SPX vs /ES Futures (Local Time)", "Strategy: Option Price vs P&L", "VIX MACD (Momentum)", "VIX RSI (Trend)")
     )
@@ -298,8 +324,8 @@ def update_chart(ts, ticker):
         height=1200, 
         showlegend=True, 
         xaxis_rangeslider_visible=False,
-        margin=dict(t=30, b=30, l=60, r=60),
-        legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
+        margin=dict(t=50, b=50, l=60, r=60),
+        legend=dict(orientation="h", y=-0.05, x=0.5, xanchor="center")
     )
     
     fig.update_yaxes(title_text="Price", row=2, col=1, secondary_y=False)
@@ -307,5 +333,3 @@ def update_chart(ts, ticker):
     fig.update_yaxes(range=[0, 100], row=4, col=1)
 
     return fig, stats_text
-
-# REMOVED: if __name__ == "__main__": execution block
