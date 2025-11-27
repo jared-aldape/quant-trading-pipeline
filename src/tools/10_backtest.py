@@ -9,13 +9,14 @@ from datetime import datetime, time
 from pathlib import Path
 
 # ==============================================================================
-# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# 1. PATH CONSTITUTION
 # ==============================================================================
-# We are in: quant-trading-pipeline/src/tools/
-# We need to reach: quant-trading-pipeline/ (Root)
+# FIX APPLIED: Changed from parents[3] to parents[2]
+# File is in: src/tools/10_backtest.py
+# .parents[0] = tools
+# .parents[1] = src
+# .parents[2] = PROJECT ROOT (Where app.py lives)
 ROOT_DIR = Path(__file__).resolve().parents[2]
-
-# Add Root to System Path to allow imports from 'src.utils'
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
@@ -51,11 +52,11 @@ def parse_args():
 def run_backtest(args):
     enforce_rth = args.enforce_rth == "True"
     
-    log.info(f"🚀 STARTING ENGINE | RTH: {enforce_rth} | Range: {args.start_date} to {args.end_date}")
+    log.info(f"🚀 STARTING ENGINE | RTH: {enforce_rth} | Target: {args.start_date} to {args.end_date}")
     
-    # 1. LOAD DATA (INTEGRITY LAW)
     con = duckdb.connect(str(config.DB_FILE), read_only=True)
     
+    # 1. QUERY DATA
     query = f"""
         SELECT datetime_utc, open, high, low, close 
         FROM {config.TBL_INDICES} 
@@ -68,129 +69,140 @@ def run_backtest(args):
         df = con.execute(query).df()
     except Exception as e:
         log.error(f"❌ DB Read Failure: {e}")
+        print(json.dumps({"error": str(e)}))
         return
-    finally:
-        con.close()
 
+    # 2. DATA AVAILABILITY CHECK (OBSERVABILITY)
     if df.empty:
-        log.error("❌ No Data Found in Range.")
+        range_check = con.execute(f"SELECT min(datetime_utc), max(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker='SPX'").fetchone()
+        
+        db_start = range_check[0] if range_check else "N/A"
+        db_end = range_check[1] if range_check else "N/A"
+        
+        err_msg = f"No Data in Range. Vault contains: {db_start} to {db_end}"
+        log.error(f"❌ {err_msg}")
+        
+        print(json.dumps({"error": err_msg}))
+        con.close()
         return
 
-    # 2. TIMEZONE PREPARATION (TIMEZONE LAW)
-    # The DB is confirmed UTC. We ensure Pandas knows this.
+    con.close()
+
+    # 3. TIMEZONE PREPARATION (TIMEZONE LAW: Force Naive UTC)
     if df['datetime_utc'].dt.tz is None:
         df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(config.TZ_UTC)
     else:
         df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_UTC)
+    
+    # CRITICAL: Strip TZ to prevent WinError/DuckDB ambiguity (stores 15:00, not 10:00)
+    df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(None)
 
-    # 3. BACKTEST VARIABLES
+    # 4. BACKTEST VARIABLES
     balance = args.start_balance
     position = 0 
     entry_price = 0.0
     entry_time = None
-    trades = []
+    trades = [] # Stores full trade objects
+    equity_updates = [] # Stores balance after each trade
     
-    # ATR Calculation
-    df['tr'] = np.maximum((df['high'] - df['low']), 
-                          np.maximum(abs(df['high'] - df['close'].shift(1)), 
-                                     abs(df['low'] - df['close'].shift(1))))
-    df['atr'] = df['tr'].rolling(14).mean()
+    # Indicators
+    df['sma20'] = df['close'].rolling(20).mean()
 
+    # 5. ITERATION
     log.info(f"📊 Analyzing {len(df)} candles...")
-
-    # 4. ITERATION
-    for i in range(15, len(df)):
+    
+    for i in range(20, len(df)):
         row = df.iloc[i]
-        curr_time = row['datetime_utc'] # UTC
+        curr_time = row['datetime_utc'] # Naive UTC
         price = row['close']
         
-        # --- RTH ENFORCEMENT ---
+        # RTH Enforcement (Converts UTC time -> NY time for check)
         if enforce_rth:
-            # Convert UTC -> NY Time for the check
-            ny_time = curr_time.tz_convert(config.TZ_NY).time()
+            # We must *temporarily* localize to UTC to use tz_convert, then convert to NY
+            # This is complex because curr_time is now Naive UTC, so we localize to UTC first.
+            curr_time_aware = curr_time.tz_localize(config.TZ_UTC) 
+            ny_time = curr_time_aware.tz_convert(config.TZ_NY).time()
+            
             market_open = time(9, 30)
             market_close = time(16, 0)
-            
             if not (market_open <= ny_time < market_close):
                 continue 
 
-        # --- SIGNAL LOGIC (Sample Trend) ---
-        sma20 = df['close'].iloc[i-20:i].mean()
+        sma20 = row['sma20']
         
-        # ENTRY
+        # ENTRY (Close > SMA20)
         if position == 0 and price > sma20:
             invest_amt = min(balance * args.pos_size_pct, args.max_invest)
             shares = invest_amt / price
             position = shares
             entry_price = price
             entry_time = curr_time
-            # OBSERVABILITY LAW: Log the trade
             log.info(f"   🟢 OPEN LONG @ {price:.2f} ({curr_time})")
 
-        # EXIT
+        # EXIT (Close < SMA20)
         elif position > 0:
             if price < sma20:
                 proceeds = position * price
                 raw_pnl = proceeds - (position * entry_price)
                 
-                # TAX AWARE COMPOUNDING
                 tax_hit = raw_pnl * args.tax_rate if raw_pnl > 0 else 0
                 net_pnl = raw_pnl - tax_hit
                 
                 balance += net_pnl
                 
+                # --- EQUITY TRACKING ---
+                equity_updates.append(balance)
+                
                 trades.append({
-                    'Entry Time': entry_time, # Store as UTC object
-                    'Exit Time': curr_time,   # Store as UTC object
+                    'Entry Time': entry_time,
+                    'Exit Time': curr_time,
                     'Entry Price': entry_price,
                     'Exit Price': price,
                     'Net PnL': net_pnl
                 })
-                
                 position = 0
-                # OBSERVABILITY LAW: Log the trade
                 log.info(f"   🔴 CLOSE @ {price:.2f} | PnL: {net_pnl:.2f}")
 
-    # 5. REPORT GENERATION
+    # 6. REPORT GENERATION
     if not trades:
-        # JSON Output for Dashboard to catch
-        print(json.dumps({"error": "No Trades"}))
+        print(json.dumps({"error": "No Trades Triggered (Strategy Logic)"}))
         return
 
     trades_df = pd.DataFrame(trades)
     
-    # --- TIMEZONE LAW: DISPLAY CONVERSION ---
-    # Convert Internal UTC -> Local PST for the Human Report
-    trades_df['Entry Time'] = trades_df['Entry Time'].dt.tz_convert(config.TZ_LOCAL)
-    trades_df['Exit Time'] = trades_df['Exit Time'].dt.tz_convert(config.TZ_LOCAL)
+    # --- ADDED: PnL and Returns for plotting/table ---
+    trades_df['RawReturn'] = (trades_df['Exit Price'] / trades_df['Entry Price'] - 1)
     
-    # Format for CSV
-    trades_df['Entry Time'] = trades_df['Entry Time'].dt.strftime('%Y-%m-%d %H:%M:%S %Z')
-    trades_df['Exit Time'] = trades_df['Exit Time'].dt.strftime('%Y-%m-%d %H:%M:%S %Z')
+    # Display Conversion (Local PST)
+    # NOTE: Since DB timestamps are now Naive UTC, we localize to UTC before converting to PST.
+    trades_df['Entry Time PST'] = trades_df['Entry Time'].dt.tz_localize(config.TZ_UTC).dt.tz_convert(config.TZ_LOCAL)
+    trades_df['Exit Time PST'] = trades_df['Exit Time'].dt.tz_localize(config.TZ_UTC).dt.tz_convert(config.TZ_LOCAL)
+    
+    trades_df['Date'] = trades_df['Entry Time PST'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
     total_return = ((balance - args.start_balance) / args.start_balance) * 100
     win_rate = len(trades_df[trades_df['Net PnL'] > 0]) / len(trades_df) * 100
     
-    # Save Report
-    if args.archive_report == "True":
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = config.REPORTS_DIR / f"backtest_report_{timestamp}.csv"
-        trades_df.to_csv(report_path, index=False)
-        log.info(f"📝 Report Saved: {report_path.name}")
-
-    # 6. JSON OUPUT FOR DASHBOARD
+    # Pad the Equity Curve with start balance
+    full_equity = [args.start_balance] + equity_updates
+    
+    # JSON Result
     result_payload = {
         "final_balance": balance,
         "total_return_pct": total_return,
         "max_drawdown_pct": 0.0, 
         "win_rate": win_rate,
-        "total_trades": len(trades)
+        "total_trades": len(trades),
+        
+        # --- NEW DATA FOR GRAPH/TABLE ---
+        "trade_dates": trades_df['Date'].tolist(),
+        "trade_pnl": trades_df['Net PnL'].tolist(),
+        "trade_returns": trades_df['RawReturn'].tolist(),
+        "equity_curve": full_equity 
     }
     
-    # Flush logs before printing JSON
-    for handler in log.handlers:
-        handler.flush()
-        
+    # Flush and Print
+    for handler in log.handlers: handler.flush()
     print(f"JSON_RESULT:{json.dumps(result_payload)}")
 
 if __name__ == "__main__":

@@ -4,15 +4,12 @@ import yfinance as yf
 import pandas as pd
 import duckdb
 from pathlib import Path
+import time 
 
 # ==============================================================================
-# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# 1. PATH CONSTITUTION
 # ==============================================================================
-# We are in: quant-trading-pipeline/src/pipeline/
-# We need to reach: quant-trading-pipeline/ (Root)
 ROOT_DIR = Path(__file__).resolve().parents[2]
-
-# Add Root to System Path to allow imports from 'src.utils'
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
@@ -33,54 +30,73 @@ SCHEMA_MAP = {
 
 def fetch_and_clean(ticker_symbol, db_ticker, interval="5m"):
     """
-    Fetches data, strictly enforces Timezone Law (UTC), and prepares for DB.
+    Fetches data, strictly enforces Timezone Law (UTC), and prepares for DB with RETRY LOGIC.
     """
-    log.info(f"⬇️ Fetching {ticker_symbol} ({interval})...")
-    try:
-        # Period depends on interval (60d is max for 5m in yfinance)
-        period = "60d" if interval == "5m" else "5y"
-        
-        # Download data
-        df = yf.download(ticker_symbol, period=period, interval=interval, progress=False)
-        if df.empty:
-            log.error(f"❌ No data for {ticker_symbol}")
-            return None
-        
-        # 1. Handle MultiIndex Columns (common with newer yfinance versions)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # ==============================================================================
-        # 2. TIMEZONE ENFORCEMENT (THE TIMEZONE LAW)
-        # Operation: Localize Naive (NY) -> Convert to UTC
-        # ==============================================================================
-        if interval == "5m":
-            if df.index.tz is None:
-                df.index = df.index.tz_localize(config.TZ_NY)
+    log.info(f"⬇️ Fetching {ticker_symbol} ({interval}) with Retry...")
+    
+    df = pd.DataFrame() 
+    max_retries = 5  # <<< UPDATED TO 5 ATTEMPTS
+    attempt = 0
+    period = "60d" if interval == "5m" else "5y"
+    
+    # --- RETRY LOOP (THE FIX) ---
+    while attempt < max_retries:
+        attempt += 1
+        try:
+            df = yf.download(ticker_symbol, period=period, interval=interval, progress=False)
             
-            # Now convert to the Vault Standard: UTC
-            df.index = df.index.tz_convert(config.TZ_UTC)
-
-        # 3. Reset Index to move the Timestamp into a column
-        df.reset_index(inplace=True)
-        
-        # 4. Standardize Column Names
-        df.rename(columns=SCHEMA_MAP, inplace=True)
-        
-        # 5. Final Schema Selection
-        if interval == "5m":
-            df['ticker'] = db_ticker
-            return df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']]
-        else:
-            # For IRX (Daily Data)
-            df['date'] = df['datetime_utc'].dt.date
-            df['rate'] = df['close']
-            return df[['date', 'rate']]
-        
-    except Exception as e:
-        log.error(f"❌ Error processing {ticker_symbol}: {e}")
+            if not df.empty:
+                log.info(f"   ✅ Attempt {attempt}: Data received successfully.")
+                break # Success
+            
+            log.warning(f"⚠️ Attempt {attempt}: Download returned empty data.")
+            
+        except Exception as e:
+            if "Rate Limit" in str(e) or "Too Many Requests" in str(e):
+                log.warning(f"❌ Attempt {attempt}: Rate Limit Hit. Sleeping 5s before retry...")
+                time.sleep(5)
+            else:
+                log.error(f"❌ Unexpected Error fetching {ticker_symbol}: {e}")
+                return None
+                
+    # Final check after loop completes
+    if df.empty:
+        log.error(f"❌ Failed to fetch {ticker_symbol} after {max_retries} attempts. Aborting ingestion.")
         return None
+        
+    # --- DATA CLEANING AND TIMEZONE CONVERSION ---
+    
+    # 1. Handle MultiIndex Columns
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
+    # ==============================================================================
+    # 2. TIMEZONE ENFORCEMENT (THE FIX: Force Naive UTC)
+    # ==============================================================================
+    if interval == "5m":
+        if df.index.tz is None:
+            df.index = df.index.tz_localize(config.TZ_NY)
+        
+        df.index = df.index.tz_convert(config.TZ_UTC)
+        
+        # CRITICAL FIX: Strip Timezone Info ("Force Naive UTC")
+        df.index = df.index.tz_localize(None)
+
+    # 3. Reset Index to move the Timestamp into a column
+    df.reset_index(inplace=True)
+    
+    # 4. Standardize Column Names
+    df.rename(columns=SCHEMA_MAP, inplace=True)
+    
+    # 5. Final Schema Selection
+    if interval == "5m":
+        df['ticker'] = db_ticker
+        return df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']]
+    else:
+        df['date'] = df['datetime_utc'].dt.date
+        df['rate'] = df['close']
+        return df[['date', 'rate']]
+    
 def ingest_indices():
     """
     Main execution loop for populating indices_1m and risk_free_rate_daily.

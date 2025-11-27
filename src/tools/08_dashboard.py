@@ -14,24 +14,23 @@ import pytz
 from pathlib import Path
 
 # ==============================================================================
-# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# 1. PATH CONSTITUTION
 # ==============================================================================
 # We are in: quant-trading-pipeline/src/tools/
 # We need to reach: quant-trading-pipeline/ (Root)
 ROOT_DIR = Path(__file__).resolve().parents[2]
-
-# Add Root to System Path to allow imports from 'src.utils'
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
 from src.utils.logger import get_logger
 
 # ==============================================================================
-# 2. SETUP
+# 2. MPA PAGE REGISTRATION (FIX: Reverted to MPA Page)
 # ==============================================================================
+# REMOVED: app = Dash(...)
+# ADDED: MPA Page Registration
 register_page(__name__, path='/analysis', name='Analysis')
-
-logger = logging.getLogger("Dashboard")
+logger = get_logger("Dashboard")
 UTC_TZ = pytz.utc
 STRIKE_RANGE = 2
 
@@ -93,13 +92,11 @@ def calculate_indicators(df):
 def get_signal_events():
     con = duckdb.connect(str(config.DB_FILE))
     try:
-        # Sort by latest signals
         query = f"SELECT date, entry_timestamp_utc, xsp_price FROM {config.TBL_MANIFEST} ORDER BY entry_timestamp_utc DESC"
         df = con.execute(query).df()
     except Exception: return []
     con.close()
     
-    # We display the UTC Date, but the ID is the timestamp
     return [{'label': f"{row['date']} | Est. ATM: ${row['xsp_price']:.2f}", 'value': row['entry_timestamp_utc']} for _, row in df.iterrows()]
 
 def get_tickers_for_event(event_ts):
@@ -128,7 +125,7 @@ def get_tickers_for_event(event_ts):
         return [], None
 
 # ==============================================================================
-# 4. LAYOUT (Unified Design System)
+# 4. LAYOUT
 # ==============================================================================
 layout = dbc.Container([
     # HEADER
@@ -310,3 +307,5 @@ def update_chart(ts, ticker):
     fig.update_yaxes(range=[0, 100], row=4, col=1)
 
     return fig, stats_text
+
+# REMOVED: if __name__ == "__main__": execution block

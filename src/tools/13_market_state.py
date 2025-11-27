@@ -8,76 +8,117 @@ import pandas as pd
 import yfinance as yf
 import requests
 import xml.etree.ElementTree as ET
-import logging
 from datetime import datetime
 from pathlib import Path
 
 # ==============================================================================
-# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# 1. PATH CONSTITUTION
 # ==============================================================================
-# We are in: quant-trading-pipeline/src/tools/
-# We need to reach: quant-trading-pipeline/ (Root)
 ROOT_DIR = Path(__file__).resolve().parents[2]
-
-# Add Root to System Path to allow imports from 'src.utils'
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
 from src.utils.logger import get_logger
 
 # ==============================================================================
-# 2. SETUP
+# 2. MPA PAGE REGISTRATION
 # ==============================================================================
 register_page(__name__, path='/periscope', name='Periscope')
-
 logger = get_logger("MarketPeriscope")
 
 # ==============================================================================
-# 3. HELPER FUNCTIONS
+# 3. GLOBAL STATE (Caching)
+# ==============================================================================
+# We rely on config.GLOBAL_SESSION for the network identity.
+# We keeps the cache local to this tool since the data requirements (Daily)
+# are unique to this page.
+_CACHE = {
+    "data": None,
+    "last_updated": None
+}
+
+# ==============================================================================
+# 4. HELPER FUNCTIONS
 # ==============================================================================
 def fetch_market_snapshot():
-    tickers = {'^GSPC': 'S&P 500', '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq', '^VIX': 'VIX'}
+    """
+    Fetches market data using Batch Download + Caching + Global Session.
+    """
+    global _CACHE
+    
+    # 1. Cache Check (Throttle to 1 request per minute)
+    now = datetime.now()
+    if _CACHE['data'] and _CACHE['last_updated']:
+        delta = (now - _CACHE['last_updated']).total_seconds()
+        if delta < 60: 
+            return _CACHE['data']
+
+    tickers = ['^GSPC', '^DJI', '^IXIC', '^VIX']
+    names = {'^GSPC': 'S&P 500', '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq', '^VIX': 'VIX'}
     data = {}
+    
     try:
-        # Fetch 5 days to ensure we get change calculation even after weekend
-        df = yf.download(list(tickers.keys()), period="5d", interval="1d", progress=False)
-        is_multi = isinstance(df.columns, pd.MultiIndex)
+        # 2. Batch Download using GLOBAL SESSION
+        # This makes the request look identical to the Live Ops dashboard
+        df = yf.download(
+            tickers, 
+            period="5d", 
+            interval="1d", 
+            progress=False, 
+            group_by='ticker', 
+            session=config.GLOBAL_SESSION # <--- The Pro Move
+        )
         
-        for sym, name in tickers.items():
-            closes = df['Close'][sym].dropna() if is_multi else df['Close'].dropna()
-            
-            if len(closes) < 2: 
-                continue
+        # 3. Parse Response
+        for sym in tickers:
+            try:
+                # Handle Single Ticker vs Multi-Ticker result structure
+                if len(tickers) == 1:
+                    closes = df['Close'].dropna()
+                else:
+                    if sym not in df.columns: continue
+                    closes = df[sym]['Close'].dropna()
+
+                if len(closes) < 2: continue
                 
-            price, prev = closes.iloc[-1], closes.iloc[-2]
-            change = price - prev
-            pct_change = (change / prev) * 100
+                price = float(closes.iloc[-1])
+                prev = float(closes.iloc[-2])
+                change = price - prev
+                pct_change = (change / prev) * 100
+                
+                color = '#00E676' if change >= 0 else '#FF1744'
+                
+                data[sym] = {
+                    'name': names[sym], 
+                    'price': price, 
+                    'change': change, 
+                    'pct': pct_change, 
+                    'color': color
+                }
+            except Exception as e:
+                logger.warning(f"Parse error for {sym}: {e}")
+                continue
+
+        # 4. Update Cache on Success
+        if data:
+            _CACHE['data'] = data
+            _CACHE['last_updated'] = now
             
-            # High Contrast Color Logic
-            color = '#00E676' if change >= 0 else '#FF1744'
-            
-            data[sym] = {
-                'name': name, 
-                'price': price, 
-                'change': change, 
-                'pct': pct_change, 
-                'color': color
-            }
     except Exception as e:
         logger.error(f"Snapshot Error: {e}")
-        return None
+        # Return stale data if available
+        return _CACHE['data']
+        
     return data
 
 def fetch_news():
-    """
-    Fetches Yahoo Finance TOP STORIES (Broad Market News).
-    ENFORCES TIMEZONE LAW: Converts PubDate -> Local Time (PST).
-    """
     news_items = []
     rss_url = "https://finance.yahoo.com/rss/topstories" 
     
     try:
-        response = requests.get(rss_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        # Use the GLOBAL SESSION for RSS as well to benefit from the User-Agent
+        response = config.GLOBAL_SESSION.get(rss_url, timeout=5)
+        
         if response.status_code == 200:
             root = ET.fromstring(response.content)
             
@@ -87,16 +128,11 @@ def fetch_news():
                 
                 if pub_date is not None:
                     try:
-                        # 1. Parse & Localize to UTC (if naive)
                         dt = pd.to_datetime(pub_date.text)
-                        if dt.tzinfo is None: 
-                            dt = dt.tz_localize(config.TZ_UTC)
-                        
-                        # 2. Convert to Local (Glass)
+                        if dt.tzinfo is None: dt = dt.tz_localize(config.TZ_UTC)
                         dt_local = dt.astimezone(config.TZ_LOCAL)
                         time_str = dt_local.strftime('%H:%M PST')
-                    except: 
-                        pass
+                    except: pass
                 
                 news_items.append({
                     'title': item.find('title').text, 
@@ -111,41 +147,27 @@ def fetch_news():
 
 def create_gauge(vix_price):
     val = float(vix_price)
-    
-    # Regime Logic (VIX Buckets)
-    if val < 15: 
-        label, color = "EXTREME GREED", "#00C853"
-    elif val < 20: 
-        label, color = "NORMAL", "#00E5FF"
-    elif val < 30: 
-        label, color = "FEAR", "#FF9100"
-    else: 
-        label, color = "EXTREME FEAR", "#FF1744"
+    if val < 15: label, color = "EXTREME GREED", "#00C853"
+    elif val < 20: label, color = "NORMAL", "#00E5FF"
+    elif val < 30: label, color = "FEAR", "#FF9100"
+    else: label, color = "EXTREME FEAR", "#FF1744"
     
     fig = go.Figure(go.Indicator(
         mode = "gauge+number", 
         value = val,
         title = {'text': label, 'font': {'size': 20, 'color': color}},
-        gauge = {
-            'axis': {'range': [10, 45]}, 
-            'bar': {'color': color}, 
-            'bgcolor': "white"
-        }
+        gauge = {'axis': {'range': [10, 45]}, 'bar': {'color': color}, 'bgcolor': "white"}
     ))
-    
     fig.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)', 
-        font={'color': "white"}, 
-        height=300, 
-        margin=dict(l=30, r=30, t=30, b=30)
+        paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"}, 
+        height=300, margin=dict(l=30, r=30, t=30, b=30)
     )
     return fig
 
 # ==============================================================================
-# 4. LAYOUT
+# 5. LAYOUT
 # ==============================================================================
 layout = dbc.Container([
-    # HEADER: Standardized Teal Theme
     dbc.Row([
         dbc.Col([
             html.H6("TOOL ID: 6", className="text-muted mb-0"),
@@ -154,10 +176,8 @@ layout = dbc.Container([
         ], width=12)
     ], className="mb-4"),
 
-    # ROW 1: INDICES
     html.Div(id='peri-indices-row'),
 
-    # ROW 2: GAUGE + NEWS
     dbc.Row([
         dbc.Col([
             dbc.Card([
@@ -174,11 +194,12 @@ layout = dbc.Container([
         ], width=12, lg=6)
     ]),
 
+    # Interval set to 60 seconds
     dcc.Interval(id='peri-interval', interval=60*1000, n_intervals=0)
 ], fluid=True)
 
 # ==============================================================================
-# 5. CALLBACKS
+# 6. CALLBACKS
 # ==============================================================================
 @callback(
     [Output('peri-indices-row', 'children'), Output('peri-gauge', 'figure'), Output('peri-news-feed', 'children')],
@@ -188,7 +209,7 @@ def update_periscope(n):
     market_data = fetch_market_snapshot()
     news_items = fetch_news()
     
-    # 1. INDICES CARDS
+    # 1. INDICES
     if market_data:
         cards = []
         for sym in ['^GSPC', '^DJI', '^IXIC', '^VIX']:
@@ -204,12 +225,13 @@ def update_periscope(n):
                     ], className="mb-3 border-secondary")
                 ], width=12, sm=6, lg=3))
         indices_layout = dbc.Row(cards)
-        gauge_fig = create_gauge(market_data['^VIX']['price'])
+        vix_val = market_data.get('^VIX', {}).get('price', 20)
+        gauge_fig = create_gauge(vix_val)
     else:
-        indices_layout = html.Div("Data Link Offline", className="text-danger text-center")
+        indices_layout = html.Div("Data Link Offline (Yahoo Rate Limit or Network)", className="text-danger text-center mt-3")
         gauge_fig = go.Figure()
 
-    # 2. NEWS FEED
+    # 2. NEWS
     news_layout = []
     if news_items:
         for item in news_items:

@@ -1,81 +1,112 @@
 import sys
 import os
 import dash
-from dash import dcc, html, Input, Output, register_page, callback
+from dash import dcc, html, Input, Output, register_page, callback, ctx
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # ==============================================================================
-# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# 1. PATH CONSTITUTION
 # ==============================================================================
-# We are in: quant-trading-pipeline/src/tools/
-# We need to reach: quant-trading-pipeline/ (Root)
 ROOT_DIR = Path(__file__).resolve().parents[2]
-
-# Add Root to System Path to allow imports from 'src.utils'
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
 from src.utils.logger import get_logger
 
 # ==============================================================================
-# 2. SETUP
+# 2. MPA PAGE REGISTRATION
 # ==============================================================================
 register_page(__name__, path='/live', name='Live Ops')
 logger = get_logger("LiveOps")
 
 # ==============================================================================
-# 3. HELPER FUNCTIONS
+# 3. GLOBAL STATE (Caching)
 # ==============================================================================
-def fetch_live_data():
+# We rely on config.GLOBAL_SESSION for the network identity.
+# Cache is local to this tool.
+_CACHE = {
+    "data": (None, None), # (spx_ohlc, vix_close)
+    "last_updated": None
+}
+
+# ==============================================================================
+# 4. HELPER FUNCTIONS
+# ==============================================================================
+def fetch_live_data(force_refresh=False):
     """
-    Fetches the last 1 day of 5-minute bars for SPX and VIX.
-    ENFORCES TIMEZONE LAW: Returns data localized to Config.TZ_LOCAL.
+    Fetches 5-minute bars for SPX and VIX.
+    Uses Caching + Global Session to prevent IP Bans.
     """
+    global _CACHE
+    
+    # 1. Cache Check
+    now = datetime.now()
+    if not force_refresh and _CACHE['data'][0] is not None and _CACHE['last_updated']:
+        delta = (now - _CACHE['last_updated']).total_seconds()
+        # Cache for 60 seconds to prevent button spamming
+        if delta < 60: 
+            return _CACHE['data']
+
     try:
-        # Fetch both tickers at once
-        # yfinance returns DatetimeIndex (usually localized to NY or UTC)
-        df = yf.download(['^GSPC', '^VIX'], period='1d', interval='5m', progress=False)
+        # 2. Batch Download using GLOBAL SESSION
+        # Using 5d to ensure we get data even if market just opened
+        df = yf.download(
+            ['^GSPC', '^VIX'], 
+            period='5d', 
+            interval='5m', 
+            progress=False, 
+            group_by='ticker', 
+            session=config.GLOBAL_SESSION # <--- The Pro Move
+        )
         
         if df.empty: return None, None
         
-        # Flatten MultiIndex if present (Handling yfinance format variations)
-        if isinstance(df.columns, pd.MultiIndex):
-            # Extract SPX OHLC
-            spx_ohlc = pd.DataFrame({
-                'Open': df['Open']['^GSPC'],
-                'High': df['High']['^GSPC'],
-                'Low': df['Low']['^GSPC'],
-                'Close': df['Close']['^GSPC']
-            }).dropna()
-            
-            # Extract VIX Close
-            vix_close = df['Close']['^VIX'].dropna().iloc[-1]
-            
+        # 3. Extract SPX (Handle MultiIndex safely)
+        if '^GSPC' in df.columns:
+            spx_df = df['^GSPC']
         else:
-            # Fallback (rare single ticker case, unlikely with list request)
-            return None, None
+            return None, None 
             
-        # --- TIMEZONE CONVERSION (CRITICAL) ---
-        # 1. Ensure UTC awareness (if naive, assume NY as per yfinance standard)
+        spx_ohlc = spx_df[['Open', 'High', 'Low', 'Close']].dropna()
+        
+        # 4. Extract VIX
+        if '^VIX' in df.columns:
+            vix_close = df['^VIX']['Close'].dropna().iloc[-1]
+        else:
+            vix_close = 0.0
+
+        # --- TIMEZONE LAW ENFORCEMENT ---
+        # A. Ensure NY Time (Exchange Time)
         if spx_ohlc.index.tz is None:
             spx_ohlc.index = spx_ohlc.index.tz_localize(config.TZ_NY)
+        else:
+            spx_ohlc.index = spx_ohlc.index.tz_convert(config.TZ_NY)
             
-        # 2. Convert to LOCAL (Glass)
+        # Filter for "Today" (Last 24h of trading sessions) to keep chart clean
+        cutoff = spx_ohlc.index[-1] - timedelta(days=1)
+        spx_ohlc = spx_ohlc[spx_ohlc.index > cutoff]
+
+        # B. Convert to LOCAL (Glass) for Display
         spx_ohlc.index = spx_ohlc.index.tz_convert(config.TZ_LOCAL)
 
-        return spx_ohlc, vix_close
+        # Update Cache
+        _CACHE['data'] = (spx_ohlc, float(vix_close))
+        _CACHE['last_updated'] = now
+        
+        return spx_ohlc, float(vix_close)
         
     except Exception as e:
         logger.error(f"Live Data Error: {e}")
-        return None, None
+        # Return stale data if possible
+        return _CACHE['data'] if _CACHE['data'][0] is not None else (None, None)
 
 # ==============================================================================
-# 4. LAYOUT
+# 5. LAYOUT
 # ==============================================================================
 layout = dbc.Container([
     
@@ -132,7 +163,7 @@ layout = dbc.Container([
                 ])
             ], className="mb-3 shadow"),
 
-            # 2. P&L ENGINE (Placeholder for now)
+            # 2. P&L ENGINE
             dbc.Card([
                 dbc.CardHeader("💰 Option Chain Status"),
                 dbc.CardBody([
@@ -159,13 +190,13 @@ layout = dbc.Container([
         ], width=12, lg=4)
     ]),
 
-    # HEARTBEAT (5 Minutes = 300,000 ms)
+    # HEARTBEAT (5 Minutes)
     dcc.Interval(id='live-interval', interval=300*1000, n_intervals=0)
 
 ], fluid=True)
 
 # ==============================================================================
-# 5. LOGIC
+# 6. CALLBACKS
 # ==============================================================================
 @callback(
     [Output('live-chart', 'figure'),
@@ -177,22 +208,25 @@ layout = dbc.Container([
      Input('live-refresh-btn', 'n_clicks')]
 )
 def update_live_cockpit(n, refresh_clicks):
+    # Determine if this was a manual refresh
+    trigger = ctx.triggered_id
+    is_manual = (trigger == 'live-refresh-btn')
+    
     # 1. Clock
     now = datetime.now(config.TZ_LOCAL)
     time_str = now.strftime("%H:%M:%S PST")
     
-    # 2. Fetch Data (Already Localized)
-    spx_ohlc, current_vix = fetch_live_data()
+    # 2. Fetch Data (Cached unless manual force)
+    spx_ohlc, current_vix = fetch_live_data(force_refresh=is_manual)
     
     if spx_ohlc is None or spx_ohlc.empty:
-        # Empty State
         fig = go.Figure(layout=dict(template='plotly_dark', title="Waiting for Market Data..."))
+        # Keep old values if cache exists but is empty/failed
         return fig, "----", "No Data", "No Data", time_str
 
     # 3. Process Metrics
     current_spx = spx_ohlc['Close'].iloc[-1]
-    
-    # Calculate XSP Equivalent ATM Strike (SPX / 10)
+    # Simple XSP logic: SPX / 10
     xsp_ref_price = current_spx / 10.0
     atm_strike = round(xsp_ref_price) 
     
@@ -207,7 +241,7 @@ def update_live_cockpit(n, refresh_clicks):
         name="S&P 500"
     ))
     
-    # ATM Line (Theoretical Target)
+    # ATM Line (Projected onto SPX scale)
     strike_line_spx = atm_strike * 10
     fig.add_hline(y=strike_line_spx, line_dash="dash", line_color="#00E676", annotation_text="ATM TARGET")
 

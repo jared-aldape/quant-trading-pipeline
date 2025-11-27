@@ -8,28 +8,51 @@ import json
 import pandas as pd
 import plotly.graph_objects as go
 from pathlib import Path
+from datetime import date, datetime, timedelta
 
 # ==============================================================================
-# 1. ARCHITECTURE V2.1: PATH CONSTITUTION
+# 1. PATH CONSTITUTION
 # ==============================================================================
-# We are in: quant-trading-pipeline/src/tools/
-# We need to reach: quant-trading-pipeline/ (Root)
+# FIX APPLIED: Changed from parents[3] to parents[2]
+# File is in: src/tools/11_backtest.py
+# .parents[0] = tools
+# .parents[1] = src
+# .parents[2] = PROJECT ROOT (Where app.py lives)
 ROOT_DIR = Path(__file__).resolve().parents[2]
-
-# Add Root to System Path to allow imports from 'src.utils'
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
 from src.utils.logger import get_logger
 
-# ==============================================================================
-# 2. SETUP
-# ==============================================================================
-register_page(__name__, path='/backtester', name='Backtester')
 logger = get_logger("BacktestGUI")
 
 # ==============================================================================
-# 3. LAYOUT (Military Terminal Aesthetic)
+# 2. MPA PAGE REGISTRATION
+# ==============================================================================
+register_page(__name__, path='/backtester', name='Backtester')
+
+# ==============================================================================
+# 3. HELPER UI & DEFAULTS
+# ==============================================================================
+# Dynamic Defaults
+today = date.today()
+default_start = (today - timedelta(days=45)).strftime("%Y-%m-%d")
+default_end = today.strftime("%Y-%m-%d")
+
+def get_status_ui(status_type, message=None):
+    if status_type == "ready":
+        return html.Div([html.Div("📊", className="display-4"), html.H4("Ready for Analysis", className="text-muted")], className="text-center")
+    elif status_type == "running":
+        return html.Div([dbc.Spinner(color="primary", type="grow"), html.H4("Running Forensic Backtest...", className="text-primary mt-2")], className="text-center")
+    elif status_type == "success":
+        return html.Div([html.Div("✅", className="display-4"), html.H4(message, className="text-success")], className="text-center")
+    elif status_type == "failure":
+        return html.Div([html.Div("⚠️", className="display-4"), html.H4(message, className="text-warning")], className="text-center")
+    elif status_type == "crash":
+        return html.Div([html.Div("💀", className="display-4"), html.H4("Execution Crash", style={"color": "#a855f7"})], className="text-center")
+
+# ==============================================================================
+# 4. LAYOUT
 # ==============================================================================
 layout = dbc.Container([
     # HEADER
@@ -43,24 +66,24 @@ layout = dbc.Container([
 
     # CONTROLS
     dbc.Row([
-        # LEFT COL: PARAMETERS
+        # COLUMN 1: Inputs
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader("MISSION PARAMETERS", className="fw-bold text-warning"),
                 dbc.CardBody([
+                    html.Label("Backtest Period"),
+                    dcc.DatePickerRange(
+                        id='bt-date-range',
+                        min_date_allowed=date(2020, 1, 1),
+                        max_date_allowed=today,
+                        start_date=default_start,
+                        end_date=today,
+                        className="mb-3 w-100",
+                    ),
+                    
                     dbc.Row([
                         dbc.Col([
-                            html.Label("Start Date"),
-                            dbc.Input(id='bt-start-date', type='text', value='2024-01-01', className="mb-2")
-                        ], width=6),
-                        dbc.Col([
-                            html.Label("End Date"),
-                            dbc.Input(id='bt-end-date', type='text', value='2024-12-31', className="mb-2")
-                        ], width=6)
-                    ]),
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("Start Balance ($)"),
+                            html.Label("Start Capital ($)"),
                             dbc.Input(id='bt-balance', type='number', value=10000, className="mb-2")
                         ], width=6),
                         dbc.Col([
@@ -74,116 +97,207 @@ layout = dbc.Container([
                             dbc.Input(id='bt-max-invest', type='number', value=5000, className="mb-2")
                         ], width=6),
                         dbc.Col([
-                            html.Label("Enforce RTH"),
-                            dbc.Checkbox(id='bt-rth', value=True, className="mt-4")
+                            html.Label("Tax Rate (1256)"), 
+                            dbc.Input(id='bt-tax-rate', type='number', value=0.268, step=0.001, className="mb-2")
                         ], width=6)
                     ]),
+                    
+                    dbc.Checklist(options=[{"label": " Enforce RTH (9:30-4:00 EST)", "value": True}], value=[True], id="bt-rth", switch=True, className="mt-3 text-warning"),
                     html.Hr(),
                     dbc.Button("▶ RUN SIMULATION", id='bt-run-btn', color="info", className="w-100 fw-bold")
                 ])
-            ], className="shadow mb-3")
+            ], className="shadow mb-3"),
+            
+            dbc.Card([
+                dbc.CardHeader("Risk Management"),
+                dbc.CardBody([
+                    dbc.Row([
+                        dbc.Col([html.Label("ATR Sensitivity"), dcc.Input(id='bt-atr-sens', type='number', value=0.5, step=0.1, className="form-control")], width=6),
+                        dbc.Col([html.Label("Trailing Stop (%)"), dcc.Input(id='bt-trail-pct', type='number', value=25, className="form-control")], width=6),
+                    ]),
+                ])
+            ], className="mb-3 shadow"),
+            
         ], width=12, md=4),
 
-        # RIGHT COL: RESULTS
+        # COLUMN 2: Execution & Results
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader("MISSION REPORT", className="fw-bold text-success"),
+                dbc.CardHeader("EQUITY CURVE", className="fw-bold text-primary"),
                 dbc.CardBody([
-                    html.Div(id='bt-results-area', children=[
-                        html.P("Waiting for execution...", className="text-muted")
-                    ])
-                ], style={'minHeight': '300px'})
-            ], className="shadow mb-3")
-        ], width=12, md=8)
+                    dcc.Graph(id='bt-equity-chart', style={'height': '350px'}, config={'displayModeBar': False}),
+                    html.Div(id='bt-status-area', children=get_status_ui("ready"), className="mb-4 mt-3"),
+                ], style={'padding': '10px'})
+            ], className="mb-3 shadow"),
+
+            dbc.Card([
+                dbc.CardHeader("REPORT SUMMARY", className="fw-bold text-success"),
+                dbc.CardBody([
+                    dbc.Row([
+                        dbc.Col([html.H6("Final Balance"), html.H3(id='bt-res-balance', children="--")], className="text-center"),
+                        dbc.Col([html.H6("Net Return"), html.H3(id='bt-res-return', children="--")], className="text-center"),
+                    ], className="text-center mb-3"),
+                    dbc.Row([
+                        dbc.Col([html.H6("Max Drawdown"), html.H4(id='bt-res-dd', children="--")], className="text-center"),
+                        dbc.Col([html.H6("Win Rate"), html.H4(id='bt-res-win', children="--")], className="text-center"),
+                    ]),
+                    html.Div(id='bt-error-footer', className="text-center text-danger mt-3 fst-italic small")
+                ])
+            ], className="mb-3 shadow"),
+
+        ], width=12, lg=7)
     ]),
     
-    # LEDGER OUTPUT
+    # LEDGER OUTPUT ROW
     dbc.Row([
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader("TRADE LEDGER", className="fw-bold text-light"),
+                dbc.CardHeader("LEDGER LOGS (Detailed Trades)", className="fw-bold text-light"),
                 dbc.CardBody([
-                    dcc.Textarea(
-                        id='bt-console-output',
-                        value="",
-                        style={'width': '100%', 'height': '200px', 'backgroundColor': '#000', 'color': '#0f0', 'fontFamily': 'monospace'},
-                        readOnly=True
-                    )
+                    html.Div(id='bt-trade-table'),
+                    
+                    html.Pre(id='bt-log-output', children="Waiting...", style={'backgroundColor': '#0a0a0a', 'color': '#00ff41', 'padding': '15px', 'height': '200px', 'overflowY': 'scroll', 'fontSize': '12px', 'border': '1px solid #333', 'marginTop': '10px'})
                 ])
-            ], className="shadow")
+            ], className="mb-5 shadow")
         ], width=12)
     ])
 
 ], fluid=True)
 
 # ==============================================================================
-# 4. CALLBACKS
+# 5. CALLBACKS
 # ==============================================================================
-@callback(
-    [Output('bt-results-area', 'children'), Output('bt-console-output', 'value')],
-    [Input('bt-run-btn', 'n_clicks')],
-    [State('bt-start-date', 'value'), State('bt-end-date', 'value'),
-     State('bt-balance', 'value'), State('bt-pos-size', 'value'),
-     State('bt-max-invest', 'value'), State('bt-rth', 'value')]
-)
-def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, rth_bool):
-    if not n_clicks:
-        return dash.no_update, "Ready."
+# Helper function to create the colored table
+def generate_trade_table(dates, pnl_values, returns_values):
+    table_rows = []
+    
+    for d, pnl, ret in zip(dates, pnl_values, returns_values):
+        is_win = pnl >= 0
+        pnl_text = f"{'+' if is_win else ''}${pnl:,.2f}"
+        ret_text = f"{ret*100:+.2f}%"
+        
+        row_style = {'backgroundColor': 'rgba(0, 255, 65, 0.1)'} if is_win else {'backgroundColor': 'rgba(255, 0, 0, 0.1)'}
+        text_color = '#00ff41' if is_win else '#ff5555'
+        
+        table_rows.append(html.Tr([
+            html.Td(d.split(' ')[0], className="text-white"),
+            html.Td(d.split(' ')[1], className="text-muted small"),
+            html.Td(pnl_text, style={'color': text_color, 'fontWeight': 'bold'}),
+            html.Td(ret_text, style={'color': text_color}),
+        ], style=row_style))
 
-    # 1. Locate the Engine Script (Robust Sibling Lookup)
-    # We look for 10_backtest.py in the SAME folder as this script (src/tools/)
-    engine_path = os.path.join(os.path.dirname(__file__), "10_backtest.py")
+    return dbc.Table(
+        [html.Thead(html.Tr([html.Th("Date"), html.Th("Time"), html.Th("Net P&L"), html.Th("Return (%)")]))] +
+        [html.Tbody(table_rows)],
+        bordered=False, hover=True, size="sm", className="text-white", style={'fontSize': '13px'}
+    )
+
+
+@callback(
+    [Output('bt-res-balance', 'children'), Output('bt-res-return', 'children'),
+     Output('bt-res-dd', 'children'), Output('bt-res-win', 'children'),
+     Output('bt-status-area', 'children'), Output('bt-error-footer', 'children'),
+     Output('bt-log-output', 'children'), Output('bt-equity-chart', 'figure'),
+     Output('bt-trade-table', 'children')],
+    [Input('bt-run-btn', 'n_clicks')],
+    [State('bt-date-range', 'start_date'), State('bt-date-range', 'end_date'),
+     State('bt-balance', 'value'), 
+     State('bt-pos-size', 'value'),
+     State('bt-max-invest', 'value'), 
+     State('bt-tax-rate', 'value'), 
+     State('bt-rth', 'value'), 
+     State('bt-atr-sens', 'value'), 
+     State('bt-trail-pct', 'value')] 
+)
+def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, atr_sens, trail_pct):
+    if not n_clicks:
+        # Base return must be 9 outputs
+        return "--", "--", "--", "--", get_status_ui("ready"), "", "Waiting...", go.Figure(), None 
+
+    # 1. State Update
+    status_msg = get_status_ui("running")
+    
+    # FIX APPLIED: Robust Engine Location
+    # Locate engine in the SAME directory as this script.
+    current_dir = Path(__file__).resolve().parent
+    engine_path = current_dir / "10_backtest.py"
     
     if not os.path.exists(engine_path):
-        return html.Div("❌ ERROR: Calculation Engine (10_backtest.py) not found.", className="text-danger"), ""
+        return "ERR", "ERR", "ERR", "ERR", get_status_ui("crash"), f"Engine Not Found at: {engine_path}", "", go.Figure(), None
 
-    # 2. Prepare Command
+    # 3. Command Construction
+    rth_bool = True if rth_value and rth_value[0] is True else False
+    archive_bool = True 
+
     cmd = [
         sys.executable, 
-        engine_path,  # Absolute path to the engine
-        "--start_date", str(start_date),
-        "--end_date", str(end_date),
-        "--start_balance", str(start_balance),
-        "--pos_size_pct", str(pos_size),
-        "--max_invest", str(max_invest),
-        "--enforce_rth", str(rth_bool),
-        "--archive_report", "True"
+        str(engine_path), # Convert Path object to string for subprocess
+        "--start_date", str(start_date), "--end_date", str(end_date),
+        "--start_balance", str(start_balance), "--pos_size_pct", str(pos_size),
+        "--max_invest", str(max_invest), "--tax_rate", str(tax_rate),
+        "--atr_sensitivity", str(atr_sens), "--trailing_stop_pct", str(trail_pct / 100.0), 
+        "--enforce_rth", str(rth_bool), "--archive_report", str(archive_bool)
     ]
     
-    # 3. Execute Subprocess
-    # We pass os.environ to ensure PYTHONPATH from app.py is inherited
+    # Environment Setup
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT_DIR)
+    keys_to_remove = ["WERKZEUG_RUN_MAIN", "WERKZEUG_SERVER_FD"]
+    for key in keys_to_remove: env.pop(key, None)
+        
     try:
-        process = subprocess.run(cmd, capture_output=True, text=True, env=os.environ)
+        # 4. Execute Subprocess (Engine)
+        process = subprocess.run(cmd, capture_output=True, text=True, env=env, close_fds=True)
+        full_output = process.stdout
+        log_output = full_output
         
-        # 4. Parse Output
-        stdout = process.stdout
-        stderr = process.stderr
-        
-        # Check for JSON Result in the stream
+        # 5. Parse JSON Result
         json_marker = "JSON_RESULT:"
-        if json_marker in stdout:
-            # Split log from result
-            raw_log, json_str = stdout.split(json_marker)
-            result = json.loads(json_str)
+        if json_marker in full_output:
+            log_text, json_text = full_output.split(json_marker)
+            result = json.loads(json_text)
             
-            # Format Display
-            res_display = html.Div([
-                html.H4(f"Final Balance: ${result['final_balance']:,.2f}", className="text-success"),
-                html.Hr(),
-                dbc.Row([
-                    dbc.Col(html.H5(f"Return: {result['total_return_pct']:.2f}%", className="text-info"), width=4),
-                    dbc.Col(html.H5(f"Win Rate: {result['win_rate']:.1f}%", className="text-warning"), width=4),
-                    dbc.Col(html.H5(f"Trades: {result['total_trades']}", className="text-light"), width=4),
-                ])
-            ])
-            return res_display, raw_log
+            # --- HANDLE LOGICAL ERRORS (No Data, No Trades) ---
+            if "error" in result:
+                 return "--", "--", "--", "--", get_status_ui("failure", result['error']), "", log_text, go.Figure(), None 
+
+            # --- SUCCESS PATH ---
+            
+            # A. Prepare Chart
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=list(range(len(result['equity_curve']))), 
+                y=result['equity_curve'], 
+                mode='lines', 
+                name="Equity", 
+                line=dict(color='#00ff41', width=3)
+            ))
+            fig.add_hline(y=start_balance, line_dash="dot", line_color="#888")
+            fig.update_layout(template="plotly_dark", title="Equity Curve", margin=dict(t=10, b=10, l=10, r=10), height=350, yaxis_title="$")
+
+            # B. Prepare Table
+            trade_table = generate_trade_table(
+                result['trade_dates'],
+                result['trade_pnl'],
+                result['trade_returns']
+            )
+
+            # C. Format Final Stats
+            return (
+                f"${result['final_balance']:,.2f}",
+                html.Span(f"{result['total_return_pct']:+.1f}%", className="text-success" if result['total_return_pct'] > 0 else "text-danger"),
+                html.Span(f"{result['max_drawdown_pct']:.1f}%", className="text-danger"),
+                f"{result['win_rate']:.1f}%",
+                get_status_ui("success", "Analysis Complete"), 
+                "", 
+                log_text, 
+                fig, 
+                trade_table
+            )
         else:
-            # Fallback for errors
-            err_display = html.Div([
-                html.H4("Execution Failed", className="text-danger"),
-                html.Pre(stderr if stderr else stdout)
-            ])
-            return err_display, stdout + "\n" + stderr
+            # Subprocess failed unexpectedly (e.g. library path error)
+            return "--", "--", "--", "--", get_status_ui("crash"), "Execution Failed (Check Terminal)", log_output, go.Figure(), None
 
     except Exception as e:
-        return html.Div(f"System Error: {str(e)}", className="text-danger"), str(e)
+        # Python error in the GUI itself
+        return "--", "--", "--", "--", get_status_ui("crash"), f"GUI Error: {str(e)}", "", go.Figure(), None

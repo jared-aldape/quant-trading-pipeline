@@ -44,8 +44,7 @@ def initialize_database():
         PRIMARY KEY (datetime_utc, ticker)
     )""")
 
-    # 3. OPTIONS (XSP)
-    # UPDATED: Matches the composite key used in 03_fetch_options.py
+# 3. OPTIONS (XSP)
     log.info(f"🔨 Initializing: {config.TBL_OPTIONS}")
     con.execute(f"DROP TABLE IF EXISTS {config.TBL_OPTIONS}")
     con.execute(f"""
@@ -55,7 +54,8 @@ def initialize_database():
         expiration DATE, strike DOUBLE, type VARCHAR,
         open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume BIGINT,
         iv DOUBLE, delta DOUBLE, gamma DOUBLE, vega DOUBLE, theta DOUBLE,
-        PRIMARY KEY (datetime_utc, ticker, strike, type, expiry)
+        -- FIX APPLIED HERE: Changed 'expiry' to 'expiration'
+        PRIMARY KEY (datetime_utc, ticker, strike, type, expiration) 
     )""")
 
     # 4. RISK FREE RATE (IRX)

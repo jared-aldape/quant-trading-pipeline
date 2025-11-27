@@ -27,6 +27,7 @@ STRIKE_RANGE = 2
 CONTRACT_TYPE = 'C'
 API_PACE_SECONDS = 12.5 
 
+# Schema must match 00_setup_database.py
 DB_SCHEMA_ORDER = [
     'datetime_utc', 'ticker', 'expiration', 'strike', 'type',
     'open', 'high', 'low', 'close', 'volume',
@@ -67,12 +68,16 @@ def get_polygon_data(ticker, date_str):
         # 1. Convert UNIX ms to Datetime Object (Explicitly UTC)
         df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms', utc=True)
         
-        # 2. Safety Check: If for any reason it's naive (e.g. source change), Localize from NY.
+        # 2. Safety Check: If for any reason it's naive, Localize from NY.
         if df['datetime_utc'].dt.tz is None:
              df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(config.TZ_NY)
         
-        # 3. Final Conversion to Vault Standard (UTC)
+        # 3. Convert to Vault Standard (UTC)
         df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_UTC)
+
+        # 4. CRITICAL FIX: Strip Timezone Info ("Force Naive UTC")
+        # This prevents the DuckDB ambiguity that caused the previous errors.
+        df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(None)
 
         df['ticker'] = ticker
         return df
@@ -169,7 +174,8 @@ def fetch_options():
                     con.register('df_opt', df)
                     con.execute(f"""
                     INSERT INTO {config.TBL_OPTIONS} SELECT * FROM df_opt
-                    ON CONFLICT (datetime_utc, ticker) DO NOTHING
+                    -- FIXED: EXPLICIT 5-COLUMN COMPOSITE KEY (Integrity Fix)
+                    ON CONFLICT (datetime_utc, ticker, strike, type, expiration) DO NOTHING
                     """)
                     total_rows_inserted += len(df)
                     log.info(f"      -> Fetched {ticker}: {len(df)} rows")
