@@ -13,11 +13,6 @@ from datetime import date, datetime, timedelta
 # ==============================================================================
 # 1. PATH CONSTITUTION
 # ==============================================================================
-# FIX APPLIED: Changed from parents[3] to parents[2]
-# File is in: src/tools/11_backtest.py
-# .parents[0] = tools
-# .parents[1] = src
-# .parents[2] = PROJECT ROOT (Where app.py lives)
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
@@ -34,7 +29,6 @@ register_page(__name__, path='/backtester', name='Backtester')
 # ==============================================================================
 # 3. HELPER UI & DEFAULTS
 # ==============================================================================
-# Dynamic Defaults
 today = date.today()
 default_start = (today - timedelta(days=45)).strftime("%Y-%m-%d")
 default_end = today.strftime("%Y-%m-%d")
@@ -91,6 +85,7 @@ layout = dbc.Container([
                             dbc.Input(id='bt-pos-size', type='number', value=0.5, step=0.1, className="mb-2")
                         ], width=6)
                     ]),
+                    
                     dbc.Row([
                         dbc.Col([
                             html.Label("Max Invest ($)"),
@@ -101,8 +96,34 @@ layout = dbc.Container([
                             dbc.Input(id='bt-tax-rate', type='number', value=0.268, step=0.001, className="mb-2")
                         ], width=6)
                     ]),
+
+                    # Leverage & Ideal Gain (New Row)
+                    dbc.Row([
+                        dbc.Col([
+                            html.Label("Leverage (x)"),
+                            dbc.Input(id='bt-leverage', type='number', value=50.0, min=1.0, max=100.0, step=0.1, className="mb-2")
+                        ], width=6),
+                        dbc.Col([
+                            html.Label("Ideal Gain (%)"),
+                            dbc.Input(id='bt-ideal-gain', type='number', value=0.0, min=0.0, step=5.0, className="mb-2", placeholder="e.g. 40")
+                        ], width=6)
+                    ]),
                     
-                    dbc.Checklist(options=[{"label": " Enforce RTH (9:30-4:00 EST)", "value": True}], value=[True], id="bt-rth", switch=True, className="mt-3 text-warning"),
+                    # Selection Mode Dropdown
+                    html.Label("Execution Strategy", className="mt-2"),
+                    dcc.Dropdown(
+                        id='bt-selection-mode',
+                        options=[
+                            {'label': 'Standard (First Signal)', 'value': 'FIRST'},
+                            {'label': 'Optimized (Best Signal)', 'value': 'BEST'}
+                        ],
+                        value='FIRST',
+                        clearable=False,
+                        className="mb-3",
+                        style={'color': '#000000'}
+                    ),
+
+                    dbc.Checklist(options=[{"label": " Enforce RTH (9:30-4:00 EST)", "value": True}], value=[True], id="bt-rth", switch=True, className="mt-2 text-warning"),
                     html.Hr(),
                     dbc.Button("▶ RUN SIMULATION", id='bt-run-btn', color="info", className="w-100 fw-bold")
                 ])
@@ -113,7 +134,7 @@ layout = dbc.Container([
                 dbc.CardBody([
                     dbc.Row([
                         dbc.Col([html.Label("ATR Sensitivity"), dcc.Input(id='bt-atr-sens', type='number', value=0.5, step=0.1, className="form-control")], width=6),
-                        dbc.Col([html.Label("Trailing Stop (%)"), dcc.Input(id='bt-trail-pct', type='number', value=25, className="form-control")], width=6),
+                        dbc.Col([html.Label("Trailing Stop (%)"), dcc.Input(id='bt-trail-pct', type='number', value=0.5, className="form-control")], width=6),
                     ]),
                 ])
             ], className="mb-3 shadow"),
@@ -167,10 +188,8 @@ layout = dbc.Container([
 # ==============================================================================
 # 5. CALLBACKS
 # ==============================================================================
-# Helper function to create the colored table
 def generate_trade_table(dates, pnl_values, returns_values):
     table_rows = []
-    
     for d, pnl, ret in zip(dates, pnl_values, returns_values):
         is_win = pnl >= 0
         pnl_text = f"{'+' if is_win else ''}${pnl:,.2f}"
@@ -192,7 +211,6 @@ def generate_trade_table(dates, pnl_values, returns_values):
         bordered=False, hover=True, size="sm", className="text-white", style={'fontSize': '13px'}
     )
 
-
 @callback(
     [Output('bt-res-balance', 'children'), Output('bt-res-return', 'children'),
      Output('bt-res-dd', 'children'), Output('bt-res-win', 'children'),
@@ -207,63 +225,60 @@ def generate_trade_table(dates, pnl_values, returns_values):
      State('bt-tax-rate', 'value'), 
      State('bt-rth', 'value'), 
      State('bt-atr-sens', 'value'), 
-     State('bt-trail-pct', 'value')] 
+     State('bt-trail-pct', 'value'),
+     State('bt-selection-mode', 'value'),
+     State('bt-leverage', 'value'),
+     State('bt-ideal-gain', 'value')] # NEW INPUT
 )
-def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, atr_sens, trail_pct):
+def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, atr_sens, trail_pct, selection_mode, leverage, ideal_gain):
     if not n_clicks:
-        # Base return must be 9 outputs
         return "--", "--", "--", "--", get_status_ui("ready"), "", "Waiting...", go.Figure(), None 
 
-    # 1. State Update
-    status_msg = get_status_ui("running")
-    
-    # FIX APPLIED: Robust Engine Location
-    # Locate engine in the SAME directory as this script.
+    # Defaults
+    lev_val = leverage if leverage else 1.0
+    ideal_gain_val = ideal_gain if ideal_gain else 0.0
+
     current_dir = Path(__file__).resolve().parent
     engine_path = current_dir / "10_backtest.py"
     
     if not os.path.exists(engine_path):
         return "ERR", "ERR", "ERR", "ERR", get_status_ui("crash"), f"Engine Not Found at: {engine_path}", "", go.Figure(), None
 
-    # 3. Command Construction
     rth_bool = True if rth_value and rth_value[0] is True else False
     archive_bool = True 
 
     cmd = [
         sys.executable, 
-        str(engine_path), # Convert Path object to string for subprocess
+        str(engine_path),
         "--start_date", str(start_date), "--end_date", str(end_date),
         "--start_balance", str(start_balance), "--pos_size_pct", str(pos_size),
         "--max_invest", str(max_invest), "--tax_rate", str(tax_rate),
         "--atr_sensitivity", str(atr_sens), "--trailing_stop_pct", str(trail_pct / 100.0), 
-        "--enforce_rth", str(rth_bool), "--archive_report", str(archive_bool)
+        "--enforce_rth", str(rth_bool), "--archive_report", str(archive_bool),
+        "--selection_mode", str(selection_mode),
+        "--leverage", str(lev_val),
+        "--ideal_gain_pct", str(ideal_gain_val / 100.0) # Convert 40 -> 0.4
     ]
     
-    # Environment Setup
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT_DIR)
     keys_to_remove = ["WERKZEUG_RUN_MAIN", "WERKZEUG_SERVER_FD"]
     for key in keys_to_remove: env.pop(key, None)
         
     try:
-        # 4. Execute Subprocess (Engine)
         process = subprocess.run(cmd, capture_output=True, text=True, env=env, close_fds=True)
         full_output = process.stdout
         log_output = full_output
         
-        # 5. Parse JSON Result
         json_marker = "JSON_RESULT:"
         if json_marker in full_output:
             log_text, json_text = full_output.split(json_marker)
             result = json.loads(json_text)
             
-            # --- HANDLE LOGICAL ERRORS (No Data, No Trades) ---
             if "error" in result:
                  return "--", "--", "--", "--", get_status_ui("failure", result['error']), "", log_text, go.Figure(), None 
 
-            # --- SUCCESS PATH ---
-            
-            # A. Prepare Chart
+            # Success Path
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=list(range(len(result['equity_curve']))), 
@@ -275,14 +290,12 @@ def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size,
             fig.add_hline(y=start_balance, line_dash="dot", line_color="#888")
             fig.update_layout(template="plotly_dark", title="Equity Curve", margin=dict(t=10, b=10, l=10, r=10), height=350, yaxis_title="$")
 
-            # B. Prepare Table
             trade_table = generate_trade_table(
                 result['trade_dates'],
                 result['trade_pnl'],
                 result['trade_returns']
             )
 
-            # C. Format Final Stats
             return (
                 f"${result['final_balance']:,.2f}",
                 html.Span(f"{result['total_return_pct']:+.1f}%", className="text-success" if result['total_return_pct'] > 0 else "text-danger"),
@@ -295,9 +308,7 @@ def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size,
                 trade_table
             )
         else:
-            # Subprocess failed unexpectedly (e.g. library path error)
             return "--", "--", "--", "--", get_status_ui("crash"), "Execution Failed (Check Terminal)", log_output, go.Figure(), None
 
     except Exception as e:
-        # Python error in the GUI itself
         return "--", "--", "--", "--", get_status_ui("crash"), f"GUI Error: {str(e)}", "", go.Figure(), None
