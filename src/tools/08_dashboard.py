@@ -23,62 +23,59 @@ from src.utils import config
 from src.utils.logger import get_logger
 
 # ==============================================================================
-# 2. MPA PAGE REGISTRATION
+# 2. PAGE REGISTRATION
 # ==============================================================================
 register_page(__name__, path='/analysis', name='Analysis')
 logger = get_logger("Dashboard")
-UTC_TZ = pytz.utc
 STRIKE_RANGE = 2
 
 # ==============================================================================
 # 3. HELPER FUNCTIONS
 # ==============================================================================
-def clean_df(df):
+def clean_df(df, target_timezone=config.TZ_LOCAL):
     """
-    Standardizes DataFrames for display.
-    ENFORCES TIMEZONE LAW: Converts UTC Storage -> Local Display (PST).
+    Standardizes DataFrames.
+    Input: Assumes UTC from Database.
+    Output: Converts to 'target_timezone' for display.
     """
-    if df is None or df.empty: return pd.DataFrame()
+    if df is None or df.empty: return pd.DataFrame(columns=['dt', 'close'])
     
     # Normalize Columns
     df.columns = df.columns.str.strip().str.lower()
     df = df.loc[:, ~df.columns.duplicated()]
-    
     rename_map = {'datetime_utc': 'dt', 'datetime': 'dt', 'date': 'dt', 'timestamp': 'dt', 'close': 'close'}
     df.rename(columns=rename_map, inplace=True)
     
-    if 'dt' not in df.columns: return pd.DataFrame()
+    if 'dt' not in df.columns: return pd.DataFrame(columns=['dt', 'close'])
 
-    # 1. Convert to Datetime
+    # Ensure Datetime
     if not pd.api.types.is_datetime64_any_dtype(df['dt']):
         df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
     
     df = df.dropna(subset=['dt'])
     
-    # 2. Ensure UTC Awareness (Vault Standard)
+    # Ensure Source is UTC
     if df['dt'].dt.tz is None:
-        # Assume Vault is UTC
-        df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC, ambiguous='NaT')
+        df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC)
     else:
         df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
         
-    # 3. TIMEZONE LAW: CONVERT TO LOCAL FOR DISPLAY ("Local on the Glass")
-    df['dt'] = df['dt'].dt.tz_convert(config.TZ_LOCAL)
-        
-    df = df.drop_duplicates(subset=['dt'])
+    # Convert to Display Timezone
+    df['dt'] = df['dt'].dt.tz_convert(target_timezone)
+    
     return df.sort_values('dt')
 
 def calculate_indicators(df):
-    if 'close' not in df.columns: return df
+    if df.empty or 'close' not in df.columns: return df
     
-    # MACD (12, 26, 9)
+    # MACD
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = ema12 - ema26
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['hist'] = df['macd'] - df['signal']
     
-    # RSI (Wilder's 14)
+    # RSI
     delta = df['close'].diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
@@ -86,8 +83,6 @@ def calculate_indicators(df):
     ma_down = down.ewm(com=13, adjust=False, min_periods=14).mean()
     rs = ma_up / ma_down
     df['rsi'] = 100 - (100 / (1 + rs))
-    df['rsi_ma'] = df['rsi'].rolling(window=14).mean()
-    
     return df
 
 def get_signal_events():
@@ -95,9 +90,8 @@ def get_signal_events():
     try:
         query = f"SELECT date, entry_timestamp_utc, xsp_price FROM {config.TBL_MANIFEST} ORDER BY entry_timestamp_utc DESC"
         df = con.execute(query).df()
-    except Exception: return []
+    except: return []
     con.close()
-    
     return [{'label': f"{row['date']} | Est. ATM: ${row['xsp_price']:.2f}", 'value': row['entry_timestamp_utc']} for _, row in df.iterrows()]
 
 def get_tickers_for_event(event_ts):
@@ -107,18 +101,15 @@ def get_tickers_for_event(event_ts):
         row = con.execute(f"SELECT date, xsp_price FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {event_ts}").df().iloc[0]
         trade_date = pd.to_datetime(row['date'])
         atm = round(row['xsp_price'])
-        
         tickers = []
         best = None
         date_str = trade_date.strftime("%y%m%d")
-        
         for offset in range(-STRIKE_RANGE, STRIKE_RANGE + 1):
             strike = atm + offset
             ticker = f"O:XSP{date_str}C{int(strike*1000):08d}"
             label = f"{ticker} ({'ATM' if offset==0 else 'OTM' if offset>0 else 'ITM'} ${strike})"
             tickers.append({'label': label, 'value': ticker})
             if offset == 0: best = ticker
-            
         con.close()
         return tickers, best
     except:
@@ -129,16 +120,14 @@ def get_tickers_for_event(event_ts):
 # 4. LAYOUT
 # ==============================================================================
 layout = dbc.Container([
-    # HEADER
     dbc.Row([
         dbc.Col([
             html.H6("TOOL ID: 3", className="text-muted mb-0"),
-            html.H2("ANALYSIS DASHBOARD", className="display-6 fw-bold text-info"),
+            html.H2("ANALYSIS DASHBOARD (FULL SESSION)", className="display-6 fw-bold text-info"),
             html.Hr(className="my-2")
         ], width=12)
     ], className="mb-4"),
 
-    # CONTROLS
     dbc.Row([
         dbc.Col([
             dbc.Card([
@@ -146,46 +135,26 @@ layout = dbc.Container([
                     dbc.Row([
                         dbc.Col([
                             html.Label("1. Signal Event"),
-                            dcc.Dropdown(
-                                id='an-event-selector', 
-                                options=get_signal_events(), 
-                                clearable=False, 
-                                className="mb-2",
-                                style={'color': '#000000'}
-                            )
-                        ], width=12, md=6),
+                            dcc.Dropdown(id='an-event-selector', options=get_signal_events(), clearable=False, className="mb-2", style={'color': '#000'})
+                        ], width=6),
                         dbc.Col([
                             html.Label("2. Strike Selection"),
-                            dcc.Dropdown(
-                                id='an-strike-selector', 
-                                options=[], 
-                                disabled=True, 
-                                clearable=False,
-                                style={'color': '#000000'}
-                            )
-                        ], width=12, md=6)
+                            dcc.Dropdown(id='an-strike-selector', options=[], disabled=True, clearable=False, style={'color': '#000'})
+                        ], width=6)
                     ])
                 ])
             ], className="mb-3 shadow")
         ], width=12),
-        
-        # STATS PANEL
-        dbc.Col([
-            html.Div(id='an-stats-panel', className="text-end text-info fw-bold mb-2")
-        ], width=12)
+        dbc.Col([html.Div(id='an-stats-panel', className="text-end text-info fw-bold mb-2")], width=12)
     ]),
 
-    # GRAPH
     dbc.Row([
         dbc.Col([
             dbc.Card([
-                dbc.CardBody([
-                    dcc.Graph(id='an-replay-chart', style={'height': '1200px'})
-                ], className="p-1") 
+                dbc.CardBody([dcc.Graph(id='an-replay-chart', style={'height': '1200px'})], className="p-1")
             ], className="shadow mb-5")
         ], width=12)
     ])
-
 ], fluid=True)
 
 # ==============================================================================
@@ -209,46 +178,44 @@ def update_chart(ts, ticker):
 
     con = duckdb.connect(str(config.DB_FILE))
     
-    # --- DATA LOADING ---
     try:
         trade_info = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {ts}").df().iloc[0]
         trade_date_str = str(pd.to_datetime(trade_info['date']).date())
         
-        # --- RTH CLIPPER LOGIC (START 09:30 EST, END 16:00 EST) ---
-        # 1. Define Market Open/Close in NY Time
-        ny_open = pd.Timestamp(f"{trade_date_str} 09:30:00").tz_localize(config.TZ_NY)
-        ny_close = pd.Timestamp(f"{trade_date_str} 16:00:00").tz_localize(config.TZ_NY)
+        # --- DEFINING THE WALLS ---
+        # Wall 1: The Full 24-Hour Day (For VIX/Futures)
+        day_start_local = pd.Timestamp(f"{trade_date_str} 00:00:00").tz_localize(config.TZ_LOCAL)
         
-        # 2. Convert to LOCAL Time (for filtering the clean_df output)
-        rth_start_local = ny_open.tz_convert(config.TZ_LOCAL)
-        rth_end_local = ny_close.tz_convert(config.TZ_LOCAL)
+        # Wall 2: The Market Hours (For SPX/Options alignment visualization, optional)
+        # Note: We will filter mostly by "Day" to show everything available for that calendar date.
         
-        # SPX
+        # --- DATA FETCHING ---
+        
+        # 1. SPX (Indices) - Get Full Day
         spx_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE) = '{trade_date_str}' ORDER BY datetime_utc ASC").df()
         spx_df = clean_df(spx_df)
-        spx_df = spx_df[(spx_df['dt'] >= rth_start_local) & (spx_df['dt'] <= rth_end_local)] # RTH Clip
-        
-        # Futures (Optional)
+        spx_df = spx_df[spx_df['dt'] >= day_start_local] # Show everything from Midnight Local onwards
+
+        # 2. FUTURES (Optional)
         try:
             es_df = con.execute(f"SELECT * FROM {config.TBL_FUTURES} WHERE ticker='ES' AND CAST(datetime_utc AS DATE) = '{trade_date_str}' ORDER BY datetime_utc ASC").df()
             es_df = clean_df(es_df)
-            es_df = es_df[(es_df['dt'] >= rth_start_local) & (es_df['dt'] <= rth_end_local)] # RTH Clip
+            es_df = es_df[es_df['dt'] >= day_start_local] # Show Full 24h
         except: es_df = pd.DataFrame()
 
-        # Options
+        # 3. OPTIONS
         opt_df = con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df()
         opt_df = clean_df(opt_df)
-        opt_df = opt_df[(opt_df['dt'] >= rth_start_local) & (opt_df['dt'] <= rth_end_local)] # RTH Clip
+        opt_df = opt_df[opt_df['dt'] >= day_start_local] # Show whatever exists for the day
         
-        # VIX Indicators
+        # 4. VIX Indicators
         start_date = str(pd.to_datetime(trade_date_str) - timedelta(days=60))
         vix_raw = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) BETWEEN '{start_date}' AND '{trade_date_str}' ORDER BY datetime_utc ASC").df()
         vix_raw = clean_df(vix_raw)
         vix_raw = calculate_indicators(vix_raw)
         
-        # Filter for display date AND apply RTH clipper
         vix_plot = vix_raw[vix_raw['dt'].dt.date == pd.to_datetime(trade_date_str).date()].copy()
-        vix_plot = vix_plot[(vix_plot['dt'] >= rth_start_local) & (vix_plot['dt'] <= rth_end_local)]
+        vix_plot = vix_plot[vix_plot['dt'] >= day_start_local] # Show Full 24h
         
     except Exception as e:
         con.close()
@@ -256,80 +223,58 @@ def update_chart(ts, ticker):
     
     con.close()
 
-    if opt_df.empty: return go.Figure(), "No Option Data Found"
-
-    # --- ENTRY & P&L LOGIC ---
+    # --- ENTRY SIGNAL LOGIC ---
     signal_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
     signal_dt_local = signal_dt_utc.tz_convert(config.TZ_LOCAL)
     
-    entry_slice = opt_df[opt_df['dt'] >= signal_dt_local]
-    
-    if not entry_slice.empty:
-        entry_row = entry_slice.iloc[0]
-        entry_price = entry_row['close']
-        entry_time = entry_row['dt']
-        
-        opt_df['P&L_Pct'] = ((opt_df['close'] - entry_price) / entry_price) * 100
-        opt_df['P&L_Color'] = np.where(opt_df['P&L_Pct'] >= 0, 'rgba(0, 200, 83, 0.7)', 'rgba(211, 47, 47, 0.7)')
-        
-        max_roi = opt_df[opt_df['dt'] >= entry_time]['P&L_Pct'].max()
-        stats_text = f"ENTRY: ${entry_price:.2f} | PEAK ROI: +{max_roi:.1f}%"
+    if not opt_df.empty:
+        # Find price at signal time
+        entry_slice = opt_df[opt_df['dt'] >= signal_dt_local]
+        if not entry_slice.empty:
+            entry_row = entry_slice.iloc[0]
+            entry_price = entry_row['close']
+            entry_time = entry_row['dt']
+            
+            opt_df['P&L_Pct'] = ((opt_df['close'] - entry_price) / entry_price) * 100
+            opt_df['P&L_Color'] = np.where(opt_df['P&L_Pct'] >= 0, 'rgba(0, 200, 83, 0.7)', 'rgba(211, 47, 47, 0.7)')
+            max_roi = opt_df['P&L_Pct'].max()
+            stats_text = f"ENTRY: ${entry_price:.2f} | PEAK ROI: +{max_roi:.1f}%"
+        else:
+            entry_price, stats_text = 0, "Signal outside Option Data range"
     else:
-        entry_price = 0
-        stats_text = "Signal Mismatch (No overlapping option data)"
+        entry_price, stats_text = 0, "No Option Data"
 
     # --- PLOTTING ---
     fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, 
-        row_heights=[0.4, 0.3, 0.15, 0.15], 
-        vertical_spacing=0.08,
+        rows=4, cols=1, shared_xaxes=True, row_heights=[0.4, 0.3, 0.15, 0.15], vertical_spacing=0.08,
         specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
-        subplot_titles=("Context: SPX vs /ES Futures (Local Time)", "Strategy: Option Price vs P&L", "VIX MACD (Momentum)", "VIX RSI (Trend)")
+        subplot_titles=("Context: SPX / Futures (Full Day)", "Option P&L", "VIX MACD", "VIX RSI")
     )
 
-    # ROW 1: SPX & FUTURES
-    fig.add_trace(go.Candlestick(
-        x=spx_df['dt'], open=spx_df['open'], high=spx_df['high'], low=spx_df['low'], close=spx_df['close'], 
-        name="SPX", increasing_line_color='#26A69A', decreasing_line_color='#EF5350'
-    ), row=1, col=1)
+    # 1. Context (SPX & Futures)
+    if not spx_df.empty:
+        fig.add_trace(go.Candlestick(x=spx_df['dt'], open=spx_df['open'], high=spx_df['high'], low=spx_df['low'], close=spx_df['close'], name="SPX"), row=1, col=1)
     
     if not es_df.empty:
-        fig.add_trace(go.Scatter(x=es_df['dt'], y=es_df['close'], mode='lines', name="/ES Futures", line=dict(color='#2962FF', width=1, dash='dot'), opacity=0.7), row=1, col=1)
+        fig.add_trace(go.Scatter(x=es_df['dt'], y=es_df['close'], mode='lines', line=dict(color='cyan', width=1, dash='dot'), name="/ES Futures"), row=1, col=1)
 
-    # ROW 2: OPTION P&L
-    fig.add_trace(go.Bar(x=opt_df['dt'], y=opt_df['P&L_Pct'], marker_color=opt_df['P&L_Color'], name="P&L %", hoverinfo='y'), row=2, col=1, secondary_y=True)
-    fig.add_trace(go.Scatter(x=opt_df['dt'], y=opt_df['close'], mode='lines', line=dict(color='#FFFFFF', width=2), name="Option Price"), row=2, col=1, secondary_y=False)
-    
-    if entry_price > 0:
-        fig.add_vline(x=entry_time, line_dash="dash", line_color="#FFD600", opacity=0.8, row=2, col=1)
-
-    # ROW 3: VIX MACD
-    if not vix_plot.empty:
-        vix_plot['hist_prev'] = vix_plot['hist'].shift(1)
-        colors = ['#26A69A' if v >= 0 else '#EF5350' for v in vix_plot['hist']] 
+    # 2. Options P&L
+    if not opt_df.empty:
+        fig.add_trace(go.Bar(x=opt_df['dt'], y=opt_df['P&L_Pct'], marker_color=opt_df['P&L_Color'], name="P&L %"), row=2, col=1, secondary_y=True)
+        fig.add_trace(go.Scatter(x=opt_df['dt'], y=opt_df['close'], mode='lines', line=dict(color='#FFF', width=2), name="Price"), row=2, col=1, secondary_y=False)
         
-        fig.add_trace(go.Bar(x=vix_plot['dt'], y=vix_plot['hist'], name="Hist", marker_color=colors), row=3, col=1)
-        fig.add_trace(go.Scatter(x=vix_plot['dt'], y=vix_plot['macd'], name="MACD", line=dict(color='#2962FF', width=1.5)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=vix_plot['dt'], y=vix_plot['signal'], name="Signal", line=dict(color='#FF6D00', width=1.5)), row=3, col=1)
+        if entry_price > 0:
+            fig.add_vline(x=entry_time, line_dash="dash", line_color="#FFD600", row=2, col=1)
 
-    # ROW 4: VIX RSI
+    # 3. VIX Indicators
     if not vix_plot.empty:
-        fig.add_trace(go.Scatter(x=vix_plot['dt'], y=vix_plot['rsi'], name="RSI", line=dict(color='#D500F9', width=2)), row=4, col=1)
-        fig.add_hline(y=70, line_dash="dot", line_color="#EF5350", row=4, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="#26A69A", row=4, col=1)
+        colors = ['#26A69A' if v >= 0 else '#EF5350' for v in vix_plot['hist']]
+        fig.add_trace(go.Bar(x=vix_plot['dt'], y=vix_plot['hist'], marker_color=colors, name="Hist"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=vix_plot['dt'], y=vix_plot['macd'], line=dict(color='#2962FF'), name="MACD"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=vix_plot['dt'], y=vix_plot['signal'], line=dict(color='#FF6D00'), name="Signal"), row=3, col=1)
+        fig.add_trace(go.Scatter(x=vix_plot['dt'], y=vix_plot['rsi'], line=dict(color='#D500F9'), name="RSI"), row=4, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="red", row=4, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="green", row=4, col=1)
 
-    # STYLING
-    fig.update_layout(
-        template="plotly_dark", 
-        height=1200, 
-        showlegend=True, 
-        xaxis_rangeslider_visible=False,
-        margin=dict(t=50, b=50, l=60, r=60),
-        legend=dict(orientation="h", y=-0.05, x=0.5, xanchor="center")
-    )
-    
-    fig.update_yaxes(title_text="Price", row=2, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="P&L %", row=2, col=1, secondary_y=True, showgrid=False)
-    fig.update_yaxes(range=[0, 100], row=4, col=1)
-
+    fig.update_layout(template="plotly_dark", height=1200, showlegend=True, xaxis_rangeslider_visible=False, margin=dict(t=50, b=50, l=60, r=60))
     return fig, stats_text

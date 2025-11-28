@@ -3,7 +3,7 @@ import duckdb
 import yfinance as yf
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+import pytz
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
@@ -24,7 +24,7 @@ def run_pipeline():
     
     con = duckdb.connect(str(config.DB_FILE))
     
-    # Create Table if needed
+    # Create Table
     con.execute(f"""
         CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (
             datetime_utc TIMESTAMP,
@@ -40,40 +40,40 @@ def run_pipeline():
 
     tickers = ["^GSPC", "^VIX"]
     friendly_names = {"^GSPC": "SPX", "^VIX": "VIX"}
-    
+    MACHINE_TZ = 'America/Los_Angeles'
+
     for sym in tickers:
         try:
-            # Download 60 days of 5m data (Max allowable by Yahoo)
-            df = yf.download(sym, period="60d", interval="5m", progress=False)
-            
+            # 1. FETCH
+            df = yf.download(sym, period="60d", interval="5m", progress=False, auto_adjust=True)
             if df.empty:
                 log.warning(f"⚠️ No data found for {sym}")
                 continue
                 
-            # Flatten Yahoo's MultiIndex if present
+            # 2. CLEAN
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-                
-            # Normalize Headers
             df = df.reset_index()
             df.columns = df.columns.str.lower()
-            df.rename(columns={'datetime': 'datetime_utc'}, inplace=True)
-            
-            # Add Ticker Column (using friendly name e.g. SPX instead of ^GSPC)
+            df.rename(columns={'datetime': 'datetime_utc', 'date': 'datetime_utc'}, inplace=True)
             df['ticker'] = friendly_names[sym]
             
-            # Timezone Standardization (UTC)
-            # Yahoo 5m data is usually 'America/New_York'
+            # 3. TIMEZONE STANDARDIZATION (The "Naive UTC" Fix)
+            
+            # A. Ensure we are physically at UTC first
             if df['datetime_utc'].dt.tz is None:
-                df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(config.TZ_NY)
+                # If naive input, assume PST -> convert to UTC
+                df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(MACHINE_TZ).dt.tz_convert(config.TZ_UTC)
             else:
-                df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_NY)
+                # If aware input, just convert to UTC
+                df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_UTC)
             
-            # Convert to UTC for storage
-            df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_UTC)
+            # B. CRITICAL: Strip Timezone Info (Make Naive)
+            # This prevents DuckDB from converting back to Local Time during insertion.
+            # 14:30+00:00 -> 14:30 (Naive)
+            df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(None)
             
-            # Upsert into DuckDB (Insert or Ignore duplicates)
-            # Since we defined a PRIMARY KEY, we can use ON CONFLICT DO NOTHING
+            # 4. STORE
             con.execute(f"""
                 INSERT OR IGNORE INTO {config.TBL_INDICES} 
                 SELECT datetime_utc, ticker, open, high, low, close, volume 
@@ -84,6 +84,12 @@ def run_pipeline():
             
         except Exception as e:
             log.error(f"Failed to ingest {sym}: {e}")
+
+    # Validation
+    try:
+        count = con.execute(f"SELECT COUNT(*) FROM {config.TBL_INDICES}").fetchone()[0]
+        log.info(f"📊 Total Index Rows in Vault: {count}")
+    except: pass
 
     con.close()
 

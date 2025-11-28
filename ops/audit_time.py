@@ -1,56 +1,73 @@
 import sys
-import os
 import duckdb
+import pandas as pd
 from pathlib import Path
 
-# Path Setup
-ROOT_DIR = Path(__file__).resolve().parents[1] # Assuming ops/ folder
-if not (ROOT_DIR / "src").exists():
-    ROOT_DIR = Path(__file__).resolve().parent # Fallback if run from root
-
+# ==============================================================================
+# 1. PATH CONSTITUTION
+# ==============================================================================
+ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
+
 from src.utils import config
 
-print(f"🔍 AUDITING VAULT: {config.DB_FILE}")
-
-con = duckdb.connect(str(config.DB_FILE), read_only=True)
-
-try:
-    # 1. Check Count
-    count = con.execute(f"SELECT count(*) FROM {config.TBL_INDICES} WHERE ticker='SPX'").fetchone()[0]
-    print(f"📊 Total SPX Rows: {count}")
-
-    if count == 0:
-        print("❌ FAIL: Table is empty. Ingestion script did not write data.")
-    else:
-        # 2. Check Raw Timestamp Structure (The Smoking Gun)
-        print("\n🔎 SAMPLE DATA (First 5 rows):")
-        query = f"""
-            SELECT 
-                *
+def audit_timestamps():
+    print("🕵️  TIMEZONE FORENSICS REPORT")
+    print("==================================================")
+    
+    con = duckdb.connect(str(config.DB_FILE), read_only=True)
+    target_date = '2025-11-26'
+    
+    # 1. CHECK INDICES (SPX) - The Suspect
+    print(f"\n📊 SPX DATA (First 5 Rows on {target_date})")
+    print("   Target: We expect ~14:30 UTC (which is 09:30 EST)")
+    print("-" * 50)
+    
+    try:
+        df_spx = con.execute(f"""
+            SELECT datetime_utc, open, close 
             FROM {config.TBL_INDICES} 
-            WHERE ticker='SPX'
-            ORDER BY datetime_utc DESC
+            WHERE ticker = 'SPX' 
+              AND CAST(datetime_utc AS DATE) = '{target_date}'
+            ORDER BY datetime_utc ASC 
             LIMIT 5
-        """
-        results = con.execute(query).fetchall()
+        """).df()
         
-        print(f"{'TIMESTAMP':<30} | {'TYPE':<15} | {'HH:MM':<8} | {'HOUR_PART'}")
-        print("-" * 70)
-        for row in results:
-            print(f"{str(row[0]):<30} | {row[1]:<15} | {row[2]:<8} | {row[3]}")
-
-        # 3. Interpretation
-        sample_hour = results[0][3]
-        print("-" * 70)
-        if sample_hour == 9 or sample_hour == 10:
-            print("🚨 DIAGNOSIS: Data is stored as LOCAL (EST). RTH Check will FAIL.")
-        elif sample_hour == 13 or sample_hour == 14:
-            print("✅ DIAGNOSIS: Data is stored as UTC. RTH Check SHOULD PASS.")
+        if df_spx.empty:
+            print("❌ NO SPX DATA FOUND.")
         else:
-            print(f"⚠️ DIAGNOSIS: Data is stored at unusual hour: {sample_hour}")
+            print(df_spx)
+    except Exception as e:
+        print(f"Error reading SPX: {e}")
 
-except Exception as e:
-    print(f"❌ CRITICAL ERROR: {e}")
+    # 2. CHECK OPTIONS (Reference) - The Truth
+    print(f"\n💎 OPTION DATA (First 5 Rows on {target_date})")
+    print("   Target: We expect ~14:30 UTC")
+    print("-" * 50)
+    
+    try:
+        # Get a ticker that actually exists
+        ticker = con.execute(f"SELECT ticker FROM {config.TBL_OPTIONS} LIMIT 1").fetchone()
+        if ticker:
+            ticker_name = ticker[0]
+            df_opt = con.execute(f"""
+                SELECT datetime_utc, open, close 
+                FROM {config.TBL_OPTIONS} 
+                WHERE ticker = '{ticker_name}' 
+                  AND CAST(datetime_utc AS DATE) = '{target_date}'
+                ORDER BY datetime_utc ASC 
+                LIMIT 5
+            """).df()
+            print(f"Contract: {ticker_name}")
+            print(df_opt)
+        else:
+            print("❌ NO OPTIONS DATA FOUND.")
+            
+    except Exception as e:
+        print(f"Error reading Options: {e}")
 
-con.close()
+    con.close()
+    print("\n==================================================")
+
+if __name__ == "__main__":
+    audit_timestamps()
