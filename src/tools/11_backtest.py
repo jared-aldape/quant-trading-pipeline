@@ -53,7 +53,7 @@ layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.H6("TOOL ID: 1", className="text-muted mb-0"),
-            html.H2("HISTORICAL BACKTESTER", className="display-6 fw-bold text-info"),
+            html.H2("HISTORICAL BACKTESTER (REAL DATA)", className="display-6 fw-bold text-info"),
             html.Hr(className="my-2")
         ], width=12)
     ], className="mb-4"),
@@ -96,20 +96,8 @@ layout = dbc.Container([
                             dbc.Input(id='bt-tax-rate', type='number', value=0.268, step=0.001, className="mb-2")
                         ], width=6)
                     ]),
-
-                    # Leverage & Ideal Gain (New Row)
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("Leverage (x)"),
-                            dbc.Input(id='bt-leverage', type='number', value=50.0, min=1.0, max=100.0, step=0.1, className="mb-2")
-                        ], width=6),
-                        dbc.Col([
-                            html.Label("Ideal Gain (%)"),
-                            dbc.Input(id='bt-ideal-gain', type='number', value=0.0, min=0.0, step=5.0, className="mb-2", placeholder="e.g. 40")
-                        ], width=6)
-                    ]),
                     
-                    # Selection Mode Dropdown
+                    # NEW: Selection Mode Dropdown
                     html.Label("Execution Strategy", className="mt-2"),
                     dcc.Dropdown(
                         id='bt-selection-mode',
@@ -120,7 +108,7 @@ layout = dbc.Container([
                         value='FIRST',
                         clearable=False,
                         className="mb-3",
-                        style={'color': '#000000'}
+                        style={'color': '#000000'} # Force black text for readability
                     ),
 
                     dbc.Checklist(options=[{"label": " Enforce RTH (9:30-4:00 EST)", "value": True}], value=[True], id="bt-rth", switch=True, className="mt-2 text-warning"),
@@ -130,12 +118,21 @@ layout = dbc.Container([
             ], className="shadow mb-3"),
             
             dbc.Card([
-                dbc.CardHeader("Risk Management"),
+                dbc.CardHeader("Risk Management (On Premium)"),
                 dbc.CardBody([
                     dbc.Row([
-                        dbc.Col([html.Label("ATR Sensitivity"), dcc.Input(id='bt-atr-sens', type='number', value=0.5, step=0.1, className="form-control")], width=6),
-                        dbc.Col([html.Label("Trailing Stop (%)"), dcc.Input(id='bt-trail-pct', type='number', value=0.5, className="form-control")], width=6),
+                        dbc.Col([
+                            html.Label("Trailing Stop (%)"),
+                            # Default 25% (Standard for Options)
+                            dbc.Input(id='bt-trail-pct', type='number', value=25, className="form-control")
+                        ], width=6),
+                        dbc.Col([
+                            html.Label("Ideal Gain (%)"),
+                            # Default 40% Target
+                            dbc.Input(id='bt-ideal-gain', type='number', value=40, className="form-control")
+                        ], width=6),
                     ]),
+                    html.Small("Stops applied directly to Option Price (e.g., $2.00 -> $1.50)", className="text-muted mt-2 d-block")
                 ])
             ], className="mb-3 shadow"),
             
@@ -188,27 +185,41 @@ layout = dbc.Container([
 # ==============================================================================
 # 5. CALLBACKS
 # ==============================================================================
-def generate_trade_table(dates, pnl_values, returns_values):
+def generate_trade_table(dates, tickers, entries, exits, reasons, pnl_values, returns_values):
     table_rows = []
-    for d, pnl, ret in zip(dates, pnl_values, returns_values):
+    
+    for d, tick, ent, ex, rsn, pnl, ret in zip(dates, tickers, entries, exits, reasons, pnl_values, returns_values):
         is_win = pnl >= 0
         pnl_text = f"{'+' if is_win else ''}${pnl:,.2f}"
-        ret_text = f"{ret*100:+.2f}%"
+        ret_text = f"{ret*100:+.1f}%"
         
         row_style = {'backgroundColor': 'rgba(0, 255, 65, 0.1)'} if is_win else {'backgroundColor': 'rgba(255, 0, 0, 0.1)'}
         text_color = '#00ff41' if is_win else '#ff5555'
         
+        clean_ticker = tick.replace("O:", "")
+        
         table_rows.append(html.Tr([
-            html.Td(d.split(' ')[0], className="text-white"),
-            html.Td(d.split(' ')[1], className="text-muted small"),
+            html.Td(d, className="text-white small"),
+            html.Td(clean_ticker, className="text-info small", style={'fontFamily': 'monospace'}),
+            html.Td(f"${ent:.2f}", className="text-light small"),
+            html.Td(f"${ex:.2f}", className="text-light small"),
+            html.Td(rsn, className="text-warning small fst-italic"),
             html.Td(pnl_text, style={'color': text_color, 'fontWeight': 'bold'}),
             html.Td(ret_text, style={'color': text_color}),
         ], style=row_style))
 
     return dbc.Table(
-        [html.Thead(html.Tr([html.Th("Date"), html.Th("Time"), html.Th("Net P&L"), html.Th("Return (%)")]))] +
+        [html.Thead(html.Tr([
+            html.Th("Date/Time"), 
+            html.Th("Ticker"), 
+            html.Th("Entry"), 
+            html.Th("Exit"), 
+            html.Th("Rslt"), 
+            html.Th("Net P&L"), 
+            html.Th("ROI")
+        ]))] +
         [html.Tbody(table_rows)],
-        bordered=False, hover=True, size="sm", className="text-white", style={'fontSize': '13px'}
+        bordered=False, hover=True, size="sm", className="text-white", style={'fontSize': '12px'}
     )
 
 @callback(
@@ -224,20 +235,15 @@ def generate_trade_table(dates, pnl_values, returns_values):
      State('bt-max-invest', 'value'), 
      State('bt-tax-rate', 'value'), 
      State('bt-rth', 'value'), 
-     State('bt-atr-sens', 'value'), 
      State('bt-trail-pct', 'value'),
      State('bt-selection-mode', 'value'),
-     State('bt-leverage', 'value'),
-     State('bt-ideal-gain', 'value')] # NEW INPUT
+     State('bt-ideal-gain', 'value')] 
 )
-def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, atr_sens, trail_pct, selection_mode, leverage, ideal_gain):
+def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, trail_pct, selection_mode, ideal_gain):
     if not n_clicks:
         return "--", "--", "--", "--", get_status_ui("ready"), "", "Waiting...", go.Figure(), None 
 
-    # Defaults
-    lev_val = leverage if leverage else 1.0
     ideal_gain_val = ideal_gain if ideal_gain else 0.0
-
     current_dir = Path(__file__).resolve().parent
     engine_path = current_dir / "10_backtest.py"
     
@@ -251,13 +257,12 @@ def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size,
         sys.executable, 
         str(engine_path),
         "--start_date", str(start_date), "--end_date", str(end_date),
-        "--start_balance", str(start_balance), "--pos_size_pct", str(pos_size),
+        "--start_balance", str(start_balance), "--pos_size_pct", str(pos_size / 100.0), # FIX: Divide percentage
         "--max_invest", str(max_invest), "--tax_rate", str(tax_rate),
-        "--atr_sensitivity", str(atr_sens), "--trailing_stop_pct", str(trail_pct / 100.0), 
+        "--trailing_stop_pct", str(trail_pct / 100.0), 
         "--enforce_rth", str(rth_bool), "--archive_report", str(archive_bool),
         "--selection_mode", str(selection_mode),
-        "--leverage", str(lev_val),
-        "--ideal_gain_pct", str(ideal_gain_val / 100.0) # Convert 40 -> 0.4
+        "--ideal_gain_pct", str(ideal_gain_val / 100.0) 
     ]
     
     env = os.environ.copy()
@@ -268,17 +273,14 @@ def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size,
     try:
         process = subprocess.run(cmd, capture_output=True, text=True, env=env, close_fds=True)
         full_output = process.stdout
-        log_output = full_output
         
-        json_marker = "JSON_RESULT:"
-        if json_marker in full_output:
-            log_text, json_text = full_output.split(json_marker)
+        if "JSON_RESULT:" in full_output:
+            log_text, json_text = full_output.split("JSON_RESULT:")
             result = json.loads(json_text)
             
             if "error" in result:
                  return "--", "--", "--", "--", get_status_ui("failure", result['error']), "", log_text, go.Figure(), None 
 
-            # Success Path
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=list(range(len(result['equity_curve']))), 
@@ -292,6 +294,10 @@ def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size,
 
             trade_table = generate_trade_table(
                 result['trade_dates'],
+                result.get('trade_tickers', []),
+                result.get('trade_entries', []),
+                result.get('trade_exits', []),
+                result.get('trade_reasons', []),
                 result['trade_pnl'],
                 result['trade_returns']
             )
@@ -308,7 +314,7 @@ def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size,
                 trade_table
             )
         else:
-            return "--", "--", "--", "--", get_status_ui("crash"), "Execution Failed (Check Terminal)", log_output, go.Figure(), None
+            return "--", "--", "--", "--", get_status_ui("crash"), "Execution Failed", full_output, go.Figure(), None
 
     except Exception as e:
         return "--", "--", "--", "--", get_status_ui("crash"), f"GUI Error: {str(e)}", "", go.Figure(), None

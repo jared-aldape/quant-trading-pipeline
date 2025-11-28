@@ -59,7 +59,7 @@ def clean_dataframe(df, tz_source=config.TZ_UTC):
         # If Naive, localize to the SOURCE
         df['dt'] = df['dt'].dt.tz_localize(tz_source, ambiguous='NaT', nonexistent='shift_forward')
     else:
-        # If already Aware, convert to SOURCE first (safety) then to UTC
+        # If already Aware, ensure consistency
         df['dt'] = df['dt'].dt.tz_convert(tz_source)
     
     # Finally, Standardize EVERYTHING to UTC
@@ -114,7 +114,6 @@ def get_tickers_for_event(event_ts):
             strike = atm + offset
             ticker = f"O:XSP{date_str}C{int(strike*1000):08d}" 
             lbl = f"{ticker} ({'ATM' if offset==0 else 'OTM' if offset>0 else 'ITM'} ${strike})"
-            # FIXED TYPO: 'label': lbl
             tickers.append({'label': lbl, 'value': ticker})
             if offset == 0: best = ticker
             
@@ -260,7 +259,7 @@ def render_simulation(ts, ticker, mins, reveal):
         trade_row = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {ts}").df().iloc[0]
         trade_date_str = str(pd.to_datetime(trade_row['date']).date())
         
-        # A. Market Open in NY (For Slider Logic only)
+        # A. Market Open in NY (For Slider Logic)
         ny_tz = pytz.timezone("America/New_York")
         market_open_ny = ny_tz.localize(pd.Timestamp(f"{trade_date_str} 09:30:00"))
         
@@ -272,20 +271,19 @@ def render_simulation(ts, ticker, mins, reveal):
         clip_start_utc = local_start_of_day.astimezone(config.TZ_UTC)
 
         # 2. DATA LOADING (UTC)
-        # OPTION DATA = UTC (Polygon)
+        # OPTION DATA = UTC (Polygon) - Correct
         opt_df = clean_dataframe(
             con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df(),
             tz_source=config.TZ_UTC
         )
         
-        # SPX DATA = UTC (yfinance numbers in Vault are already UTC)
-        # FIXED: tz_source=config.TZ_UTC (prevents the 5hr double shift)
+        # SPX/VIX DATA = UTC (YFinance via New Pipeline)
+        # FIX: Reverted source to TZ_UTC because we know the DB is now correct
         spx_df = clean_dataframe(
             con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE)='{trade_date_str}' ORDER BY datetime_utc ASC").df(),
             tz_source=config.TZ_UTC
         )
         
-        # VIX DATA = UTC (yfinance numbers in Vault are already UTC)
         vix_raw = clean_dataframe(
             con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) <= '{trade_date_str}' ORDER BY datetime_utc ASC").df(),
             tz_source=config.TZ_UTC
@@ -293,12 +291,9 @@ def render_simulation(ts, ticker, mins, reveal):
         vix_raw = calculate_indicators(vix_raw, 'vix_')
         
         # --- APPLY THE DAY CLIPPER ---
-        # Filters out yesterday's tail so chart starts at 00:00 Local
         opt_df = opt_df[opt_df['dt'] >= clip_start_utc]
         spx_df = spx_df[spx_df['dt'] >= clip_start_utc]
         vix_today = vix_raw[vix_raw['dt'] >= clip_start_utc]
-        
-        # Further restrict VIX to Fog of War
         vix_today = vix_today[vix_today['dt'].dt.date <= cutoff_utc.date()]
 
     except Exception as e:
@@ -308,8 +303,7 @@ def render_simulation(ts, ticker, mins, reveal):
     
     con.close()
 
-    # 3. FOG OF WAR (Slice Data)
-    # Use .copy() to prevent SettingWithCopyWarning
+    # 3. FOG OF WAR
     opt_slice = opt_df[opt_df['dt'] <= cutoff_utc].copy()
     spx_slice = spx_df[spx_df['dt'] <= cutoff_utc].copy()
     vix_slice = vix_today[vix_today['dt'] <= cutoff_utc].copy()
@@ -319,7 +313,6 @@ def render_simulation(ts, ticker, mins, reveal):
     if not spx_slice.empty: spx_slice['dt'] = spx_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
     if not vix_slice.empty: vix_slice['dt'] = vix_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
     
-    # Calculate Display Clock
     display_clock = cutoff_utc.astimezone(config.TZ_LOCAL).strftime("%H:%M PST")
 
     # 5. PLOT
@@ -343,7 +336,9 @@ def render_simulation(ts, ticker, mins, reveal):
             mode='lines', line=dict(color='#FFFFFF', width=2), name="Option Price"
         ), row=2, col=1, secondary_y=False)
         
+        # ENTRY SIGNAL FIX
         if reveal and 'SHOW' in reveal:
+             # Fix: Trust the UTC timestamp from the updated Scanner
              entry_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
              
              if cutoff_utc >= entry_dt_utc:
