@@ -34,7 +34,7 @@ def run_pipeline():
         )
     """)
     
-    # Futures Table (NEW)
+    # Futures Table
     con.execute(f"""
         CREATE TABLE IF NOT EXISTS {config.TBL_FUTURES} (
             datetime_utc TIMESTAMP, ticker VARCHAR, open DOUBLE, high DOUBLE, 
@@ -43,20 +43,21 @@ def run_pipeline():
         )
     """)
 
-    # 2. DEFINITIONS
+    # 2. DEFINITIONS (ADDED ^IRX for Risk-Free Rate)
     targets = [
         {"y_sym": "^GSPC", "db_sym": "SPX", "table": config.TBL_INDICES},
         {"y_sym": "^VIX",  "db_sym": "VIX", "table": config.TBL_INDICES},
-        {"y_sym": "ES=F",  "db_sym": "ES",  "table": config.TBL_FUTURES} # Added Futures
+        {"y_sym": "^IRX",  "db_sym": "IRX", "table": config.TBL_INDICES}, # Added IRX
+        {"y_sym": "ES=F",  "db_sym": "ES",  "table": config.TBL_FUTURES}
     ]
     
-    # We use machine local time for the "Handshake" to ensure YFinance relative time is anchored correctly
+    # Machine local time for YFinance relative time anchoring
     MACHINE_TZ = 'America/Los_Angeles' 
 
     for target in targets:
         sym = target['y_sym']
         try:
-            # A. FETCH (Respecting Rate-Limit Law via occasional sleeps if needed in bulk)
+            # A. FETCH
             df = yf.download(sym, period="5d", interval="5m", progress=False, auto_adjust=True)
             
             if df.empty:
@@ -71,14 +72,13 @@ def run_pipeline():
             df.rename(columns={'datetime': 'datetime_utc', 'date': 'datetime_utc'}, inplace=True)
             df['ticker'] = target['db_sym']
             
-            # C. TIMEZONE STANDARDIZATION (The "Naive UTC" Fix)
-            # 1. Localize Naive input to Machine Time -> Convert to UTC
+            # C. TIMEZONE STANDARDIZATION
             if df['datetime_utc'].dt.tz is None:
                 df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(MACHINE_TZ).dt.tz_convert(config.TZ_UTC)
             else:
                 df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_UTC)
             
-            # 2. STRIP Timezone (Strict Enforcement for DuckDB Storage)
+            # 2. STRIP Timezone
             df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(None)
             
             # D. STORE
@@ -95,3 +95,6 @@ def run_pipeline():
             log.error(f"Failed to ingest {sym}: {e}")
 
     con.close()
+
+if __name__ == "__main__":
+    run_pipeline()
