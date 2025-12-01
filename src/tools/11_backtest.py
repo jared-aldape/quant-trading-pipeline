@@ -78,11 +78,11 @@ layout = dbc.Container([
                     dbc.Row([
                         dbc.Col([
                             html.Label("Start Capital ($)"),
-                            dbc.Input(id='bt-balance', type='number', value=10000, className="mb-2")
+                            dbc.Input(id='bt-balance', type='number', value=600, className="mb-2")
                         ], width=6),
                         dbc.Col([
                             html.Label("Pos Size (%)"),
-                            dbc.Input(id='bt-pos-size', type='number', value=0.5, step=0.1, className="mb-2")
+                            dbc.Input(id='bt-pos-size', type='number', value=75, step=0.1, className="mb-2")
                         ], width=6)
                     ]),
                     
@@ -97,19 +97,42 @@ layout = dbc.Container([
                         ], width=6)
                     ]),
                     
-                    # NEW: Selection Mode Dropdown
-                    html.Label("Execution Strategy", className="mt-2"),
-                    dcc.Dropdown(
-                        id='bt-selection-mode',
-                        options=[
-                            {'label': 'Standard (First Signal)', 'value': 'FIRST'},
-                            {'label': 'Optimized (Best Signal)', 'value': 'BEST'}
-                        ],
-                        value='FIRST',
-                        clearable=False,
-                        className="mb-3",
-                        style={'color': '#000000'} # Force black text for readability
-                    ),
+                    html.Hr(className="my-2"),
+                    
+                    # STRATEGY SELECTION
+                    dbc.Row([
+                        dbc.Col([
+                            html.Label("Execution Strategy"),
+                            dcc.Dropdown(
+                                id='bt-selection-mode',
+                                options=[
+                                    {'label': 'Standard (First Signal)', 'value': 'FIRST'},
+                                    {'label': 'Optimized (Best Signal)', 'value': 'BEST'}
+                                ],
+                                value='FIRST',
+                                clearable=False,
+                                className="mb-2",
+                                style={'color': '#000000'}
+                            ),
+                        ], width=6),
+                        dbc.Col([
+                            html.Label("Strike Selection"),
+                             dcc.Dropdown(
+                                id='bt-strike-offset',
+                                options=[
+                                    {'label': 'Deep ITM (-2)', 'value': -2},
+                                    {'label': 'ITM (-1)', 'value': -1},
+                                    {'label': 'ATM (Default)', 'value': 0},
+                                    {'label': 'OTM (+1)', 'value': 1},
+                                    {'label': 'Deep OTM (+2)', 'value': 2},
+                                ],
+                                value=0,
+                                clearable=False,
+                                className="mb-2",
+                                style={'color': '#000000'}
+                            ),
+                        ], width=6)
+                    ]),
 
                     dbc.Checklist(options=[{"label": " Enforce RTH (9:30-4:00 EST)", "value": True}], value=[True], id="bt-rth", switch=True, className="mt-2 text-warning"),
                     html.Hr(),
@@ -123,12 +146,10 @@ layout = dbc.Container([
                     dbc.Row([
                         dbc.Col([
                             html.Label("Trailing Stop (%)"),
-                            # Default 25% (Standard for Options)
                             dbc.Input(id='bt-trail-pct', type='number', value=25, className="form-control")
                         ], width=6),
                         dbc.Col([
                             html.Label("Ideal Gain (%)"),
-                            # Default 40% Target
                             dbc.Input(id='bt-ideal-gain', type='number', value=40, className="form-control")
                         ], width=6),
                     ]),
@@ -237,13 +258,16 @@ def generate_trade_table(dates, tickers, entries, exits, reasons, pnl_values, re
      State('bt-rth', 'value'), 
      State('bt-trail-pct', 'value'),
      State('bt-selection-mode', 'value'),
+     State('bt-strike-offset', 'value'), 
      State('bt-ideal-gain', 'value')] 
 )
-def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, trail_pct, selection_mode, ideal_gain):
+def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, trail_pct, selection_mode, strike_offset, ideal_gain):
     if not n_clicks:
         return "--", "--", "--", "--", get_status_ui("ready"), "", "Waiting...", go.Figure(), None 
 
     ideal_gain_val = ideal_gain if ideal_gain else 0.0
+    strike_offset_val = strike_offset if strike_offset else 0
+    
     current_dir = Path(__file__).resolve().parent
     engine_path = current_dir / "10_backtest.py"
     
@@ -253,16 +277,19 @@ def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size,
     rth_bool = True if rth_value and rth_value[0] is True else False
     archive_bool = True 
 
+    # CONSTRUCT COMMAND WITH MARKET OPEN SAFETY
     cmd = [
         sys.executable, 
         str(engine_path),
         "--start_date", str(start_date), "--end_date", str(end_date),
-        "--start_balance", str(start_balance), "--pos_size_pct", str(pos_size / 100.0), # FIX: Divide percentage
+        "--start_balance", str(start_balance), "--pos_size_pct", str(pos_size / 100.0),
         "--max_invest", str(max_invest), "--tax_rate", str(tax_rate),
         "--trailing_stop_pct", str(trail_pct / 100.0), 
         "--enforce_rth", str(rth_bool), "--archive_report", str(archive_bool),
         "--selection_mode", str(selection_mode),
-        "--ideal_gain_pct", str(ideal_gain_val / 100.0) 
+        "--ideal_gain_pct", str(ideal_gain_val / 100.0),
+        "--strike_offset", str(strike_offset_val),
+        "--skip_open_minutes", "15" # SAFETY BUFFER
     ]
     
     env = os.environ.copy()

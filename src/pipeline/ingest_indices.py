@@ -20,78 +20,78 @@ log = get_logger("IngestIndices")
 # 2. CORE LOGIC
 # ==============================================================================
 def run_pipeline():
-    log.info("📥 Fetching Market Indices (SPX, VIX)...")
+    log.info("📥 Fetching Market Indices & Futures...")
     
     con = duckdb.connect(str(config.DB_FILE))
     
-    # Create Table
+    # 1. SETUP TABLES
+    # Indices Table
     con.execute(f"""
         CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (
-            datetime_utc TIMESTAMP,
-            ticker VARCHAR,
-            open DOUBLE,
-            high DOUBLE,
-            low DOUBLE,
-            close DOUBLE,
-            volume DOUBLE,
+            datetime_utc TIMESTAMP, ticker VARCHAR, open DOUBLE, high DOUBLE, 
+            low DOUBLE, close DOUBLE, volume DOUBLE,
+            PRIMARY KEY (datetime_utc, ticker)
+        )
+    """)
+    
+    # Futures Table (NEW)
+    con.execute(f"""
+        CREATE TABLE IF NOT EXISTS {config.TBL_FUTURES} (
+            datetime_utc TIMESTAMP, ticker VARCHAR, open DOUBLE, high DOUBLE, 
+            low DOUBLE, close DOUBLE, volume DOUBLE,
             PRIMARY KEY (datetime_utc, ticker)
         )
     """)
 
-    tickers = ["^GSPC", "^VIX"]
-    friendly_names = {"^GSPC": "SPX", "^VIX": "VIX"}
-    MACHINE_TZ = 'America/Los_Angeles'
+    # 2. DEFINITIONS
+    targets = [
+        {"y_sym": "^GSPC", "db_sym": "SPX", "table": config.TBL_INDICES},
+        {"y_sym": "^VIX",  "db_sym": "VIX", "table": config.TBL_INDICES},
+        {"y_sym": "ES=F",  "db_sym": "ES",  "table": config.TBL_FUTURES} # Added Futures
+    ]
+    
+    # We use machine local time for the "Handshake" to ensure YFinance relative time is anchored correctly
+    MACHINE_TZ = 'America/Los_Angeles' 
 
-    for sym in tickers:
+    for target in targets:
+        sym = target['y_sym']
         try:
-            # 1. FETCH
-            df = yf.download(sym, period="60d", interval="5m", progress=False, auto_adjust=True)
+            # A. FETCH (Respecting Rate-Limit Law via occasional sleeps if needed in bulk)
+            df = yf.download(sym, period="5d", interval="5m", progress=False, auto_adjust=True)
+            
             if df.empty:
                 log.warning(f"⚠️ No data found for {sym}")
                 continue
                 
-            # 2. CLEAN
+            # B. CLEAN
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df = df.reset_index()
             df.columns = df.columns.str.lower()
             df.rename(columns={'datetime': 'datetime_utc', 'date': 'datetime_utc'}, inplace=True)
-            df['ticker'] = friendly_names[sym]
+            df['ticker'] = target['db_sym']
             
-            # 3. TIMEZONE STANDARDIZATION (The "Naive UTC" Fix)
-            
-            # A. Ensure we are physically at UTC first
+            # C. TIMEZONE STANDARDIZATION (The "Naive UTC" Fix)
+            # 1. Localize Naive input to Machine Time -> Convert to UTC
             if df['datetime_utc'].dt.tz is None:
-                # If naive input, assume PST -> convert to UTC
                 df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(MACHINE_TZ).dt.tz_convert(config.TZ_UTC)
             else:
-                # If aware input, just convert to UTC
                 df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(config.TZ_UTC)
             
-            # B. CRITICAL: Strip Timezone Info (Make Naive)
-            # This prevents DuckDB from converting back to Local Time during insertion.
-            # 14:30+00:00 -> 14:30 (Naive)
+            # 2. STRIP Timezone (Strict Enforcement for DuckDB Storage)
             df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(None)
             
-            # 4. STORE
+            # D. STORE
+            table_name = target['table']
             con.execute(f"""
-                INSERT OR IGNORE INTO {config.TBL_INDICES} 
+                INSERT OR IGNORE INTO {table_name} 
                 SELECT datetime_utc, ticker, open, high, low, close, volume 
                 FROM df
             """)
             
-            log.info(f"✅ Synced {friendly_names[sym]}: {len(df)} rows.")
+            log.info(f"✅ Synced {target['db_sym']} -> {table_name}: {len(df)} rows.")
             
         except Exception as e:
             log.error(f"Failed to ingest {sym}: {e}")
 
-    # Validation
-    try:
-        count = con.execute(f"SELECT COUNT(*) FROM {config.TBL_INDICES}").fetchone()[0]
-        log.info(f"📊 Total Index Rows in Vault: {count}")
-    except: pass
-
     con.close()
-
-if __name__ == "__main__":
-    run_pipeline()

@@ -1,177 +1,115 @@
-# **🚀 Quant OS v2.2 (Anti-Rate-Limit Edition)**
+# **🚀 Quant OS v2.2: Trade Master Operating Manual**
 
-"UTC in the Vault, Local on the Glass. Real Data in the Engine."
+**"UTC in the Vault, Local on the Glass. Real Data in the Engine."**
 
-A professional-grade quantitative trading pipeline designed for VIX/SPX signals and XSP Option execution. This repository operates as a hybrid Calculation Engine (Python/DuckDB) and Single-Page Application (Dash/Plotly).
+This document outlines the architecture, protocols, and usage of the **Quant OS v2.2** financial operating system. This version introduces Database Persistence, Hybrid Forecasting ("Silver Arrow"), and the optimized Trade Master signal logic.
 
-## **🏛️ The Four Laws (Strict Enforcement)**
+## **🏛️ The Four Laws (v2.2 Amendments)**
 
-### **🕰️ The Timezone Law (Amended v2.2)**
+1. **🕰️ The Timezone Law:**  
+   * **Vault:** All database timestamps are **Naive UTC**.  
+   * **Glass:** All visualizations convert strictly to **Local Time (PST)**.  
+   * **Protocol:** T-1 Enforcement prevents API errors by strictly rejecting "Same Day" option requests.  
+2. **🛡️ The Integrity Law:**  
+   * **Golden Source:** market\_data/quant\_strategy.duckdb is the single source of truth.  
+   * **Persistence:** Tools do not pass CSV files. Tool 1 writes to the DB; Tool 2 reads from the DB.  
+3. **👁️ The Observability Law:**  
+   * **No Silent Failures:** Every script logs forensic details to the console.  
+   * **Visual Validation:** The Dashboard must visually confirm what the Backtester executes.  
+4. **🚦 The Rate-Limit Law:**  
+   * **Cluster Fetching:** Efficiently downloads ATM ±2 strikes while respecting API limits.  
+   * **Smart Audit:** Automatically detects and repairs fragmented/partial data.
 
-**"UTC in the Vault, Local on the Glass."**
+## **🧠 Trade Master Strategy Protocols**
 
-* **Storage:** ALL timestamps in the database (DuckDB) must be stored as **Naive UTC** (UTC timestamps with no timezone information attached).  
-* **Ingestion (The Handshake):** \* Data sources sending **Relative Time** (e.g., YFinance Wall Clock) must be explicitly localized to the machine's timezone (e.g., America/Los\_Angeles), converted to UTC, and then **stripped of timezone info** (tz\_localize(None)) before insertion.  
-  * Data sources sending **Absolute Time** (e.g., Polygon Unix) must be converted directly to Naive UTC.  
-* **Display:** Conversion to Local Time (PST) happens *only* at the visualization layer (Dashboard/Simulator).
+The system uses a mean-reversion logic based on VIX overextension. It supports two distinct operating modes for src/pipeline/scan\_signals.py.
 
-### **🛡️ The Integrity Law**
+**Optimization Finding:** The "MACD Trap" was identified and removed. Momentum confirmation (MACD) was found to be a lagging indicator that reduced profitability. Pure RSI mean-reversion is the validated edge.
 
-**"The Golden Source"**
+### **1\. 🟢 "Active Trader" Protocol (Current Default)**
 
-* market\_data/quant\_strategy.duckdb is the single source of truth. No CSV patching.  
-* Sanitization: Dirty data is rejected or cleaned *before* database insertion.
+* **Logic:** RSI(10) \< 30  
+* **Philosophy:** High frequency, balanced risk.  
+  * **Sensitivity:** Uses a faster RSI period (10) to capture moderate volatility dips in strong trends.  
+  * **Why:** Standard RSI(14) is too smooth to trigger often during strong Bull Markets.  
+* **Use Case:** Daily income generation.
 
-### **👁️ The Observability Law**
+### **2\. 🎯 "Sniper" Protocol (High Conviction)**
 
-**"No Silent Failures"**
+* **Logic:** RSI(14) \< 22  
+* **Philosophy:** Extreme selectivity.  
+  * **Sensitivity:** Uses standard RSI period (14) but a deeper compression threshold (22).  
+  * **Stats:** Historically 100% Win Rate (Small Sample Size).  
+* **Use Case:** Capital preservation or aggressive sizing on rare setups.
 
-* All actions are logged to src/utils/logger.py.  
-* Critical data ingestion steps must be verifiable via src/ops/audit\_time.py.
+To Switch Protocols:  
+Edit the configuration block in src/pipeline/scan\_signals.py:  
+\# Active Mode  
+VIX\_RSI\_THRESHOLD \= 30  
+VIX\_RSI\_PERIOD \= 10
 
-### **🚦 The Rate-Limit Law**
+\# Sniper Mode  
+VIX\_RSI\_THRESHOLD \= 22  
+VIX\_RSI\_PERIOD \= 14
 
-**"Free Tier Safety"**
+## **🛠️ The Tool Suite**
 
-* All external API calls must respect Free Tier limits via Caching, Throttling (sleep timers), and "Smart Deduplication" (checking DB before fetching).
+### **Pipeline: The Morning Routine**
 
-## **🏗️ Architecture v2.2**
-
-We enforce a strict separation of concerns between Data Engineering (Pipeline) and User Interface (Tools).
-
-### **📂 Directory Structure**
-
-quant-trading-pipeline/
-
-│
-
-├── app.py                      \<-- 🚀 MASTER LAUNCHER (Run this\!)
-
-│
-
-├── src/
-
-│   ├── pipeline/               \<-- ⚙️ THE ENGINE ROOM (ETL)
-
-│   │   ├── 00\_daily\_update.py  \<-- Batch Orchestrator (Indices \-\> Signals \-\> Options)
-
-│   │   ├── 00\_setup\_database.py \<-- Schema & Reset Tool
-
-│   │   ├── ingest\_indices.py   \<-- Yahoo Finance Index Data (Naive UTC Enforced)
-
-│   │   ├── scan\_signals.py     \<-- VIX RSI Signal Generator
-
-│   │   ├── fetch\_options.py    \<-- Polygon Option Data (Rate-Limit Safe)
-
-│   │   └── calc\_greeks.py      \<-- \[Optional\] Black-Scholes Engine
-
-│   │
-
-│   ├── tools/                  \<-- 🖥️ THE CONTROL PANEL (GUI)
-
-│   │   ├── 10\_backtest.py      \<-- Backtest Engine (Real Data)
-
-│   │   ├── 11\_backtest.py      \<-- Backtest UI
-
-│   │   ├── 12\_forecast.py      \<-- Capital Growth Projector
-
-│   │   ├── 08\_dashboard.py     \<-- Analysis Dashboard ("Smart Session" Logic)
-
-│   │   ├── 09\_simulator.py     \<-- "Fog of War" Replay Tool
-
-│   │   └── 14\_live\_dashboard.py \<-- Command Center (Home Page)
-
-│   │
-
-│   └── ops/                    \<-- 🔧 THE REPAIR SHOP
-
-│       ├── audit\_time.py       \<-- Forensic Timestamp Inspector
-
-│       ├── reset\_indices.py    \<-- Nuclear Option (Drop & Recapture Indices)
-
-│       └── check\_db.py         \<-- General Health Diagnostic
-
-## **🛠️ The Tool Suite (v2.2)**
-
-### **1\. 🏠 Command Center (Home)**
-
-* **Role:** Real-time market monitoring and news aggregation.  
-* **Features:** Live Chart (5-minute Intraday SPX), Dual News Streams (Global \+ SPX Specific).  
-* **Safety:** Protected by Global Session & Caching to prevent API bans.
-
-### **2\. 🟦 Backtester (Tool 1\)**
-
-* **Role:** Forensic Validation of strategy profitability using Real Option Pricing.  
-* **Logic:**  
-  * **Entry:** Triggered by VIX RSI signals.  
-  * **Exit:** Managed by 30% Trailing Stop or 40% Profit Target.  
-  * **Selection:** Supports "First Signal" (Standard) or "Best Signal" (Optimized) modes.
-
-### **3\. 🟩 Forecaster (Tool 2\)**
-
-* **Role:** Trajectory Simulation.  
-* **Logic:** Projects capital growth using "Risk Buckets" to simulate periodic drawdown exposure.
-
-### **4\. 💎 Analysis (Tool 3\)**
-
-* **Role:** Post-Mortem Review.  
-* **Key Feature:** **"Smart Session Awareness"**. Visualizes VIX signals against price action, correctly handling the difference between 24-hour Futures data and RTH Options data without clipping errors.
-
-### **5\. 🟠 Simulator (Tool 4\)**
-
-* **Role:** Training Environment.  
-* **Tech:** "Fog of War" replay mode to practice execution without hindsight bias. Solves the "Double Shift" timezone bug to perfectly align UTC Options with Local Market Data.
-
-## **🚀 Quick Start (Desktop)**
-
-1. **Install Dependencies**
-
-pip install \-r requirements.txt
-
-2.   
-3. Initialize the Vault (First Run Only)  
-   Creates the optimized database schema with Primary Keys.
-
-python src/pipeline/00\_setup\_database.py
-
-4.   
-5. Ingest Data (The Morning Routine)  
-   Runs the ETL chain: Indices \-\> Signals \-\> Options.
+Run this daily to synchronize the Vault.
 
 python src/pipeline/00\_daily\_update.py
 
-6.   
-7. Launch Command Terminal  
-   Opens the Master Launcher. Access via http://localhost:8050.
+* **Step 1:** Ingest Indices (SPX, VIX) & Futures (/ES).  
+* **Step 2:** Generate Signals (Wipes/Rebuilds Manifest based on active Protocol).  
+* **Step 3:** Ingest Options (Smart Audit \+ Cluster Fetching).
 
-python app.py
+### **Tool 3: Analysis Dashboard**
 
-8. 
+* **Role:** Visual Verification.  
+* **Features:**  
+  * **RTH Mode:** Hides pre-market noise.  
+  * **Cluster View:** Dropdown allows selection of OTM/ITM strikes.  
+  * **Ghost Line:** Futures data overlay for 24h context.  
+* **Access:** http://localhost:8050/analysis
 
-## **🔧 Recovery Protocol (Timezone Ops)**
+### **Tool 1: The Backtester**
 
-**Mission Debrief (Nov 28, 2025):** We identified and fixed a critical 7-hour drift caused by yfinance sending localized timestamps that were being stored incorrectly as UTC.
+* **Role:** Forensic Execution & Logging.  
+* **New Features:**  
+  * **Skip Open:** Ignores the first 15 mins (06:30-06:45 PST) to avoid spread volatility.  
+  * **Strike Offset:** Test **OTM (+1)** vs **ATM (0)** strategies.  
+  * **DB Write:** Saves trade log to active\_simulation\_log table.  
+* **Usage:**  
+  1. Select Date Range & Start Capital.  
+  2. Choose "Best Signal" (Optimized) or "First Signal".  
+  3. Click **Run Simulation**.
 
-**If chart alignment breaks or timestamps look suspicious:**
+### **Tool 2: The Forecaster ("Silver Arrow")**
 
-1. **Audit:** Run the forensic tool.
+* **Role:** Expectation Management & Projection.  
+* **Logic:** Hybrid Model.  
+  * **Gold Line (Silver Arrow):** Your Ideal Daily Goal (e.g., 20% compounding).  
+  * **Green Cone (Reality):** Monte Carlo simulation using **Real Data** from Tool 1\.  
+* **Metrics:**  
+  * **Probability of Hitting Target:** The % chance your strategy can keep up with your goal.  
+  * **Ruin Probability:** The odds of blowing up the account (\<10% balance).  
+* **Requirement:** You **must** run Tool 1 at least once to populate the database before running Tool 2\.
 
-python src/ops/audit\_time.py
+## **🔧 Database Schema**
 
-2.   
-   * *Check:* Do SPX and Options start at the same UTC hour (approx 14:30)?  
-3. **Reset:** If misalignment is found, run the nuclear reset.
+| Table Name | Content | Update Frequency |
+| :---- | :---- | :---- |
+| indices\_1m | SPX, VIX OHLCV (UTC) | Daily |
+| futures\_1m | /ES Futures (UTC) | Daily |
+| options\_1m | XSP Options (UTC) | T-1 (Daily) |
+| trade\_manifest | List of valid signal timestamps | On Scan |
+| active\_simulation\_log | Logs of the last Backtest run | On Backtest |
 
-python src/ops/reset\_indices.py
+## **🚀 Quick Launch**
 
-4.   
-   * *Action:* This drops the Indices table, re-downloads with strict PST-aware logic, and regenerates signals.
+\# 1\. Update Data  
+python src/pipeline/00\_daily\_update.py
 
-## **📱 Mobile Deployment (PWA)**
-
-Quant OS v2.2 features a Responsive Grid layout optimized for mobile devices.
-
-* **Desktop:** Run python app.py (Host 0.0.0.0).  
-* **Mobile:** Connect to the same Wi-Fi. Go to http://YOUR\_PC\_IP:8050.  
-* **Install:** Tap "Add to Home Screen" to install as a PWA app.
-
+\# 2\. Launch GUI  
+python app.py  

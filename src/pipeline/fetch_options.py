@@ -23,22 +23,39 @@ log = get_logger("OptionFetcher")
 POLYGON_KEY = config.POLYGON_API_KEY
 BASE_URL = "https://api.polygon.io/v2/aggs/ticker"
 
-# FREE TIER SAFETY: 5 calls/min = 1 call every 12s.
-# We use 20s to be extremely safe and account for network overhead.
+# FREE TIER SAFETY
 SLEEP_SECONDS = 20
 MAX_RETRIES = 3
+
+# SMART AUDIT THRESHOLD
+MIN_BAR_THRESHOLD = 30 
+
+# [NEW] CLUSTER FETCHING
+# Must match the STRIKE_RANGE in 08_dashboard.py
+STRIKE_RANGE = 2 
 
 # ==============================================================================
 # 3. HELPER FUNCTIONS
 # ==============================================================================
-def construct_ticker(date_obj, xsp_price):
+def construct_ticker_cluster(date_obj, xsp_price):
+    """
+    Returns a LIST of tickers (ATM +/- STRIKE_RANGE)
+    """
+    tickers = []
     try:
         yymmdd = date_obj.strftime('%y%m%d')
-        strike = int(round(xsp_price))
-        strike_str = f"{strike * 1000:08d}"
-        return f"O:XSP{yymmdd}C{strike_str}"
+        atm_strike = int(round(xsp_price))
+        
+        # Generate Cluster
+        for offset in range(-STRIKE_RANGE, STRIKE_RANGE + 1):
+            strike = atm_strike + offset
+            strike_str = f"{strike * 1000:08d}"
+            ticker = f"O:XSP{yymmdd}C{strike_str}"
+            tickers.append(ticker)
+            
     except:
-        return None
+        pass
+    return tickers
 
 def fetch_polygon_aggs(ticker, date_str):
     url = f"{BASE_URL}/{ticker}/range/1/minute/{date_str}/{date_str}"
@@ -51,43 +68,37 @@ def fetch_polygon_aggs(ticker, date_str):
     
     for attempt in range(MAX_RETRIES):
         try:
-            # Use Global Session for consistent identity
             resp = config.GLOBAL_SESSION.get(url, params=params, timeout=15)
             
+            if resp.status_code == 403:
+                log.warning(f"⛔ Permission Denied (403) for {ticker}. Check Subscription/Date.")
+                return pd.DataFrame()
+
             if resp.status_code == 429:
-                wait_time = 65 # Wait > 1 minute to reset the bucket
+                wait_time = 65 
                 log.warning(f"⚠️ Rate Limit Hit on {ticker}! Pausing for {wait_time}s...")
                 time.sleep(wait_time)
-                continue # Retry loop
+                continue 
 
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("status") == "OK" and data.get("resultsCount", 0) > 0:
                     df = pd.DataFrame(data["results"])
-                    # Map Polygon fields to our Schema
                     df.rename(columns={
-                        't': 'datetime_utc', 
-                        'o': 'open', 
-                        'h': 'high', 
-                        'l': 'low', 
-                        'c': 'close', 
-                        'v': 'volume'
+                        't': 'datetime_utc', 'o': 'open', 'h': 'high', 
+                        'l': 'low', 'c': 'close', 'v': 'volume'
                     }, inplace=True)
                     
-                    # Convert timestamp (ms) to Datetime
                     df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms')
                     df['ticker'] = ticker
                     return df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']]
                 else:
-                    # Valid response but no data (e.g. holiday or inactive contract)
                     return pd.DataFrame()
 
-            # Handle non-200/429 errors (e.g., 500 Server Error)
             log.warning(f"⚠️ API Error {resp.status_code} for {ticker}. Retrying...")
             time.sleep(5)
 
         except requests.exceptions.RequestException as e:
-            # Network errors (DNS, Timeout, Connection Refused)
             wait = (attempt + 1) * 10
             log.error(f"❌ Network Error for {ticker}: {e}. Retrying in {wait}s...")
             time.sleep(wait)
@@ -98,7 +109,7 @@ def fetch_polygon_aggs(ticker, date_str):
 # 4. CORE LOGIC
 # ==============================================================================
 def run_fetch_pipeline():
-    log.info("🚀 Starting FREE TIER Option Data Ingestion (Safe Mode)...")
+    log.info("🚀 Starting Option Data Ingestion (Cluster Mode)...")
     log.info(f"⏳ Throttling: 1 request every {SLEEP_SECONDS} seconds")
     
     con = duckdb.connect(str(config.DB_FILE))
@@ -112,31 +123,7 @@ def run_fetch_pipeline():
 
     if manifest_df.empty: return
 
-    # 2. AUTO-HEAL TABLE (Schema & Index Check)
-    rebuild_needed = False
-    try:
-        # A. Check Column Count
-        col_count = con.execute(f"SELECT count(*) FROM pragma_table_info('{config.TBL_OPTIONS}')").fetchone()[0]
-        if col_count != 7:
-            log.warning(f"⚠️ Schema mismatch ({col_count} cols). Rebuilding...")
-            rebuild_needed = True
-        else:
-            # B. Check for Primary Key
-            pk_count = con.execute(f"""
-                SELECT count(*) FROM duckdb_constraints 
-                WHERE table_name = '{config.TBL_OPTIONS}' 
-                AND constraint_type = 'PRIMARY KEY'
-            """).fetchone()[0]
-            if pk_count == 0:
-                log.warning(f"⚠️ Missing Primary Key. Rebuilding...")
-                rebuild_needed = True
-    except:
-        pass 
-
-    if rebuild_needed:
-        con.execute(f"DROP TABLE IF EXISTS {config.TBL_OPTIONS}")
-
-    # 3. Create Table (Correct Schema with PK)
+    # 2. Ensure Table Exists
     con.execute(f"""
         CREATE TABLE IF NOT EXISTS {config.TBL_OPTIONS} (
             datetime_utc TIMESTAMP, ticker VARCHAR, open DOUBLE, high DOUBLE, 
@@ -145,26 +132,42 @@ def run_fetch_pipeline():
         )
     """)
 
-    # 4. Build Unique Task List
+    # 3. Build Task List (Cluster Expansion)
     unique_tasks = {}
+    today = datetime.now().date()
+    
     for _, row in manifest_df.iterrows():
         target_date = pd.to_datetime(row['date']).date()
-        ticker = construct_ticker(target_date, row['xsp_price'])
-        if ticker:
+        if target_date >= today: continue 
+        
+        # [NEW] Get List of 5 Tickers instead of 1
+        cluster = construct_ticker_cluster(target_date, row['xsp_price'])
+        for ticker in cluster:
             unique_tasks[ticker] = target_date
 
-    # 5. Filter Existing
+    # 4. Smart Audit
+    log.info("🔍 Auditing existing data quality...")
     try:
-        existing = set(con.execute(f"SELECT DISTINCT ticker FROM {config.TBL_OPTIONS}").df()['ticker'])
+        audit_df = con.execute(f"SELECT ticker, COUNT(*) as cnt FROM {config.TBL_OPTIONS} GROUP BY ticker").df()
+        audit_map = dict(zip(audit_df['ticker'], audit_df['cnt']))
     except:
-        existing = set()
+        audit_map = {}
 
-    final_queue = {k: v for k, v in unique_tasks.items() if k not in existing}
+    final_queue = {}
+    skipped_count = 0
     
-    log.info(f"📋 Manifest: {len(manifest_df)} | Unique: {len(unique_tasks)}")
-    log.info(f"⬇️  Queue: {len(final_queue)} (Skipped {len(unique_tasks) - len(final_queue)} existing)")
+    for ticker, target_date in unique_tasks.items():
+        row_count = audit_map.get(ticker, 0)
+        
+        if row_count >= MIN_BAR_THRESHOLD:
+            skipped_count += 1
+        else:
+            final_queue[ticker] = target_date
 
-    # 6. Execute Download
+    log.info(f"📋 Manifest Signals: {len(manifest_df)} | Total Contracts (ATM+/-2): {len(unique_tasks)}")
+    log.info(f"⬇️  Queue: {len(final_queue)} (Skipped {skipped_count} healthy contracts)")
+
+    # 5. Execute Download
     processed = 0
     total = len(final_queue)
     
@@ -181,11 +184,10 @@ def run_fetch_pipeline():
         else:
             log.warning(f"⚠️ No data found for {ticker} (Skipping)")
 
-        # Force Sleep to respect Rate Limits
         time.sleep(SLEEP_SECONDS)
 
     con.close()
-    log.info(f"\n🎉 Job Complete. Downloaded {processed} new contracts.")
+    log.info(f"\n🎉 Job Complete. Downloaded/Repaired {processed} contracts.")
 
 if __name__ == "__main__":
     run_fetch_pipeline()
