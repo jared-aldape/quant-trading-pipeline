@@ -1,115 +1,94 @@
-# **🚀 Quant OS v2.2: Trade Master Operating Manual**
+# **🚀 Quant OS v2.3: The Fractal Engine**
 
-**"UTC in the Vault, Local on the Glass. Real Data in the Engine."**
+**"UTC in the Vault, Local on the Glass. Flow in the Math."**
 
-This document outlines the architecture, protocols, and usage of the **Quant OS v2.2** financial operating system. This version introduces Database Persistence, Hybrid Forecasting ("Silver Arrow"), and the optimized Trade Master signal logic.
+This document outlines the architecture, protocols, and usage of the **Quant OS v2.3** financial operating system. This version retires the RSI Mean-Reversion logic in favor of the **Fractal Flow Strategy**, introduces **XSP Scaling Standards**, and streamlines the live workflow into a pure monitoring system.
 
-## **🏛️ The Four Laws (v2.2 Amendments)**
+## **🏛️ The Five Laws (v2.3 Amendments)**
 
 1. **🕰️ The Timezone Law:**  
    * **Vault:** All database timestamps are **Naive UTC**.  
    * **Glass:** All visualizations convert strictly to **Local Time (PST)**.  
    * **Protocol:** T-1 Enforcement prevents API errors by strictly rejecting "Same Day" option requests.  
-2. **🛡️ The Integrity Law:**  
+2. **⚖️ The Scaling Law (NEW):**  
+   * **Reality:** We trade **XSP** (Mini-SPX).  
+   * **Normalization:** All SPX (^GSPC) and Futures (/ES) data is mathematically divided by 10 in the visualization layer.  
+   * **Result:** Charts, Strikes, and P\&L align perfectly on the $600 scale, preventing "Out of the Money" graph errors.  
+3. **🛡️** The Integrity **Law:**  
    * **Golden Source:** market\_data/quant\_strategy.duckdb is the single source of truth.  
-   * **Persistence:** Tools do not pass CSV files. Tool 1 writes to the DB; Tool 2 reads from the DB.  
-3. **👁️ The Observability Law:**  
+   * **Persistence:** Tools do not pass CSV files. The Pipeline writes to the DB; Tools read from the DB.  
+4. **👁️ The Observability Law:**  
    * **No Silent Failures:** Every script logs forensic details to the console.  
-   * **Visual Validation:** The Dashboard must visually confirm what the Backtester executes.  
-4. **🚦 The Rate-Limit Law:**  
-   * **Cluster Fetching:** Efficiently downloads ATM ±2 strikes while respecting API limits.  
-   * **Smart Audit:** Automatically detects and repairs fragmented/partial data.
+   * **Visual Validation:** The Analysis Dashboard explicitly marks the *exact entry minute* with a vertical line to verify signal alignment.  
+5. **🌊 The Flow Law (NEW):**  
+   * **Context First:** No trade is valid unless the Macro (1H) and Micro (5m) momentum align.  
+   * **RTH Only:** The automated scanner filters out pre-market drift (04:00 AM) to ensure executable RTH entries (06:30 AM PST \- 13:00 PST).
 
-## **🧠 Trade Master Strategy Protocols**
+## **🧠 Strategy Protocol: "Fractal Flow"**
 
-The system uses a mean-reversion logic based on VIX overextension. It supports two distinct operating modes for src/pipeline/scan\_signals.py.
+The Logic: "The River and the Ripple"  
+We only enter when the Micro momentum aligns with the Macro current.
 
-**Optimization Finding:** The "MACD Trap" was identified and removed. Momentum confirmation (MACD) was found to be a lagging indicator that reduced profitability. Pure RSI mean-reversion is the validated edge.
+* **Macro (The River):** 1-Hour VIX MACD Histogram.  
+  * *Condition:* Must be **Negative** (Red Bars \= Bearish Volatility \= Bullish Market).  
+* **Micro (The Ripple):** 5-Minute VIX MACD Line.  
+  * *Trigger:* Yellow Line crosses **BELOW** Cyan Signal Line.  
+* **The Signal:** **VIX\_FRACTAL\_LONG** (Bullish SPX Entry).
 
-### **1\. 🟢 "Active Trader" Protocol (Current Default)**
+**Scanner Configuration:**
 
-* **Logic:** RSI(10) \< 30  
-* **Philosophy:** High frequency, balanced risk.  
-  * **Sensitivity:** Uses a faster RSI period (10) to capture moderate volatility dips in strong trends.  
-  * **Why:** Standard RSI(14) is too smooth to trigger often during strong Bull Markets.  
-* **Use Case:** Daily income generation.
-
-### **2\. 🎯 "Sniper" Protocol (High Conviction)**
-
-* **Logic:** RSI(14) \< 22  
-* **Philosophy:** Extreme selectivity.  
-  * **Sensitivity:** Uses standard RSI period (14) but a deeper compression threshold (22).  
-  * **Stats:** Historically 100% Win Rate (Small Sample Size).  
-* **Use Case:** Capital preservation or aggressive sizing on rare setups.
-
-To Switch Protocols:  
-Edit the configuration block in src/pipeline/scan\_signals.py:  
-\# Active Mode  
-VIX\_RSI\_THRESHOLD \= 30  
-VIX\_RSI\_PERIOD \= 10
-
-\# Sniper Mode  
-VIX\_RSI\_THRESHOLD \= 22  
-VIX\_RSI\_PERIOD \= 14
+* **File:** src/pipeline/scan\_signals.py  
+* **Engine:** Dual-Timeframe (Resamples 5m data to 1H on the fly).  
+* **Filter:** Regular Trading Hours (09:30 \- 16:00 ET).
 
 ## **🛠️ The Tool Suite**
 
-### **Pipeline: The Morning Routine**
+### **1\. Pipeline: The Morning Routine**
 
 Run this daily to synchronize the Vault.
 
 python src/pipeline/00\_daily\_update.py
 
-* **Step 1:** Ingest Indices (SPX, VIX) & Futures (/ES).  
-* **Step 2:** Generate Signals (Wipes/Rebuilds Manifest based on active Protocol).  
-* **Step 3:** Ingest Options (Smart Audit \+ Cluster Fetching).
+* **Ingest:** Indices (SPX, VIX, IRX) & Futures (/ES).  
+* **Scan:** Runs the **Fractal Flow Engine** to rebuild the trade\_manifest.  
+* **Options:** Fetches XSP option chains for identified signal days.
 
-### **Tool 3: Analysis Dashboard**
+### **2\. Live Dashboard: The Optical Scope**
 
-* **Role:** Visual Verification.  
+* **Role:** High-Speed Execution Monitor.  
+* **Status:** "Pure Monitor" (No database writing/journaling features).  
+* **Visual Stack:**  
+  * **Row 1:** Market Context (XSP vs /ES Futures overlay).  
+  * **Row 2:** **Fractal Flow Engine** (1H Background Bars vs 5m Crossover Lines).  
+  * **Row 3:** VIX RSI (Overextension check).  
+* **Access:** python 14\_live\_dashboard.py
+
+### **3\. Analysis Dashboard: The Forensic Lab**
+
+* **Role:** Post-Game Review & Verification.  
 * **Features:**  
-  * **RTH Mode:** Hides pre-market noise.  
-  * **Cluster View:** Dropdown allows selection of OTM/ITM strikes.  
-  * **Ghost Line:** Futures data overlay for 24h context.  
-* **Access:** http://localhost:8050/analysis
-
-### **Tool 1: The Backtester**
-
-* **Role:** Forensic Execution & Logging.  
-* **New Features:**  
-  * **Skip Open:** Ignores the first 15 mins (06:30-06:45 PST) to avoid spread volatility.  
-  * **Strike Offset:** Test **OTM (+1)** vs **ATM (0)** strategies.  
-  * **DB Write:** Saves trade log to active\_simulation\_log table.  
-* **Usage:**  
-  1. Select Date Range & Start Capital.  
-  2. Choose "Best Signal" (Optimized) or "First Signal".  
-  3. Click **Run Simulation**.
-
-### **Tool 2: The Forecaster ("Silver Arrow")**
-
-* **Role:** Expectation Management & Projection.  
-* **Logic:** Hybrid Model.  
-  * **Gold Line (Silver Arrow):** Your Ideal Daily Goal (e.g., 20% compounding).  
-  * **Green Cone (Reality):** Monte Carlo simulation using **Real Data** from Tool 1\.  
-* **Metrics:**  
-  * **Probability of Hitting Target:** The % chance your strategy can keep up with your goal.  
-  * **Ruin Probability:** The odds of blowing up the account (\<10% balance).  
-* **Requirement:** You **must** run Tool 1 at least once to populate the database before running Tool 2\.
+  * **Signal Replay:** Dropdown list of every VIX\_FRACTAL\_LONG event found by the scanner.  
+  * **Visual Proof:** A **Vertical Blue Dashed Line** marks the exact moment of entry on the VIX chart to verify the crossover.  
+  * **Scaled P\&L:** Overlays the XSP Option P\&L curve directly onto the Scaled Spot Price candles.  
+* **Access:** python 08\_dashboard.py
 
 ## **🔧 Database Schema**
 
 | Table Name | Content | Update Frequency |
 | :---- | :---- | :---- |
-| indices\_1m | SPX, VIX OHLCV (UTC) | Daily |
+| indices\_1m | SPX, VIX, IRX OHLCV (UTC) | Daily |
 | futures\_1m | /ES Futures (UTC) | Daily |
 | options\_1m | XSP Options (UTC) | T-1 (Daily) |
-| trade\_manifest | List of valid signal timestamps | On Scan |
-| active\_simulation\_log | Logs of the last Backtest run | On Backtest |
+| trade\_manifest | Valid Fractal Signals (Type, Price, Meta) | On Scan |
 
-## **🚀 Quick Launch**
+## **🚀 Operational Workflow**
 
-\# 1\. Update Data  
-python src/pipeline/00\_daily\_update.py
+1. **Ingest & Scan:**  
+   python src/pipeline/00\_daily\_update.py
 
-\# 2\. Launch GUI  
-python app.py  
+2. **Live Monitoring (06:30 AM PST):**  
+   python 14\_live\_dashboard.py
+
+   * *Watch Row 2:* Wait for Yellow line to cross Cyan line while Background is Red.  
+3. **Review (Post-Close):**  
+   python 08\_dashboard.py  
