@@ -43,6 +43,8 @@ def calculate_technical_indicators(df):
     df['macd'] = df['ema12'] - df['ema26']
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['hist'] = df['macd'] - df['signal']
+    
+    # RSI
     delta = df['Close'].diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
@@ -53,7 +55,7 @@ def calculate_technical_indicators(df):
     return df
 
 # ==============================================================================
-# 4. DATA FETCHING (SCALED)
+# 4. DATA FETCHING (PROXY MODE)
 # ==============================================================================
 def parse_rss(url):
     items = []
@@ -80,10 +82,13 @@ def fetch_data_bundle(force_refresh=False):
         return _CACHE
 
     try:
-        tickers = ['^GSPC', '^VIX', 'ES=F', '^IRX']
+        # SWITCHED: Removed 'ES=F', Added 'SPY' for Real-Time Proxy
+        tickers = ['^GSPC', '^VIX', 'SPY', '^IRX']
         df_live = yf.download(tickers, period='5d', interval='5m', progress=False, group_by='ticker', session=config.GLOBAL_SESSION)
         
         data_bundle = {}
+        
+        # 1. SPX (The Truth) - Scaled / 10
         if '^GSPC' in df_live.columns:
             spx = df_live['^GSPC'][['Close', 'Open', 'High', 'Low']].dropna()
             if spx.index.tz is None: spx.index = spx.index.tz_localize(config.TZ_NY)
@@ -91,20 +96,22 @@ def fetch_data_bundle(force_refresh=False):
             spx = spx[spx.index >= spx.index[-1].normalize()]
             spx.index = spx.index.tz_convert(config.TZ_LOCAL)
             
-            # --- CRITICAL: SCALE TO XSP ---
+            # Scale to XSP ($600 range)
             xsp = spx.copy()
             xsp[['Close', 'Open', 'High', 'Low']] = xsp[['Close', 'Open', 'High', 'Low']] / 10.0
             data_bundle['SPX'] = xsp 
         
-        if 'ES=F' in df_live.columns:
-            es = df_live['ES=F'][['Close']].dropna()
-            if es.index.tz is None: es.index = es.index.tz_localize(config.TZ_NY)
-            else: es.index = es.index.tz_convert(config.TZ_NY)
-            es = es[es.index >= es.index[-1].normalize()]
-            es.index = es.index.tz_convert(config.TZ_LOCAL)
-            es['Close'] = es['Close'] / 10.0 
-            data_bundle['ES'] = es
+        # 2. SPY (The Proxy) - Natural Scale ($600 range)
+        if 'SPY' in df_live.columns:
+            spy = df_live['SPY'][['Close']].dropna()
+            if spy.index.tz is None: spy.index = spy.index.tz_localize(config.TZ_NY)
+            else: spy.index = spy.index.tz_convert(config.TZ_NY)
+            spy = spy[spy.index >= spy.index[-1].normalize()]
+            spy.index = spy.index.tz_convert(config.TZ_LOCAL)
+            # No division needed; SPY trades ~1/10 of SPX naturally
+            data_bundle['SPY'] = spy
 
+        # 3. VIX (The Engine)
         if '^VIX' in df_live.columns:
             vix = df_live['^VIX'][['Close']].dropna()
             if vix.index.tz is None: vix.index = vix.index.tz_localize(config.TZ_NY)
@@ -116,6 +123,7 @@ def fetch_data_bundle(force_refresh=False):
             data_bundle['VIX'] = vix_plot
             data_bundle['VIX_LAST'] = float(vix['Close'].iloc[-1])
 
+        # 4. VIX Multi-Timeframe Analysis (MTA)
         vix_bundle = {}
         v1m = yf.download('^VIX', period='1d', interval='1m', progress=False)
         if not v1m.empty: vix_bundle['1m'] = calculate_technical_indicators(v1m)
@@ -143,7 +151,7 @@ layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.H6("TOOL ID: 5", className="text-muted mb-0"),
-            html.H2("COMMAND CENTER (LIVE XSP)", className="display-6 fw-bold text-light"),
+            html.H2("COMMAND CENTER (LIVE SPY PROXY)", className="display-6 fw-bold text-light"),
         ], width=8),
         dbc.Col([html.H4(id='cmd-clock', className="text-end text-info mt-2")], width=4)
     ], className="mb-3"),
@@ -195,27 +203,32 @@ def update_command_center(n, refresh_clicks):
     data = fetch_data_bundle(force_refresh=is_manual)
     
     spx = data.get('live_data', {}).get('SPX')
-    es = data.get('live_data', {}).get('ES')
+    spy = data.get('live_data', {}).get('SPY') # Now using SPY
     vix_mta = data.get('live_data', {}).get('VIX_MTA', {})
     vix_last = data.get('live_data', {}).get('VIX_LAST', 20.0)
 
-    # UPDATED: 3 Rows (Removed Synthetic Option)
-    # Row 1: Context (0.5)
-    # Row 2: VIX Flow (0.3)
-    # Row 3: VIX RSI (0.2)
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=False, 
         row_heights=[0.5, 0.3, 0.2],
         vertical_spacing=0.06, 
         specs=[[{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}]],
-        subplot_titles=("Market Context (XSP Scaled)", "VIX Fractal Flow (1H vs 5m)", "VIX RSI")
+        subplot_titles=("Context: XSP (Syn) vs SPY (Proxy)", "VIX Fractal Flow (1H vs 5m)", "VIX RSI")
     )
 
-    # 1. Market Context
+    # 1. Market Context (XSP vs SPY)
     if spx is not None:
-        fig.add_trace(go.Candlestick(x=spx.index, open=spx['Open'], high=spx['High'], low=spx['Low'], close=spx['Close'], name="XSP (Syn)"), row=1, col=1)
-    if es is not None:
-        fig.add_trace(go.Scatter(x=es.index, y=es['Close'], mode='lines', line=dict(color='#29B6F6', width=1, dash='dot'), name="/ES (Scaled)"), row=1, col=1)
+        fig.add_trace(go.Candlestick(
+            x=spx.index, open=spx['Open'], high=spx['High'], low=spx['Low'], close=spx['Close'], 
+            name="XSP (Syn)"
+        ), row=1, col=1)
+    
+    if spy is not None:
+        fig.add_trace(go.Scatter(
+            x=spy.index, y=spy['Close'], 
+            mode='lines', 
+            line=dict(color='#FF9800', width=1.5, dash='solid'), # Orange for SPY
+            name="SPY (Real-Time)"
+        ), row=1, col=1)
 
     # 2. VIX Fractal Flow
     if '1h' in vix_mta and '5m' in vix_mta:
@@ -223,6 +236,7 @@ def update_command_center(n, refresh_clicks):
         colors_1h = ['rgba(102, 187, 106, 0.3)' if v >= 0 else 'rgba(239, 83, 80, 0.3)' for v in v1h['hist']]
         fig.add_trace(go.Bar(x=v1h.index, y=v1h['hist'], marker_color=colors_1h, name="Macro (1h)"), row=2, col=1)
         fig.add_trace(go.Scatter(x=v5m.index, y=v5m['macd'], line=dict(color='#FFEB3B', width=1.5), name="Micro (5m)"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=v5m.index, y=v5m['signal'], line=dict(color='#00E5FF', width=1, dash='dot'), name="Signal"), row=2, col=1)
 
     # 3. VIX RSI
     if '5m' in vix_mta:

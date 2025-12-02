@@ -9,29 +9,29 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
 from src.utils.logger import get_logger
-import src.pipeline.ingest_indices as ingest_indices
+# UPDATED: Use the Hybrid Module
+import src.pipeline.ingest_hybrid_indices as ingest_indices 
 import src.pipeline.scan_signals as scan_signals
 import src.pipeline.fetch_options as fetch_options
-# import src.pipeline.calc_greeks as calc_greeks # OPTIMIZATION: Skipped
 
 log = get_logger("DailyUpdate")
 
 def run_daily_update():
     start_time = time.time()
-    log.info("🌅 STARTING DAILY QUANT PIPELINE")
+    log.info("🌅 STARTING QUANT OS v2.4 PIPELINE (Hybrid)")
     
     # ---------------------------------------------------------
-    # STEP 1: INGEST MARKET INDICES (SPX, VIX) - Yahoo Finance
+    # STEP 1: INGEST MARKET INDICES (Polygon > Yahoo Fallback)
     # ---------------------------------------------------------
     try:
-        log.info("--- [1/3] Updating Indices ---")
+        log.info("--- [1/3] Updating Indices (Hybrid Mode) ---")
         ingest_indices.run_pipeline()
     except Exception as e:
         log.error(f"❌ Step 1 Failed: {e}")
         return
 
     # ---------------------------------------------------------
-    # STEP 2: SCAN FOR SIGNALS (VIX RSI Logic)
+    # STEP 2: SCAN FOR FRACTAL SIGNALS
     # ---------------------------------------------------------
     try:
         log.info("--- [2/3] Scanning Signals ---")
@@ -49,16 +49,6 @@ def run_daily_update():
     except Exception as e:
         log.error(f"❌ Step 3 Failed: {e}")
         return
-
-    # ---------------------------------------------------------
-    # STEP 4: CALCULATE GREEKS (Skipped for Price-Action Strategy)
-    # ---------------------------------------------------------
-    # try:
-    #     log.info("--- [4/4] Calculating Greeks ---")
-    #     calc_greeks.calc_greeks_for_new_options()
-    # except Exception as e:
-    #     log.error(f"❌ Step 4 Failed: {e}")
-    #     return
 
     elapsed = time.time() - start_time
     log.info(f"✅ DAILY UPDATE COMPLETE in {elapsed:.2f}s")
