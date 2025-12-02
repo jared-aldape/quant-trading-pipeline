@@ -1,42 +1,66 @@
-# **🚀 Quant OS v2.4: The Hybrid Engine**
+# **🚀 Quant OS v2.5: The Hybrid Engine (Pro)**
 
 **"Hybrid Truth in the Vault. Proxy Speed on the Glass."**
 
-This document outlines the architecture, protocols, and usage of the **Quant OS v2.4** financial operating system. This version implements the **Free Hybrid Data Protocol**, effectively securing exchange-grade data for the database while maintaining zero-cost real-time monitoring via proxies.
+Quant OS v2.5 is a professional-grade financial operating system designed for retail algorithmic trading. It implements the **Free Hybrid Data Protocol**, securing institutional-grade data ($0/mo) via a delay-tolerant architecture while providing real-time execution signals through liquid proxies.
 
-## **🏛️ The Six Laws (v2.4 Amendments)**
+## **🏛️ The Six Laws of Quant OS**
 
 1. **🕰️ The Timezone Law:**  
    * **Vault:** All database timestamps are **Naive UTC**.  
    * **Glass:** All visualizations convert strictly to **Local Time (PST)**.  
-   * **Protocol:** T-1 Enforcement prevents API errors by strictly rejecting "Same Day" option requests from Polygon Basic.  
+   * **Protocol:** T-1 Enforcement prevents API errors by rejecting "Same Day" option requests from Polygon Basic.  
 2. **⚖️ The Scaling Law:**  
    * **Reality:** We trade **XSP** (Mini-SPX).  
    * **Normalization:** SPX (^GSPC) is divided by 10\. SPY (ETF) is used 1:1.  
    * **Result:** Charts, Strikes, and P\&L align perfectly on the $600 scale.  
-3. **🛡️ The Hybrid Law (NEW):**  
-   * **The Vault (Truth):** Nightly ingestion uses **Polygon.io (Basic)** for exchange-grade EOD data. If Polygon blocks a ticker (e.g., VIX), the system seamlessly falls back to yfinance to prevent data gaps.  
-   * **The Glass (Speed):** Live monitoring uses yfinance for free intraday data, accepting the 15-minute delay for Indices but gaining speed via Proxies.  
-4. **🐇 The Proxy Law (NEW):**  
-   * **Futures Dead Zone:** Free Futures data (/ES) is unavailable or severely delayed.  
-   * **The Fix:** We watch **SPY (ETF)** as the real-time proxy for market context. It trades sufficiently parallel to XSP to serve as a valid leading indicator.  
-5. **⚓ The Hard Deck Law (NEW):**  
-   * **Simulation Integrity:** The Backtester is forbidden from executing trades within **15 minutes** of the Opening Bell (09:30 ET).  
-   * **Reality Check:** This prevents the engine from "filling" orders at unrealistic prices during the opening spread chaos.  
-6. **🌊 The Flow Law:**  
-   * **Context First:** No trade is valid unless the Macro (1H) and Micro (5m) momentum align.  
-   * **RTH Only:** The automated scanner filters out pre-market drift to ensure executable RTH entries.
+3. **🛡️ The Hybrid Law:**  
+   * **The Vault (Truth):** Nightly ingestion uses **Polygon.io (Basic)** for exchange-grade EOD data.  
+   * **The Glass (Speed):** Live monitoring uses yfinance for free real-time data via proxies (SPY/VIX).  
+4. **🐇 The Proxy Law:**  
+   * **Dead Zone:** Free Futures data (/ES) is unreliable.  
+   * **The Fix:** We watch **SPY (ETF)** as the real-time proxy for market context. It trades parallel to XSP and serves as a valid leading indicator.  
+5. **⚓ The Hard Deck Law:**  
+   * **Safety:** The Backtester is forbidden from executing trades within **15 minutes** of the Opening Bell (09:30 ET).  
+   * **Reality:** This prevents the engine from "filling" orders at unrealistic prices during opening spread chaos.  
+6. **🌊 The Flow Law (Strategy):**  
+   * **Logic:** "The River and the Ripple."  
+   * **Macro (River):** 1-Hour VIX MACD Histogram must be **NEGATIVE** (Red Bars \= Bullish Market).  
+   * **Micro (Ripple):** 5-Minute VIX MACD Line must cross **BELOW** Signal Line.  
+   * **Trigger:** VIX\_FRACTAL\_LONG (Bullish SPX Entry).
 
-## **🧠 Strategy Protocol: "Fractal Flow"**
+## **📂 System Architecture (v2.5)**
 
-The Logic: "The River and the Ripple"  
-We only enter when the Micro momentum aligns with the Macro current.
+The system uses a **Domain-Driven Design** to separate concerns:
 
-* **Macro (The River):** 1-Hour VIX MACD Histogram.  
-  * *Condition:* Must be **Negative** (Red Bars \= Bearish Volatility \= Bullish Market).  
-* **Micro (The Ripple):** 5-Minute VIX MACD Line.  
-  * *Trigger:* Yellow Line crosses **BELOW** Cyan Signal Line.  
-* **The Signal:** **VIX\_FRACTAL\_LONG** (Bullish SPX Entry).
+QUANT-OS/  
+├── data/                   \<-- The Vault (DuckDB file)  
+├── logs/                   \<-- Execution Logs  
+├── src/  
+│   ├── core/               \<-- The "Brains" (Logic & Engines)  
+│   │   ├── engine\_backtest.py      (Historical Simulation)  
+│   │   ├── engine\_scanner.py       (Signal Detection)  
+│   │   ├── engine\_greeks.py        (Delta/Gamma/Theta Math)  
+│   │   └── strat\_fractal.py        (Strategy Logic Source of Truth)  
+│   │  
+│   ├── data/               \<-- The "Ingest" (Fetchers)  
+│   │   ├── ingest\_indices.py       (SPX, VIX, IRX)  
+│   │   ├── ingest\_options.py       (XSP Option Chains)  
+│   │   └── db\_schema.py            (Database Initialization)  
+│   │  
+│   ├── interface/          \<-- The "Glass" (Dash UI)  
+│   │   ├── view\_command.py         (Live Dashboard)  
+│   │   ├── view\_forensics.py       (Post-Trade Analysis)  
+│   │   ├── view\_backtester.py      (Strategy Tester UI)  
+│   │   ├── view\_simulator.py       (Trade Replay)  
+│   │   └── view\_forecast.py        (Monte Carlo)  
+│   │  
+│   └── utils/              \<-- Shared Utilities  
+│       ├── config.py  
+│       └── logger.py  
+│  
+├── main\_pipeline.py        \<-- Daily Data Update Script  
+└── app.py                  \<-- Main UI Entry Point
 
 ## **🛠️ The Tool Suite**
 
@@ -44,57 +68,50 @@ We only enter when the Micro momentum aligns with the Macro current.
 
 Run this daily to synchronize the Vault with Hybrid Truth.
 
-python src/pipeline/00\_daily\_update.py
+python main\_pipeline.py
 
-* **Ingest (Hybrid):** Fetches SPX/VIX/IRX using Polygon EOD. Falls back to Yahoo if blocked.  
-* **Scan:** Runs the **Fractal Flow Engine** to rebuild the trade\_manifest.  
-* **Options:** Fetches XSP option chains for identified signal days.
+* **Ingest:** Fetches SPX/VIX/IRX (Hybrid Mode). **Retains history forever.**  
+* **Scan:** Runs strat\_fractal.py to identify trade signals.  
+* **Fetch:** Downloads XSP option chains for identified signal days.  
+* **Calc:** Computes Greeks (IV, Delta) for all new options.
 
-### **2\. Live Dashboard: The Command Center**
+### **2\. Command Center (Live)**
 
-* **Role:** Real-Time Execution Monitor (Proxy Mode).  
-* **Visual Stack:**  
-  * **Row 1:** Market Context (XSP Syn vs **SPY Proxy**).  
-  * **Row 2:** **Fractal Flow Engine** (1H Background Bars vs 5m Crossover Lines).  
-  * **Row 3:** VIX RSI (Overextension check).  
-* **Access:**  
-  python 14\_live\_dashboard.py
+python app.py
 
-### **3\. Analysis Dashboard: The Forensic Lab**
+* **URL:** http://localhost:8050/  
+* **Role:** Real-Time Execution Monitor.  
+* **Features:** Live "Signal Status" Badge (Armed/Wait), Proxy Context, Fractal Flow Charts.
 
-* **Role:** Post-Game Review & Verification.  
-* **Features:**  
-  * **Visual Proof:** Vertical line marks the exact entry minute.  
-  * **Scaled P\&L:** Overlays the XSP Option P\&L curve directly onto the Scaled Spot Price.  
-* **Access:**  
-  python 08\_dashboard.py
+### **3\. Forensic Lab**
 
-### **4\. Backtester: The Time Machine**
+* **URL:** http://localhost:8050/analysis  
+* **Role:** Post-Game Review.  
+* **Features:** Visual proof of signal timing, Option P\&L overlay vs Spot Price.
 
-* **Role:** Strategy Verification.  
-* **Features:**  
-  * **Hard Deck:** Enforces 15-minute open buffer.  
-  * **Tax Engine:** Calculates Section 1256 tax implications (60/40 split).  
-* **Access:**  
-  python 11\_backtest.py
+### **4\. Strategy Backtester**
+
+* **URL:** http://localhost:8050/backtester  
+* **Role:** Verification Time Machine.  
+* **Features:** Hard Deck enforcement, Tax Engine (Section 1256), Equity Curve visualization.
 
 ## **🔧 Database Schema (DuckDB)**
 
-| Table Name | Content | Update Frequency | Source |
+| Table Name | Content | Update Frequency | Retention Policy |
 | :---- | :---- | :---- | :---- |
-| indices\_1m | SPX, VIX, IRX OHLCV | Daily | **Polygon (Primary) / Yahoo (Fallback)** |
-| options\_1m | XSP Options (UTC) | T-1 (Daily) | **Polygon** |
-| trade\_manifest | Valid Fractal Signals | On Scan | **Internal Engine** |
-| active\_simulation\_log | Backtest Results | On Run | **Backtester** |
+| indices\_1m | SPX, VIX OHLCV | Daily | **Permanent Append** |
+| options\_1m | XSP Options \+ Greeks | T-1 (Daily) | **Permanent Append** |
+| trade\_manifest | Valid Signals | On Scan | Rebuilt Daily |
+| risk\_free\_rate\_daily | IRX (13-Week T-Bill) | Daily | Upsert |
+| active\_simulation\_log | Backtest Results | On Run | Overwritten |
 
 ## **🚀 Operational Workflow**
 
 1. Ingest & Scan (8:00 PM PST):  
-   python src/pipeline/00\_daily\_update.py  
-   (This repairs the Vault with official Polygon data from the closed session)  
+   Run python main\_pipeline.py. This repairs the Vault with official Polygon data from the closed session and generates the trade manifest. IMPORTANT: Do not delete the database file; this script builds history over time.  
 2. Live Monitoring (06:30 AM PST):  
-   python 14\_live\_dashboard.py  
-   * *Watch Row 2:* Wait for Yellow line to cross Cyan line while Background is Red.  
-   * *Context:* Confirm trend with SPY (Orange Line) on Row 1\.  
+   Run python app.py and open the Command Center.  
+   * **Watch Status Badge:** Wait for "ARMED" (Green).  
+   * **Confirm:** Check SPY Context (Row 1).  
 3. Review (Post-Close):  
-   python 08\_dashboard.py
+   Open the Forensic Analysis tab to verify trade execution against the "Hard Deck" and pricing logic.
