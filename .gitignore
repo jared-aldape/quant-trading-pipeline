@@ -10,3 +10,4 @@ __pycache__/
 # --- Keep these! ---
 !market_data/.gitkeep
 !logs/.gitkeep
+/data
