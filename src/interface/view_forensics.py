@@ -1,344 +1,180 @@
-import sys
-import os
 import dash
-from dash import dcc, html, Input, Output, register_page, callback, State
+from dash import dcc, html, callback, Input, Output
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import duckdb
 import pandas as pd
-import numpy as np
-import logging
-from datetime import timedelta
-import pytz
-from pathlib import Path
+from src.core import engine_forensics
 
 # ==============================================================================
-# 1. PATH CONSTITUTION
+# RENDER LAYOUT
 # ==============================================================================
-# File: src/interface/view_forensics.py
-# Root: ../../
-ROOT_DIR = Path(__file__).resolve().parents[2]
-sys.path.append(str(ROOT_DIR))
+def render():
+    return dbc.Container([
+        # HEADER
+        dbc.Row([
+            dbc.Col([
+                html.H2("FORENSICS LAB", className="display-6 fw-bold text-white"),
+                html.Small("Post-Trade Audit & Statistical Breakdown", className="text-muted"),
+                html.Hr(className="my-2", style={'borderColor': '#444'})
+            ], width=12)
+        ], className="mb-4"),
 
-from src.utils import config
-from src.utils.logger import get_logger
-from src.core import strat_fractal  # <--- NEW: Centralized Logic
-
-# ==============================================================================
-# 2. PAGE REGISTRATION
-# ==============================================================================
-register_page(__name__, path='/analysis', name='Analysis')
-logger = get_logger("ForensicsView")
-STRIKE_RANGE = 2
-
-# ==============================================================================
-# 3. HELPER FUNCTIONS
-# ==============================================================================
-def clean_df(df, target_timezone=config.TZ_LOCAL):
-    """Standardizes DataFrames for UI Display (UTC -> Local)."""
-    if df is None or df.empty: return pd.DataFrame(columns=['dt', 'close'])
-    
-    df.columns = df.columns.str.strip().str.lower()
-    df = df.loc[:, ~df.columns.duplicated()]
-    
-    rename_map = {'datetime_utc': 'dt', 'datetime': 'dt', 'date': 'dt', 'timestamp': 'dt', 'close': 'close'}
-    df.rename(columns=rename_map, inplace=True)
-    
-    if 'dt' not in df.columns: return pd.DataFrame(columns=['dt', 'close'])
-    
-    if not pd.api.types.is_datetime64_any_dtype(df['dt']):
-        df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
-    
-    df = df.dropna(subset=['dt'])
-    
-    # Timezone Handling (The Timezone Law)
-    if df['dt'].dt.tz is None:
-        df['dt'] = df['dt'].dt.tz_localize(config.TZ_UTC)
-    else:
-        df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
-    
-    df['dt'] = df['dt'].dt.tz_convert(target_timezone)
-    return df.sort_values('dt')
-
-def get_signal_events():
-    """Fetches list of historical signals from the Manifest."""
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    try:
-        df = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} ORDER BY entry_timestamp_utc DESC").df()
-    except: return []
-    con.close()
-    
-    options = []
-    for _, row in df.iterrows():
-        try:
-            ts_utc = pd.to_datetime(row['entry_timestamp_utc'], unit='ms', utc=True)
-            ts_local = ts_utc.tz_convert(config.TZ_LOCAL)
-            t_type = row.get('trade_type', 'call')
-            if pd.isna(t_type): t_type = 'call'
-            t_type = t_type.upper()
+        # CONTROL PANEL
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("CASE FILE SELECTOR (DB)", className="fw-bold text-info", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody([
+                        html.Label("Select Simulation Run", className="text-white"),
+                        dcc.Dropdown(
+                            id='audit-run-selector',
+                            options=engine_forensics.fetch_simulation_runs(),
+                            placeholder="Select a Backtest Run...",
+                            className="mb-2",
+                            style={'color': '#000'}
+                        ),
+                        dbc.Button("↻ REFRESH DB", id='audit-refresh-btn', color="secondary", outline=True, size="sm", className="w-100")
+                    ], style={'backgroundColor': '#131722'})
+                ], className="shadow mb-4", style={'border': '1px solid #444'})
+            ], width=12, md=4),
             
-            sig_type = row.get('signal_type', 'MANUAL')
-            if pd.isna(sig_type): sig_type = 'MANUAL'
-            
-            label = f"{ts_local.strftime('%Y-%m-%d %H:%M')} | {sig_type} | {t_type} | Est. ATM: ${row['xsp_price']:.2f}"
-            options.append({'label': label, 'value': row['entry_timestamp_utc']})
-        except: continue
-    return options
+            # SUMMARY STATS (Placeholder)
+            dbc.Col([
+                html.Div(id='audit-stats-panel')
+            ], width=12, md=8)
+        ]),
 
-def get_tickers_for_event(event_ts):
-    """Generates ticker options based on the signal timestamp."""
-    if not event_ts: return [], None
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    try:
-        row = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {event_ts}").df().iloc[0]
-        trade_date = pd.to_datetime(row['date'])
-        atm = round(row['xsp_price'])
-        
-        t_type = row.get('trade_type', 'call')
-        if pd.isna(t_type): t_type = 'call'
-        type_letter = 'P' if t_type.lower() == 'put' else 'C'
-        
-        tickers = []
-        best = None
-        date_str = trade_date.strftime("%y%m%d")
-        
-        for offset in range(-STRIKE_RANGE, STRIKE_RANGE + 1):
-            strike = atm + offset
-            ticker = f"O:XSP{date_str}{type_letter}{int(strike*1000):08d}"
-            label = f"{ticker} ({'ATM' if offset==0 else 'OTM' if offset>0 else 'ITM'} ${strike})"
-            tickers.append({'label': label, 'value': ticker})
-            if offset == 0: best = ticker
-            
-        con.close()
-        return tickers, best
-    except:
-        con.close()
-        return [], None
+        # VISUALIZATION GRID
+        dbc.Row([
+            # ROW 1: DECAY & DOMINANCE
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("SIGNAL DECAY (Profit by Sequence)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody(
+                        dcc.Loading(dcc.Graph(id='chart-decay', style={'height': '300px'}), type="cube", color="#00bc8c"),
+                        style={'backgroundColor': '#000000'}
+                    )
+                ], className="shadow h-100", style={'border': '1px solid #444'})
+            ], width=12, md=8),
 
-# ==============================================================================
-# 4. LAYOUT
-# ==============================================================================
-layout = dbc.Container([
-    dbc.Row([
-        dbc.Col([
-            html.H2("FORENSIC ANALYSIS LAB", className="display-6 fw-bold text-dark"),
-            html.Hr(className="my-2")
-        ], width=12)
-    ], className="mb-4"),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("DOMINANCE (Call vs Put)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody(
+                        dcc.Loading(dcc.Graph(id='chart-dominance', style={'height': '300px'}), type="cube", color="#00bc8c"),
+                        style={'backgroundColor': '#000000'}
+                    )
+                ], className="shadow h-100", style={'border': '1px solid #444'})
+            ], width=12, md=4),
+        ], className="mb-4"),
 
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("1. Signal Event"),
-                            dcc.Dropdown(id='an-event-selector', options=get_signal_events(), clearable=False, className="mb-2", style={'color': '#000'}),
-                        ], width=6),
-                        dbc.Col([
-                            html.Label("2. Strike Selection"),
-                            dcc.Dropdown(id='an-strike-selector', options=[], disabled=True, clearable=False, style={'color': '#000'})
-                        ], width=6)
-                    ])
-                ])
-            ], className="mb-3 shadow-sm")
-        ], width=12),
-        dbc.Col([html.Div(id='an-stats-panel', className="text-end text-success fw-bold mb-2")], width=12)
-    ]),
+        # ROW 2: KILL ZONES & THETA
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("KILL ZONE (Hourly Performance)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody(
+                        dcc.Loading(dcc.Graph(id='chart-killzone', style={'height': '300px'}), type="cube", color="#00bc8c"),
+                        style={'backgroundColor': '#000000'}
+                    )
+                ], className="shadow h-100", style={'border': '1px solid #444'})
+            ], width=12, md=6),
 
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([dcc.Graph(id='an-replay-chart', style={'height': '1200px'})], className="p-1")
-            ], className="shadow-sm mb-5")
-        ], width=12)
-    ])
-], fluid=True)
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("THETA RISK (Duration vs P&L)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody(
+                        dcc.Loading(dcc.Graph(id='chart-theta', style={'height': '300px'}), type="cube", color="#00bc8c"),
+                        style={'backgroundColor': '#000000'}
+                    )
+                ], className="shadow h-100", style={'border': '1px solid #444'})
+            ], width=12, md=6),
+        ])
+
+    ], fluid=True, style={'backgroundColor': '#000', 'minHeight': '100vh', 'padding': '20px'})
 
 # ==============================================================================
-# 5. CALLBACKS
+# CALLBACKS
 # ==============================================================================
 @callback(
-    [Output('an-strike-selector', 'options'), Output('an-strike-selector', 'value'), Output('an-strike-selector', 'disabled')],
-    [Input('an-event-selector', 'value')]
+    [Output('audit-run-selector', 'options'),
+     Output('chart-decay', 'figure'),
+     Output('chart-dominance', 'figure'),
+     Output('chart-killzone', 'figure'),
+     Output('chart-theta', 'figure')],
+    [Input('audit-run-selector', 'value'),
+     Input('audit-refresh-btn', 'n_clicks')]
 )
-def update_dropdown(ts):
-    if not ts: return [], None, True
-    options, best = get_tickers_for_event(ts)
-    return options, best, False
-
-@callback(
-    [Output('an-replay-chart', 'figure'), Output('an-stats-panel', 'children')],
-    [Input('an-event-selector', 'value'), Input('an-strike-selector', 'value')]
-)
-def update_chart(ts, ticker):
-    if not ts or not ticker: return go.Figure(), ""
-
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
+def update_forensics(run_id, n_clicks):
+    # 1. Refresh Dropdown
+    options = engine_forensics.fetch_simulation_runs()
     
-    try:
-        trade_info = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {ts}").df().iloc[0]
-        trade_date_str = str(pd.to_datetime(trade_info['date']).date())
-        
-        # Get Trade details for Title
-        t_type = trade_info.get('trade_type', 'call')
-        if pd.isna(t_type): t_type = 'call'
-        sig_type = trade_info.get('signal_type', 'MANUAL')
-        if pd.isna(sig_type): sig_type = 'MANUAL'
-        
-        tz_ny = pytz.timezone('America/New_York')
-        rth_open_ny = tz_ny.localize(pd.Timestamp(f"{trade_date_str} 09:30:00"))
-        rth_close_ny = tz_ny.localize(pd.Timestamp(f"{trade_date_str} 16:00:00"))
-        rth_open_local = rth_open_ny.astimezone(config.TZ_LOCAL)
-        rth_close_local = rth_close_ny.astimezone(config.TZ_LOCAL)
-        
-        # --- SCALED CONTEXT: SPX -> XSP ---
-        spx_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE) = '{trade_date_str}' ORDER BY datetime_utc ASC").df()
-        spx_df = clean_df(spx_df)
-        if not spx_df.empty:
-            spx_df[['open', 'high', 'low', 'close']] = spx_df[['open', 'high', 'low', 'close']] / 10.0
-        spx_df = spx_df[(spx_df['dt'] >= rth_open_local) & (spx_df['dt'] <= rth_close_local)]
-
-        try:
-            es_df = con.execute(f"SELECT * FROM {config.TBL_FUTURES} WHERE ticker='ES' AND CAST(datetime_utc AS DATE) = '{trade_date_str}' ORDER BY datetime_utc ASC").df()
-            es_df = clean_df(es_df)
-            if not es_df.empty:
-                 es_df[['open', 'high', 'low', 'close']] = es_df[['open', 'high', 'low', 'close']] / 10.0
-            es_df = es_df[(es_df['dt'] >= rth_open_local) & (es_df['dt'] <= rth_close_local)]
-        except: es_df = pd.DataFrame()
-
-        opt_df = con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df()
-        opt_df = clean_df(opt_df)
-        opt_df = opt_df[(opt_df['dt'] >= rth_open_local) & (opt_df['dt'] <= rth_close_local)]
-        
-        # --- VIX FRACTAL FLOW LOGIC (Using Centralized Strategy) ---
-        start_date = str(pd.to_datetime(trade_date_str) - timedelta(days=60))
-        vix_raw = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) BETWEEN '{start_date}' AND '{trade_date_str}' ORDER BY datetime_utc ASC").df()
-        vix_raw = clean_df(vix_raw)
-        
-        # 1. MACRO (1H)
-        if not vix_raw.empty:
-            vix_1h = vix_raw.set_index('dt').resample('1h').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last'}).dropna().reset_index()
-            # USE STRATEGY MODULE
-            vix_1h = strat_fractal.calculate_macd(vix_1h)
-            vix_1h_plot = vix_1h[(vix_1h['dt'] >= rth_open_local) & (vix_1h['dt'] <= rth_close_local)]
-        else:
-            vix_1h_plot = pd.DataFrame()
-
-        # 2. MICRO (5m)
-        # USE STRATEGY MODULE
-        vix_5m = strat_fractal.calculate_macd(vix_raw.copy())
-        vix_5m = strat_fractal.calculate_rsi(vix_5m)
-        vix_5m_plot = vix_5m[(vix_5m['dt'] >= rth_open_local) & (vix_5m['dt'] <= rth_close_local)]
-        
-    except Exception as e:
-        con.close()
-        logger.error(f"Forensics Data Error: {e}")
-        return go.Figure(), f"Error: {str(e)}"
+    # 2. Base Charts (Empty)
+    empty_fig = go.Figure().update_layout(
+        template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color="white"), xaxis={'showgrid': False, 'visible': False}, yaxis={'showgrid': False, 'visible': False}
+    )
     
-    con.close()
+    if not run_id:
+        return options, empty_fig, empty_fig, empty_fig, empty_fig
 
-    signal_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
-    signal_dt_local = signal_dt_utc.tz_convert(config.TZ_LOCAL)
+    # 3. Fetch Data
+    df = engine_forensics.fetch_run_metrics(run_id)
+    if df.empty:
+        return options, empty_fig, empty_fig, empty_fig, empty_fig
+
+    # --- CHART 1: SIGNAL DECAY (Cumulative P&L) ---
+    df['cum_pnl'] = df['pnl'].cumsum()
+    fig_decay = go.Figure()
+    fig_decay.add_trace(go.Scatter(x=df['trade_seq'], y=df['cum_pnl'], mode='lines+markers', line=dict(color='#00bc8c', width=2), marker=dict(size=4)))
+    fig_decay.update_layout(
+        template="plotly_dark", title="Equity Curve (Sequence)", margin=dict(l=40, r=40, t=30, b=30),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
+        yaxis=dict(gridcolor='#333'), xaxis=dict(gridcolor='#333')
+    )
+
+    # --- CHART 2: DOMINANCE (Win Rate by Type) ---
+    win_rates = df[df['pnl'] > 0].groupby('type').size()
+    total_counts = df.groupby('type').size()
+    wr_pct = (win_rates / total_counts * 100).fillna(0)
     
-    entry_price = 0
-    entry_time = None
-    max_gain_price = 0
-    max_gain_time = None
-    max_gain_pct = 0
+    fig_dom = go.Figure()
+    fig_dom.add_trace(go.Bar(x=wr_pct.index.str.upper(), y=wr_pct.values, marker_color=['#00d2ff', '#f39c12']))
+    fig_dom.update_layout(
+        template="plotly_dark", title="Win Rate % by Type", margin=dict(l=40, r=40, t=30, b=30),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
+        yaxis=dict(range=[0, 100], gridcolor='#333')
+    )
+
+    # --- CHART 3: KILL ZONE (Hourly P&L) ---
+    hourly_pnl = df.groupby('hour')['pnl'].sum().reset_index()
+    colors = ['#00bc8c' if v >= 0 else '#ef5350' for v in hourly_pnl['pnl']]
     
-    if not opt_df.empty:
-        entry_slice = opt_df[opt_df['dt'] >= signal_dt_local]
-        if not entry_slice.empty:
-            entry_row = entry_slice.iloc[0]
-            entry_price = entry_row['close']
-            entry_time = entry_row['dt']
-            trade_window = entry_slice.copy()
-            if not trade_window.empty:
-                max_idx = trade_window['high'].idxmax()
-                max_gain_price = trade_window.loc[max_idx, 'high']
-                max_gain_time = trade_window.loc[max_idx, 'dt']
-                max_gain_pct = ((max_gain_price - entry_price) / entry_price) * 100
+    fig_kill = go.Figure()
+    fig_kill.add_trace(go.Bar(x=hourly_pnl['hour'], y=hourly_pnl['pnl'], marker_color=colors))
+    fig_kill.update_layout(
+        template="plotly_dark", title="Net P&L by Hour of Day", margin=dict(l=40, r=40, t=30, b=30),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
+        xaxis=dict(tickmode='linear', dtick=1, gridcolor='#333'), yaxis=dict(gridcolor='#333')
+    )
 
-            opt_df['P&L_Pct'] = ((opt_df['close'] - entry_price) / entry_price) * 100
-            opt_df['P&L_Color'] = np.where(opt_df['P&L_Pct'] >= 0, 'rgba(0, 200, 83, 0.3)', 'rgba(213, 0, 0, 0.3)')
-            stats_text = f"ENTRY: ${entry_price:.2f} | PEAK: ${max_gain_price:.2f} (+{max_gain_pct:.1f}%)"
-        else:
-            stats_text = "Signal outside RTH Data range"
-    else:
-        stats_text = "No Option Data"
-
-    # --- PLOT GENERATION ---
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, 
-        row_heights=[0.4, 0.3, 0.15, 0.15], 
-        vertical_spacing=0.08,
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
-        subplot_titles=(
-            "Context: XSP (Syn) vs /ES (Scaled)", 
-            f"Strategy: {sig_type} ({t_type.upper()}) | Price vs P&L",  # UPDATED TITLE
-            "VIX Fractal Flow (1H vs 5m)", 
-            "VIX RSI"
+    # --- CHART 4: THETA RISK (Duration vs ROI) ---
+    fig_theta = go.Figure()
+    fig_theta.add_trace(go.Scatter(
+        x=df['duration'], y=df['return_pct'], 
+        mode='markers', 
+        marker=dict(
+            size=8, 
+            color=df['return_pct'], 
+            colorscale='RdYlGn', 
+            cmid=0,
+            line=dict(width=1, color='#333')
         )
+    ))
+    fig_theta.update_layout(
+        template="plotly_dark", title="Duration (Mins) vs ROI %", margin=dict(l=40, r=40, t=30, b=30),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
+        xaxis=dict(title="Minutes Held", gridcolor='#333'), yaxis=dict(title="Return %", gridcolor='#333')
     )
 
-    if not spx_df.empty:
-        fig.add_trace(go.Candlestick(
-            x=spx_df['dt'], 
-            open=spx_df['open'], high=spx_df['high'], low=spx_df['low'], close=spx_df['close'], 
-            name="XSP (Syn)",
-            increasing_line_color='#2E7D32', increasing_fillcolor='rgba(0,0,0,0)', 
-            decreasing_line_color='#C62828', decreasing_fillcolor='#C62828'
-        ), row=1, col=1)
-    
-    if not es_df.empty:
-        fig.add_trace(go.Scatter(x=es_df['dt'], y=es_df['close'], mode='lines', line=dict(color='#0277BD', width=1, dash='dot'), name="/ES"), row=1, col=1)
-
-    if not opt_df.empty:
-        fig.add_trace(go.Bar(x=opt_df['dt'], y=opt_df['P&L_Pct'], marker_color=opt_df['P&L_Color'], name="P&L %", opacity=0.5), row=2, col=1, secondary_y=True)
-        fig.add_trace(go.Scatter(x=opt_df['dt'], y=opt_df['close'], mode='lines', line=dict(color='#2962FF', width=2), name="Option Price"), row=2, col=1, secondary_y=False)
-        
-        if entry_price > 0 and entry_time is not None:
-            fig.add_vline(x=entry_time, line_dash="dash", line_color="#2962FF", row=2, col=1)
-            fig.add_trace(go.Scatter(x=[entry_time], y=[entry_price], mode='markers', marker=dict(color='#2962FF', size=12, symbol='triangle-up'), name="Entry"), row=2, col=1, secondary_y=False)
-
-        if max_gain_time is not None:
-            fig.add_trace(go.Scatter(
-                x=[max_gain_time], y=[max_gain_price], mode='markers+text', 
-                marker=dict(color='#00C853', size=14, symbol='star'),
-                text=[f"+{max_gain_pct:.1f}%"], textposition="top center",
-                textfont=dict(color='#00C853', weight='bold'),
-                name=f"Max (+{max_gain_pct:.0f}%)"
-            ), row=2, col=1, secondary_y=False)
-
-    # --- FRACTAL FLOW PLOT ---
-    if not vix_1h_plot.empty and not vix_5m_plot.empty:
-        # Macro (1H) Background
-        # NOTE: Using 'hist' from strat_fractal output
-        colors_1h = ['rgba(102, 187, 106, 0.3)' if v < 0 else 'rgba(239, 83, 80, 0.3)' for v in vix_1h_plot['hist']]
-        fig.add_trace(go.Bar(x=vix_1h_plot['dt'], y=vix_1h_plot['hist'], marker_color=colors_1h, name="Macro (1h)"), row=3, col=1)
-        
-        # Micro (5m) Lines
-        fig.add_trace(go.Scatter(x=vix_5m_plot['dt'], y=vix_5m_plot['macd'], line=dict(color='#FBC02D', width=1.5), name="Micro (5m) MACD"), row=3, col=1)
-        fig.add_trace(go.Scatter(x=vix_5m_plot['dt'], y=vix_5m_plot['signal'], line=dict(color='#00E5FF', width=1, dash='dot'), name="Micro (5m) Sig"), row=3, col=1)
-        
-        # Zero Line
-        fig.add_hline(y=0, line_width=1, line_color="#B0BEC5", row=3, col=1)
-        
-        if entry_time is not None:
-            fig.add_vline(x=entry_time, line_dash="dash", line_color="#2962FF", row=3, col=1)
-
-    if not vix_5m_plot.empty:
-        fig.add_trace(go.Scatter(x=vix_5m_plot['dt'], y=vix_5m_plot['rsi'], line=dict(color='#7E57C2', width=2), name="RSI"), row=4, col=1)
-        fig.add_hline(y=70, line_dash="dot", line_color="#C62828", row=4, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="#2E7D32", row=4, col=1)
-
-    fig.update_layout(
-        template="plotly_white", height=1200, xaxis_rangeslider_visible=False, 
-        margin=dict(t=50, b=50, l=60, r=60), legend=dict(orientation="h", y=-0.05, x=0.5, xanchor="center")
-    )
-    fig.update_yaxes(gridcolor='#F5F5F5')
-    fig.update_xaxes(gridcolor='#F5F5F5')
-
-    return fig, stats_text
+    return options, fig_decay, fig_dom, fig_kill, fig_theta

@@ -11,3 +11,5 @@ __pycache__/
 !market_data/.gitkeep
 !logs/.gitkeep
 /data
+*.duckdb
+/data

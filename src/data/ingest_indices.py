@@ -34,6 +34,10 @@ TICKER_MAP = [
     {"poly": "I:SPX", "yf": "^GSPC", "db": "SPX", "type": "INDEX", "name": "S&P 500", "fallback_period": "59d"},
     {"poly": "I:VIX", "yf": "^VIX",  "db": "VIX", "type": "INDEX", "name": "CBOE Volatility", "fallback_period": "59d"},
     
+    # NEW: Futures Overlay (Use Yahoo 'ES=F' as primary for Continuous Contract)
+    # We leave 'poly' empty or dummy because continuous futures on Polygon require complex tickers
+    {"poly": "---",   "yf": "ES=F",  "db": "ES",  "type": "FUTURE", "name": "E-Mini S&P 500", "fallback_period": "59d"},
+
     # IRX is just for rate data, 5d is sufficient as it only needs a daily close
     {"poly": "I:IRX", "yf": "^IRX",  "db": "IRX", "type": "RATE",  "name": "13-Week Treasury", "fallback_period": "5d"},
 ]
@@ -43,6 +47,8 @@ TICKER_MAP = [
 # ==============================================================================
 def fetch_polygon_day(ticker, date_str):
     """Attempts to fetch 1-minute aggregates for a single day from Polygon."""
+    if ticker == "---": return None # Skip if no Polygon ticker defined
+
     url = f"{BASE_URL}/{ticker}/range/1/minute/{date_str}/{date_str}"
     params = {
         "adjusted": "true",
@@ -114,6 +120,14 @@ def save_indices(con, df, db_sym):
     # Enforce Schema Order: datetime_utc, ticker, open, high, low, close, volume
     df = df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']]
     con.execute(f"INSERT OR IGNORE INTO {config.TBL_INDICES} SELECT * FROM df")
+
+def save_futures(con, df, db_sym):
+    """Saves Futures Data to TBL_FUTURES."""
+    if df.empty: return
+    df['ticker'] = db_sym
+    # Enforce Schema Order matching TBL_FUTURES in db_schema.py
+    df = df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']]
+    con.execute(f"INSERT OR IGNORE INTO {config.TBL_FUTURES} SELECT * FROM df")
     
 def save_rates(con, df, db_sym):
     """
@@ -140,7 +154,7 @@ def save_rates(con, df, db_sym):
 # 5. PIPELINE RUNNER
 # ==============================================================================
 def run_pipeline():
-    log.info("🛡️ Starting Hybrid Ingest (Indices + Rates)...")
+    log.info("🛡️ Starting Hybrid Ingest (Indices + Futures + Rates)...")
     con = duckdb.connect(str(config.DB_FILE))
     
     # Lookback window for Polygon (still 5 days for the latest history)
@@ -153,36 +167,36 @@ def run_pipeline():
         yf_sym = target['yf']
         db_sym = target['db']
         asset_type = target['type']
-        fallback_period = target.get('fallback_period', '5d') # Retrieve new period
+        fallback_period = target.get('fallback_period', '5d')
         
         log.info(f"🔍 Processing {db_sym} ({target['name']})...")
         
         poly_success_count = 0
         
-        # 1. Try Polygon (The Truth)
-        for d in dates:
-            date_str = d.strftime('%Y-%m-%d')
-            df = fetch_polygon_day(poly_sym, date_str)
-            
-            if df is not None and not df.empty:
-                if asset_type == "INDEX":
-                    save_indices(con, df, db_sym)
-                elif asset_type == "RATE":
-                    save_rates(con, df, db_sym)
-                    
-                poly_success_count += 1
-                time.sleep(12) # Rate Limit protection
+        # 1. Try Polygon (The Truth) - Skipped if poly_sym is "---"
+        if poly_sym != "---":
+            for d in dates:
+                date_str = d.strftime('%Y-%m-%d')
+                df = fetch_polygon_day(poly_sym, date_str)
+                
+                if df is not None and not df.empty:
+                    if asset_type == "INDEX": save_indices(con, df, db_sym)
+                    elif asset_type == "FUTURE": save_futures(con, df, db_sym)
+                    elif asset_type == "RATE": save_rates(con, df, db_sym)
+                        
+                    poly_success_count += 1
+                    time.sleep(12) 
 
-        # 2. Try Yahoo Fallback (The Backup) - Use the extended period here
+        # 2. Try Yahoo Fallback (The Backup) - Use extended period
+        # For Futures (ES), we ALWAYS hit this because poly_sym is "---", effectively making Yahoo the primary.
         if poly_success_count < 3:
             log.info(f"📉 Low Polygon yield for {db_sym}. Running bulk fallback...")
-            df_yf = fetch_yfinance_fallback(yf_sym, period=fallback_period) # PASS NEW PERIOD
+            df_yf = fetch_yfinance_fallback(yf_sym, period=fallback_period)
             
             if not df_yf.empty:
-                if asset_type == "INDEX":
-                    save_indices(con, df_yf, db_sym)
-                elif asset_type == "RATE":
-                    save_rates(con, df_yf, db_sym)
+                if asset_type == "INDEX": save_indices(con, df_yf, db_sym)
+                elif asset_type == "FUTURE": save_futures(con, df_yf, db_sym)
+                elif asset_type == "RATE": save_rates(con, df_yf, db_sym)
                 log.info(f"✅ Repaired {db_sym} via Yahoo ({len(df_yf)} rows).")
         else:
             log.info(f"✨ Secured {db_sym} via Polygon ({poly_success_count} days).")

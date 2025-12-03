@@ -1,117 +1,94 @@
-# **🚀 Quant OS v2.5: The Hybrid Engine (Pro)**
+# **🚀 Quant OS v3.0: The Tactical Command System**
 
-**"Hybrid Truth in the Vault. Proxy Speed on the Glass."**
+**"Hybrid Truth in the Vault. Surgical Precision on the Glass."**
 
-Quant OS v2.5 is a professional-grade financial operating system designed for retail algorithmic trading. It implements the **Free Hybrid Data Protocol**, securing institutional-grade data ($0/mo) via a delay-tolerant architecture while providing real-time execution signals through liquid proxies.
+Quant OS v3.0 is a professional-grade financial operating system designed to eliminate emotional bias and validate trading profitability using real-world market friction and advanced statistical analysis. It operates on a **Hybrid Architecture**: Polygon.io for historical "Truth" (Vault) and Yahoo Finance for real-time "Speed" (Glass).
 
-## **🏛️ The Six Laws of Quant OS**
+## **🏛️ The Six Laws of Quant OS (v3.0 Core)**
+
+These laws define the non-negotiable standards of data integrity and trade execution within the system:
 
 1. **🕰️ The Timezone Law:**  
    * **Vault:** All database timestamps are **Naive UTC**.  
    * **Glass:** All visualizations convert strictly to **Local Time (PST)**.  
-   * **Protocol:** T-1 Enforcement prevents API errors by rejecting "Same Day" option requests from Polygon Basic.  
 2. **⚖️ The Scaling Law:**  
    * **Reality:** We trade **XSP** (Mini-SPX).  
-   * **Normalization:** SPX (^GSPC) is divided by 10\. SPY (ETF) is used 1:1.  
-   * **Result:** Charts, Strikes, and P\&L align perfectly on the $600 scale.  
-3. **🛡️ The Hybrid Law:**  
-   * **The Vault (Truth):** Nightly ingestion uses **Polygon.io (Basic)** for exchange-grade EOD data.  
-   * **The Glass (Speed):** Live monitoring uses yfinance for free real-time data via proxies (SPY/VIX).  
-4. **🐇 The Proxy Law:**  
-   * **Dead Zone:** Free Futures data (/ES) is unreliable.  
-   * **The Fix:** We watch **SPY (ETF)** as the real-time proxy for market context. It trades parallel to XSP and serves as a valid leading indicator.  
-5. **⚓ The Hard Deck Law:**  
-   * **Safety:** The Backtester is forbidden from executing trades within **15 minutes** of the Opening Bell (09:30 ET).  
-   * **Reality:** This prevents the engine from "filling" orders at unrealistic prices during opening spread chaos.  
-6. **🌊 The Flow Law (Strategy):**  
-   * **Logic:** "The River and the Ripple."  
-   * **Macro (River):** 1-Hour VIX MACD Histogram must be **NEGATIVE** (Red Bars \= Bullish Market).  
-   * **Micro (Ripple):** 5-Minute VIX MACD Line must cross **BELOW** Signal Line.  
-   * **Trigger:** VIX\_FRACTAL\_LONG (Bullish SPX Entry).
+   * **Alignment:** SPY (ETF) is used as the high-speed price proxy. Futures (/ES) are scaled (1/10th) to align visually.  
+3. **🛡️ The Hard Deck Law:**  
+   * **Safety:** The engine is forbidden from executing trades within **15 minutes** of the Opening Bell (09:30 ET) to prevent unrealistic fills during spread chaos.  
+4. **💰 The Friction Law:**  
+   * **Reality:** The engine applies **Slippage ($/Share)** and **Robinhood Regulatory Fees** (XSP/Equity logic) to all fills, revealing the *true* cost and expectancy of the strategy.  
+5. **🧠 The Gatekeeper Law:**  
+   * **Filter:** Entry signals are blocked unless they pass **Trend Filters (SMA)** and **Momentum Filters (RSI)**, ensuring only high-quality, non-counter-trend signals are considered.  
+6. **🌊 The Flow Law:**  
+   * **Bias:** Trades are weighted dynamically based on the 20-Day Macro Flow (Bull/Bear Bias).
 
-## **📂 System Architecture (v2.5)**
+## **🛠️ The Tool Suite (Manual Operations)**
 
-The system uses a **Domain-Driven Design** to separate concerns:
+The core of the Quant OS is organized into six powerful, integrated modules accessible via the **Dash UI**:
+
+| Module | UI Name | Function |
+| :---- | :---- | :---- |
+| **Simulator** | **Live Trading** | Real-time execution dashboard with cached data throttling (15s) and "Neon Console" visuals. |
+| **Gym** | **Practice Mode** | "Fog of War" historical replay tool. Test your reflexes on past market days candle-by-candle. |
+| **Backtester** | **Historical Test** | The verification engine. Runs strategies against the Vault with "Battering Ram" persistence. |
+| **Replay** | **Trade Auditor** | Deep-dive forensic microscope. Overlays XSP Price, Futures (/ES), and VIX Indicators for any past trade. |
+| **Forensics** | **Performance Stats** | Statistical audit lab. Visualizes Signal Decay, Hourly Kill Zones, and Theta Risk. |
+| **Capital** | **Growth Projection** | Monte Carlo simulation engine. Projects future account growth using your actual "Strategy DNA." |
+| **Prophet** | **Intraday Targets** | Predictive modeling engine using Volatility (ORB) and Linear Regression channels. |
+
+## **🤖 The Sentinel (Automation Layer)**
+
+**Phase 4** introduced Headless Automation to move from Reactive to Proactive trading.
+
+* **Daemon:** src/core/sentinel.py  
+* **Function:** Runs silently in the background (CLI).  
+* **Cycle:** Scans SPY/VIX every 60 seconds.  
+* **Logic:** Applies the exact same "Fractal Flow" strategy as the Backtester.  
+* **Alerts:** Dispatches **Discord Webhooks** and System Beeps immediately upon finding a valid setup.
+
+## **🏗️ System Architecture**
+
+The system uses a Domain-Driven Design for scalable operation:
 
 QUANT-OS/  
-├── data/                   \<-- The Vault (DuckDB file)  
-├── logs/                   \<-- Execution Logs  
+├── data/                   \<-- The Vault (DuckDB \+ JSON State)  
+├── logs/                   \<-- System Logs  
 ├── src/  
 │   ├── core/               \<-- The "Brains" (Logic & Engines)  
-│   │   ├── engine\_backtest.py      (Historical Simulation)  
-│   │   ├── engine\_scanner.py       (Signal Detection)  
-│   │   ├── engine\_greeks.py        (Delta/Gamma/Theta Math)  
-│   │   └── strat\_fractal.py        (Strategy Logic Source of Truth)  
+│   │   ├── engine\_backtest.py      (Simulation & DB Writer)  
+│   │   ├── engine\_simulator.py     (Live State & Caching)  
+│   │   ├── engine\_scanner.py       (Signal Generation)  
+│   │   ├── sentinel.py             (Automation Daemon)  
+│   │   └── strat\_fractal.py        (The Strategy Source)  
 │   │  
-│   ├── data/               \<-- The "Ingest" (Fetchers)  
-│   │   ├── ingest\_indices.py       (SPX, VIX, IRX)  
-│   │   ├── ingest\_options.py       (XSP Option Chains)  
-│   │   └── db\_schema.py            (Database Initialization)  
+│   ├── interface/          \<-- The "Glass" (Dash UI Views)  
+│   │   ├── view\_simulator.py       (Live Trading)  
+│   │   ├── view\_backtester.py      (Historical Test)  
+│   │   ├── view\_capital.py         (Growth Projection)  
+│   │   └── view\_signal\_replay.py   (Trade Auditor)  
 │   │  
-│   ├── interface/          \<-- The "Glass" (Dash UI)  
-│   │   ├── view\_command.py         (Live Dashboard)  
-│   │   ├── view\_forensics.py       (Post-Trade Analysis)  
-│   │   ├── view\_backtester.py      (Strategy Tester UI)  
-│   │   ├── view\_simulator.py       (Trade Replay)  
-│   │   └── view\_forecast.py        (Monte Carlo)  
-│   │  
-│   └── utils/              \<-- Shared Utilities  
-│       ├── config.py  
-│       └── logger.py  
+│   └── data/               \<-- The Ingestors  
+│       ├── ingest\_indices.py       (SPX, VIX, Futures)  
+│       └── ingest\_options.py       (Option Chains)  
 │  
-├── main\_pipeline.py        \<-- Daily Data Update Script  
-└── app.py                  \<-- Main UI Entry Point
-
-## **🛠️ The Tool Suite**
-
-### **1\. Pipeline: The Morning Routine**
-
-Run this daily to synchronize the Vault with Hybrid Truth.
-
-python main\_pipeline.py
-
-* **Ingest:** Fetches SPX/VIX/IRX (Hybrid Mode). **Retains history forever.**  
-* **Scan:** Runs strat\_fractal.py to identify trade signals.  
-* **Fetch:** Downloads XSP option chains for identified signal days.  
-* **Calc:** Computes Greeks (IV, Delta) for all new options.
-
-### **2\. Command Center (Live)**
-
-python app.py
-
-* **URL:** http://localhost:8050/  
-* **Role:** Real-Time Execution Monitor.  
-* **Features:** Live "Signal Status" Badge (Armed/Wait), Proxy Context, Fractal Flow Charts.
-
-### **3\. Forensic Lab**
-
-* **URL:** http://localhost:8050/analysis  
-* **Role:** Post-Game Review.  
-* **Features:** Visual proof of signal timing, Option P\&L overlay vs Spot Price.
-
-### **4\. Strategy Backtester**
-
-* **URL:** http://localhost:8050/backtester  
-* **Role:** Verification Time Machine.  
-* **Features:** Hard Deck enforcement, Tax Engine (Section 1256), Equity Curve visualization.
-
-## **🔧 Database Schema (DuckDB)**
-
-| Table Name | Content | Update Frequency | Retention Policy |
-| :---- | :---- | :---- | :---- |
-| indices\_1m | SPX, VIX OHLCV | Daily | **Permanent Append** |
-| options\_1m | XSP Options \+ Greeks | T-1 (Daily) | **Permanent Append** |
-| trade\_manifest | Valid Signals | On Scan | Rebuilt Daily |
-| risk\_free\_rate\_daily | IRX (13-Week T-Bill) | Daily | Upsert |
-| active\_simulation\_log | Backtest Results | On Run | Overwritten |
+├── app.py                  \<-- Main UI Entry Point  
+└── main\_pipeline.py        \<-- Daily Data Cron Job
 
 ## **🚀 Operational Workflow**
 
-1. Ingest & Scan (8:00 PM PST):  
-   Run python main\_pipeline.py. This repairs the Vault with official Polygon data from the closed session and generates the trade manifest. IMPORTANT: Do not delete the database file; this script builds history over time.  
-2. Live Monitoring (06:30 AM PST):  
-   Run python app.py and open the Command Center.  
-   * **Watch Status Badge:** Wait for "ARMED" (Green).  
-   * **Confirm:** Check SPY Context (Row 1).  
-3. Review (Post-Close):  
-   Open the Forensic Analysis tab to verify trade execution against the "Hard Deck" and pricing logic.
+1. **Morning Prep (06:00 PST):**  
+   * Run python main\_pipeline.py to ingest yesterday's data and update the "Truth" Vault.  
+2. **The Watch (06:30 PST):**  
+   * Launch the UI: python app.py.  
+   * Launch the Sentinel: python src/core/sentinel.py (in a separate terminal).  
+3. **Execution:**  
+   * Wait for Sentinel Alert 🚨.  
+   * Verify signal in **Live Trading** dashboard.  
+   * Execute trade (Buy Call/Put).  
+4. **Review (Post-Market):**  
+   * Run **Historical Test** to validate the day's strategy.  
+   * Check **Performance Stats** to track long-term drift.  
+   * Use **Trade Auditor** to dissect any losses.
+
+*v3.0 Finalized \- Ready for Deployment*

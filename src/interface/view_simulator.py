@@ -1,364 +1,235 @@
-import sys
-import os
 import dash
-from dash import dcc, html, Input, Output, State, register_page, callback, ctx
+from dash import dcc, html, callback, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import duckdb
-import pandas as pd
-import numpy as np
-import logging
-from datetime import timedelta
-import pytz
-from pathlib import Path
+from datetime import datetime
+from src.core import engine_simulator
 
 # ==============================================================================
-# 1. PATH CONSTITUTION
+# LAYOUT
 # ==============================================================================
-# File: src/interface/view_simulator.py
-# Root: ../../
-ROOT_DIR = Path(__file__).resolve().parents[2]
-sys.path.append(str(ROOT_DIR))
+def render():
+    return dbc.Container([
+        # HEADER & TICKER
+        dbc.Row([
+            dbc.Col([
+                html.H2("LIVE OPTIONS SIMULATOR", className="display-6 fw-bold text-white"),
+                html.H5(id="live-ticker-display", className="text-warning font-monospace")
+            ], width=8),
+            dbc.Col([
+                dbc.Button("RESET SESSION", id="btn-reset-sim", color="danger", outline=True, size="sm", className="float-end")
+            ], width=4)
+        ], className="mb-4"),
 
-from src.utils import config
-from src.utils.logger import get_logger
-from src.core import strat_fractal  # <--- NEW: Centralized Logic
-
-# ==============================================================================
-# 2. SETUP
-# ==============================================================================
-register_page(__name__, path='/simulator', name='Simulator')
-logger = get_logger("SimPilot")
-STRIKE_RANGE = 2
-
-# ==============================================================================
-# 3. HELPER FUNCTIONS
-# ==============================================================================
-def clean_dataframe(df, tz_source=config.TZ_UTC):
-    """
-    Standardizes DataFrames to UTC.
-    Robustly handles Naive vs Aware timestamps.
-    """
-    if df is None or df.empty: return pd.DataFrame()
-    
-    # 1. Normalize Columns
-    df.columns = df.columns.str.strip().str.lower()
-    df = df.loc[:, ~df.columns.duplicated()]
-    
-    rename_map = {'datetime_utc': 'dt', 'datetime': 'dt', 'close': 'close', 'vix_close': 'close'}
-    df.rename(columns=rename_map, inplace=True)
-    
-    if 'dt' not in df.columns: return pd.DataFrame()
-    
-    # 2. Convert to Datetime (Coerce errors to NaT)
-    if not pd.api.types.is_datetime64_any_dtype(df['dt']):
-        df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
-    
-    df = df.dropna(subset=['dt']) 
-    
-    # 3. Timezone Alignment
-    if df['dt'].dt.tz is None:
-        # If Naive, localize to the SOURCE
-        df['dt'] = df['dt'].dt.tz_localize(tz_source, ambiguous='NaT', nonexistent='shift_forward')
-    else:
-        # If already Aware, ensure consistency
-        df['dt'] = df['dt'].dt.tz_convert(tz_source)
-    
-    # Finally, Standardize EVERYTHING to UTC
-    df['dt'] = df['dt'].dt.tz_convert(config.TZ_UTC)
-    
-    # 4. Deduplicate & Sort
-    df = df.drop_duplicates(subset=['dt'])
-    return df.sort_values('dt')
-
-def get_signal_events():
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    try:
-        query = f"SELECT date, entry_timestamp_utc, xsp_price FROM {config.TBL_MANIFEST} ORDER BY entry_timestamp_utc DESC"
-        df = con.execute(query).df()
-    except: return []
-    con.close()
-    return [{'label': f"{row['date']} | Est. ATM: ${row['xsp_price']:.2f}", 'value': row['entry_timestamp_utc']} for _, row in df.iterrows()]
-
-def get_tickers_for_event(event_ts):
-    if not event_ts: return [], None
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    try:
-        row = con.execute(f"SELECT date, xsp_price FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {event_ts}").df().iloc[0]
-        trade_date = pd.to_datetime(row['date'])
-        atm = round(row['xsp_price'])
-        
-        tickers = []
-        best = None
-        date_str = trade_date.strftime("%y%m%d")
-        
-        for offset in range(-STRIKE_RANGE, STRIKE_RANGE + 1):
-            strike = atm + offset
-            ticker = f"O:XSP{date_str}C{int(strike*1000):08d}" 
-            lbl = f"{ticker} ({'ATM' if offset==0 else 'OTM' if offset>0 else 'ITM'} ${strike})"
-            tickers.append({'label': lbl, 'value': ticker})
-            if offset == 0: best = ticker
-            
-        con.close()
-        return tickers, best
-    except:
-        con.close()
-        return [], None
-
-# ==============================================================================
-# 4. LAYOUT
-# ==============================================================================
-layout = dbc.Container([
-    # HEADER
-    dbc.Row([
-        dbc.Col([
-            html.H2("EXECUTION SIMULATOR", className="display-6 fw-bold text-white"),
-            html.Hr(className="my-2")
-        ], width=12)
-    ], className="mb-4"),
-
-    # CONTROLS
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("1. Select Session"),
-                            dcc.Dropdown(
-                                id='sim-event-selector', 
-                                options=get_signal_events(), 
-                                clearable=False, 
-                                className="mb-2", 
-                                style={'color': '#000000'}
-                            )
-                        ], width=12, md=6),
-                        dbc.Col([
-                            html.Label("2. Select Strike"),
-                            dcc.Dropdown(
-                                id='sim-strike-selector', 
-                                options=[], 
-                                disabled=True, 
-                                clearable=False, 
-                                style={'color': '#000000'}
-                            )
-                        ], width=12, md=6)
-                    ], className="mb-3"),
-
-                    # PLAYBACK
-                    dbc.Row([
-                        dbc.Col([
-                            dbc.ButtonGroup([
-                                dbc.Button("▶ Play", id='sim-play-btn', color="success", outline=False),
-                                dbc.Button("⏸ Pause", id='sim-pause-btn', color="warning", outline=False),
-                            ], className="me-2")
-                        ], width="auto"),
-                        
-                        dbc.Col([
-                            dcc.Slider(
-                                id='sim-time-slider',
-                                min=0, max=390, step=1, value=0,
-                                marks={0: 'Open', 60: '10:30', 195: 'Mid', 330: '15:00', 390: 'Close'},
-                            )
-                        ], width=True, className="align-self-center")
-                    ], className="mb-2"),
-                    
-                    dbc.Row([
-                         dbc.Col([
-                            dbc.Checklist(
-                                options=[{"label": " Show Algo Entry (Cheat)", "value": "SHOW"}],
-                                value=[], id="sim-reveal-truth", switch=True, className="text-danger fw-bold"
-                            )
-                         ], width=6),
-                         dbc.Col([
-                             html.H4(id='sim-clock-display', children="--:-- PST", className="text-end text-info")
-                         ], width=6)
+        # CONSOLE: CHART + CONTROLS
+        dbc.Row([
+            # LEFT (Controls - 4/12)
+            dbc.Col([
+                # ACCOUNT STATUS
+                dbc.Card([
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([html.H6("Cash", className="text-muted"), html.H3(id="sim-balance", className="text-success")], width=6),
+                            dbc.Col([html.H6("Active P&L", className="text-muted"), html.H3(id="sim-pnl", className="text-white")], width=6),
+                        ]),
                     ])
-                ])
-            ], className="mb-3 shadow")
-        ], width=12)
-    ]),
+                ], className="shadow mb-3", style={'backgroundColor': '#131722', 'border': '1px solid #444'}),
 
-    # CHART
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    dcc.Graph(id='sim-chart', style={'height': '1000px'})
-                ], className="p-1")
-            ], className="shadow mb-5")
-        ], width=12)
-    ]),
+                # ENTRY PANEL
+                dbc.Card([
+                    dbc.CardHeader("ENTRY COMMAND", className="fw-bold text-info", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label("Size Value", className="text-white"),
+                                dbc.Input(id="sim-entry-size", type="number", value=600, className="mb-2", style={'backgroundColor': '#2A2E39', 'color': 'white', 'border': '1px solid #555'}),
+                            ], width=7),
+                            dbc.Col([
+                                html.Label("Type", className="text-white"),
+                                dcc.Dropdown(
+                                    id="sim-entry-mode",
+                                    options=[
+                                        {'label': 'USD ($)', 'value': 'AMT'},
+                                        {'label': 'Contracts (#)', 'value': 'QTY'}
+                                    ],
+                                    value='AMT',
+                                    clearable=False,
+                                    style={'color': '#000'} 
+                                )
+                            ], width=5),
+                        ]),
+                        dbc.Row([
+                            dbc.Col(dbc.Button("BUY CALL 🟢", id="btn-buy-call", color="success", className="w-100 mt-3 fw-bold"), width=6),
+                            dbc.Col(dbc.Button("BUY PUT 🔴", id="btn-buy-put", color="danger", className="w-100 mt-3 fw-bold"), width=6),
+                        ]),
+                    ], style={'backgroundColor': '#131722'})
+                ], className="shadow mb-3", style={'border': '1px solid #444'}),
+                
+                # EXIT PANEL (Scale Out)
+                dbc.Card([
+                    dbc.CardHeader("EXIT COMMAND", className="fw-bold text-warning", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label("Qty to Close", className="text-white"),
+                                dbc.Input(id="sim-exit-qty", type="number", placeholder="All", className="mb-2", style={'backgroundColor': '#2A2E39', 'color': 'white', 'border': '1px solid #555'}),
+                            ], width=6),
+                            dbc.Col([
+                                html.Label("Action", className="text-white"),
+                                dbc.Button("SELL QTY", id="btn-close-qty", color="warning", outline=True, className="w-100"),
+                            ], width=6),
+                        ]),
+                        dbc.Button("CLOSE ALL (FLATTEN)", id="btn-close-all", color="danger", className="w-100 mt-3 fw-bold"),
+                        html.Div(id="sim-action-msg", className="text-white small mt-2 text-center fst-italic")
+                    ], style={'backgroundColor': '#131722'})
+                ], className="shadow mb-4", style={'border': '1px solid #444'}),
+                
+            ], width=12, md=4),
 
-    dcc.Interval(id='sim-auto-stepper', interval=1000, n_intervals=0, disabled=True),
-    dcc.Store(id='sim-state', data={'playing': False})
+            # RIGHT (Chart - 8/12)
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("LIVE CANDLESTICK CHART (5m)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody(
+                        dcc.Loading(dcc.Graph(id="sim-live-chart", style={'height': '450px'}), type="cube", color="#00bc8c"),
+                        style={'backgroundColor': '#000000'} # Pitch Black Chart BG
+                    )
+                ], className="shadow mb-4", style={'border': '1px solid #444'}),
+                
+                # Ledger
+                dbc.Card([
+                    dbc.CardHeader("SESSION LEDGER", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody(html.Div(id="sim-ledger-table"), style={'backgroundColor': '#131722'})
+                ], className="shadow mb-4", style={'border': '1px solid #444'})
 
-], fluid=True)
+            ], width=12, md=8)
+        ]),
+
+        dcc.Interval(id="sim-heartbeat", interval=15*1000, n_intervals=0)
+
+    ], fluid=True, style={'minHeight': '100vh', 'backgroundColor': '#000000'}) 
 
 # ==============================================================================
-# 5. CALLBACKS
+# CALLBACKS
 # ==============================================================================
 @callback(
-    [Output('sim-strike-selector', 'options'), Output('sim-strike-selector', 'value'), Output('sim-strike-selector', 'disabled')],
-    [Input('sim-event-selector', 'value')]
+    [Output("live-ticker-display", "children"),
+     Output("sim-balance", "children"),
+     Output("sim-pnl", "children"),
+     Output("sim-ledger-table", "children"),
+     Output("sim-live-chart", "figure"), 
+     Output("sim-action-msg", "children")],
+    [Input("sim-heartbeat", "n_intervals"),
+     Input("btn-buy-call", "n_clicks"),
+     Input("btn-buy-put", "n_clicks"),
+     Input("btn-close-qty", "n_clicks"),
+     Input("btn-close-all", "n_clicks"),
+     Input("btn-reset-sim", "n_clicks")],
+    [State("sim-entry-size", "value"),
+     State("sim-entry-mode", "value"),
+     State("sim-exit-qty", "value")]
 )
-def update_sim_dropdown(ts):
-    if not ts: return [], None, True
-    opts, best = get_tickers_for_event(ts)
-    return opts, best, False
-
-@callback(
-    [Output('sim-auto-stepper', 'disabled'), Output('sim-state', 'data')],
-    [Input('sim-play-btn', 'n_clicks'), Input('sim-pause-btn', 'n_clicks')],
-    [State('sim-state', 'data')]
-)
-def toggle_simulation(play, pause, state):
-    trigger = ctx.triggered_id
-    if trigger == 'sim-play-btn': return False, {'playing': True}
-    return True, {'playing': False}
-
-@callback(
-    Output('sim-time-slider', 'value'),
-    [Input('sim-auto-stepper', 'n_intervals')],
-    [State('sim-time-slider', 'value'), State('sim-time-slider', 'max')]
-)
-def auto_advance(n, val, max_val):
-    return val + 5 if val < max_val else val
-
-@callback(
-    [Output('sim-chart', 'figure'), Output('sim-clock-display', 'children')],
-    [Input('sim-event-selector', 'value'), Input('sim-strike-selector', 'value'),
-     Input('sim-time-slider', 'value'), Input('sim-reveal-truth', 'value')]
-)
-def render_simulation(ts, ticker, mins, reveal):
-    if not ts or not ticker: return go.Figure(), "--:--"
-
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
+def update_simulator(n, btn_call, btn_put, btn_close_qty, btn_close_all, btn_reset, 
+                     entry_val, entry_mode, exit_qty):
     
-    try:
-        # 1. ESTABLISH TIMELINE (The Anchor)
-        trade_row = con.execute(f"SELECT * FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc = {ts}").df().iloc[0]
-        trade_date_str = str(pd.to_datetime(trade_row['date']).date())
-        
-        # A. Market Open in NY (For Slider Logic)
-        ny_tz = pytz.timezone("America/New_York")
-        market_open_ny = ny_tz.localize(pd.Timestamp(f"{trade_date_str} 09:30:00"))
-        
-        # B. Cutoff in UTC (The Fog of War Barrier)
-        cutoff_utc = (market_open_ny + timedelta(minutes=mins)).astimezone(pytz.utc)
-        
-        # C. Day Clipper (Midnight Local -> UTC)
-        local_start_of_day = pd.Timestamp(f"{trade_date_str} 00:00:00").tz_localize(config.TZ_LOCAL)
-        clip_start_utc = local_start_of_day.astimezone(config.TZ_UTC)
-
-        # 2. DATA LOADING (UTC)
-        # OPTION DATA = UTC (Polygon) - Correct
-        opt_df = clean_dataframe(
-            con.execute(f"SELECT * FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' ORDER BY datetime_utc ASC").df(),
-            tz_source=config.TZ_UTC
-        )
-        
-        # SPX/VIX DATA = UTC (YFinance via New Pipeline)
-        spx_df = clean_dataframe(
-            con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='SPX' AND CAST(datetime_utc AS DATE)='{trade_date_str}' ORDER BY datetime_utc ASC").df(),
-            tz_source=config.TZ_UTC
-        )
-        
-        # Fetch VIX up to today for calculations
-        vix_raw = clean_dataframe(
-            con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker='VIX' AND CAST(datetime_utc AS DATE) <= '{trade_date_str}' ORDER BY datetime_utc ASC").df(),
-            tz_source=config.TZ_UTC
-        )
-        
-        # USE STRATEGY MODULE
-        vix_raw = strat_fractal.calculate_macd(vix_raw)
-        vix_raw = strat_fractal.calculate_rsi(vix_raw)
-        
-        # --- APPLY THE DAY CLIPPER ---
-        opt_df = opt_df[opt_df['dt'] >= clip_start_utc]
-        spx_df = spx_df[spx_df['dt'] >= clip_start_utc]
-        vix_today = vix_raw[vix_raw['dt'] >= clip_start_utc]
-        vix_today = vix_today[vix_today['dt'].dt.date <= cutoff_utc.date()]
-
-    except Exception as e:
-        logger.error(f"Sim Render Error: {e}")
-        con.close()
-        return go.Figure(), "Data Error"
+    ctx = dash.callback_context
+    trigger = ctx.triggered[0]['prop_id'] if ctx.triggered else "interval"
+    msg = ""
     
-    con.close()
+    # --- 1. HANDLE ACTIONS ---
+    if "btn-reset-sim" in trigger:
+        engine_simulator.reset_session()
+        msg = "Session Reset."
+    elif "btn-buy-call" in trigger:
+        msg = engine_simulator.execute_entry("CALL", entry_val, entry_mode)
+    elif "btn-buy-put" in trigger:
+        msg = engine_simulator.execute_entry("PUT", entry_val, entry_mode)
+    elif "btn-close-qty" in trigger:
+        if exit_qty:
+            msg = engine_simulator.execute_exit(exit_qty, "MANUAL_PARTIAL")
+        else:
+            msg = "Enter Qty to Close."
+    elif "btn-close-all" in trigger:
+        msg = engine_simulator.execute_exit(None, "MANUAL_FLATTEN")
 
-    # 3. FOG OF WAR
-    opt_slice = opt_df[opt_df['dt'] <= cutoff_utc].copy()
-    spx_slice = spx_df[spx_df['dt'] <= cutoff_utc].copy()
-    vix_slice = vix_today[vix_today['dt'] <= cutoff_utc].copy()
-
-    # 4. DISPLAY CONVERSION (Localize for Chart)
-    if not opt_slice.empty: opt_slice['dt'] = opt_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
-    if not spx_slice.empty: spx_slice['dt'] = spx_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
-    if not vix_slice.empty: vix_slice['dt'] = vix_slice['dt'].dt.tz_convert(config.TZ_LOCAL)
+    # --- 2. LOAD STATE & DATA ---
+    state = engine_simulator.load_session()
+    chart_data = engine_simulator.get_live_chart_data(ticker="SPY", interval="5m")
     
-    display_clock = cutoff_utc.astimezone(config.TZ_LOCAL).strftime("%H:%M PST")
-
-    # 5. PLOT
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, 
-        row_heights=[0.4, 0.3, 0.15, 0.15],
-        vertical_spacing=0.02,
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
-        subplot_titles=("Context: SPX (Price Action)", "Option Price (Execution)", "VIX MACD (Momentum)", "VIX RSI (Trend)")
-    )
-
-    if not spx_slice.empty:
+    # --- 3. UI GENERATION ---
+    live_price = engine_simulator.get_live_price("SPY", use_cache=True)
+    ticker_text = f"SPY LIVE: ${live_price:.2f}" if live_price else "MARKET OFFLINE"
+    bal_text = f"${state['balance']:,.2f}"
+    
+    # Live P&L Calculation
+    active_pnl_display = "--"
+    if state['active_trade']:
+        t = state['active_trade']
+        if live_price:
+            T = engine_simulator.get_time_to_close()
+            curr_opt_px = engine_simulator.black_scholes(live_price, t['strike'], T, 0.045, 0.15, t['type'].lower())
+            
+            gross_val = t['contracts'] * curr_opt_px * 100
+            est_exit_fees = engine_simulator.calculate_fees(t['contracts']) 
+            unrealized_pnl = gross_val - est_exit_fees - t['cost_basis']
+            
+            color = "#00ff41" if unrealized_pnl >= 0 else "#ff3333" # Neon Green / Hot Red
+            active_pnl_display = html.Span(f"${unrealized_pnl:+.2f}", style={'color': color, 'fontWeight': 'bold', 'fontSize': '2rem'})
+        else:
+            active_pnl_display = "NO FEED"
+    
+    # Chart Generation (TRADINGVIEW STYLE)
+    fig = go.Figure()
+    if chart_data is not None and not chart_data.empty:
         fig.add_trace(go.Candlestick(
-            x=spx_slice['dt'], open=spx_slice['open'], high=spx_slice['high'], low=spx_slice['low'], close=spx_slice['close'], 
-            name="SPX", increasing_line_color='#26A69A', decreasing_line_color='#EF5350'
-        ), row=1, col=1)
-
-    if not opt_slice.empty:
-        fig.add_trace(go.Scatter(
-            x=opt_slice['dt'], y=opt_slice['close'], 
-            mode='lines', line=dict(color='#FFFFFF', width=2), name="Option Price"
-        ), row=2, col=1, secondary_y=False)
-        
-        # ENTRY SIGNAL FIX
-        if reveal and 'SHOW' in reveal:
-             entry_dt_utc = pd.to_datetime(ts, unit='ms', utc=True)
-             
-             if cutoff_utc >= entry_dt_utc:
-                 entry_dt_local = entry_dt_utc.tz_convert(config.TZ_LOCAL)
-                 fig.add_vline(x=entry_dt_local, line_dash="dash", line_color="#FFD600", row=2, col=1)
-                 
-                 try:
-                     price_at_entry = opt_df[opt_df['dt'] >= entry_dt_utc].iloc[0]['close']
-                     fig.add_trace(go.Scatter(
-                         x=[entry_dt_local], y=[price_at_entry], 
-                         mode='markers', marker=dict(color='#FFD600', size=15, symbol='triangle-up'), name="Algo Entry"
-                     ), row=2, col=1)
-                 except: pass
-
-    if not vix_slice.empty:
-        # Note: strat_fractal produces 'hist', 'macd', 'signal'
-        colors = ['#26A69A' if v < 0 else '#EF5350' for v in vix_slice['hist']]
-        fig.add_trace(go.Bar(x=vix_slice['dt'], y=vix_slice['hist'], marker_color=colors, name="Hist"), row=3, col=1)
-        fig.add_trace(go.Scatter(x=vix_slice['dt'], y=vix_slice['macd'], line=dict(color='#2962FF', width=1.5), name="MACD"), row=3, col=1)
-        fig.add_trace(go.Scatter(x=vix_slice['dt'], y=vix_slice['signal'], line=dict(color='#FF6D00', width=1.5), name="Signal"), row=3, col=1)
-
-    if not vix_slice.empty:
-        fig.add_trace(go.Scatter(x=vix_slice['dt'], y=vix_slice['rsi'], line=dict(color='#D500F9', width=2), name="RSI"), row=4, col=1)
-        fig.add_hline(y=70, line_dash="dot", line_color="#EF5350", row=4, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="#26A69A", row=4, col=1)
+            x=chart_data['Datetime'], open=chart_data['Open'], 
+            high=chart_data['High'], low=chart_data['Low'], 
+            close=chart_data['Close'], name='SPY',
+            increasing_line_color='#00bc8c', decreasing_line_color='#ef5350' # Standard TV Colors
+        ))
+        if state['active_trade']:
+            fig.add_hline(y=state['active_trade']['underlying_at_entry'], 
+                          line_dash="dot", line_color="#ffff00", 
+                          annotation_text=f"Entry: ${state['active_trade']['underlying_at_entry']:.2f}")
 
     fig.update_layout(
-        template="plotly_dark", 
-        height=1000, 
-        showlegend=False, 
-        margin=dict(t=30, b=30, l=60, r=60),
-        xaxis_rangeslider_visible=False
+        template="plotly_dark", title=None, 
+        xaxis_rangeslider_visible=False, 
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        height=450, margin=dict(l=10, r=40, t=10, b=10),
+        font=dict(color="white"),
+        yaxis=dict(gridcolor='#333', zerolinecolor='#333'), 
+        xaxis=dict(gridcolor='#333', zerolinecolor='#333')
     )
-    
-    fig.update_yaxes(title_text="SPX", row=1, col=1)
-    fig.update_yaxes(title_text="Option $", row=2, col=1)
-    fig.update_yaxes(range=[0, 100], row=4, col=1)
 
-    return fig, display_clock
+    # LEDGER TABLE
+    rows = []
+    if state['active_trade']:
+        t = state['active_trade']
+        rows.append(html.Tr([
+            html.Td("OPEN", className="text-warning fw-bold"),
+            html.Td(t['type']),
+            html.Td(f"${t['entry_px']:.2f}"),
+            html.Td(t['contracts']),
+            html.Td(active_pnl_display), 
+            html.Td("--")
+        ], style={'backgroundColor': '#1E222D'}))
+    
+    for t in reversed(state['trades']):
+        color = '#00ff41' if t['pnl'] >= 0 else '#ff3333'
+        rows.append(html.Tr([
+            html.Td(t['exit_time'].split(' ')[1], className="small"),
+            html.Td(t['type']),
+            html.Td(f"${t['entry_px']:.2f}"),
+            html.Td(t['contracts']),
+            html.Td(f"${t['pnl']:,.2f}", style={'color': color, 'fontWeight': 'bold'}),
+            html.Td(t['reason'], className="small fst-italic text-white-50")
+        ]))
+
+    ledger = dbc.Table(
+        [html.Thead(html.Tr([html.Th("Time"), html.Th("Type"), html.Th("Entry"), html.Th("Qty"), html.Th("P&L"), html.Th("Reason")]))] +
+        [html.Tbody(rows)],
+        bordered=True, hover=True, striped=False, color="dark", size="sm", className="text-white"
+    )
+
+    return ticker_text, bal_text, active_pnl_display, ledger, fig, msg

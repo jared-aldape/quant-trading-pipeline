@@ -31,45 +31,49 @@ def calculate_macd(df, close_col='close'):
     
     return df
 
-def check_fractal_setup(vix_1h, vix_5m):
+def check_fractal_flow(vix_1h_df, vix_5m_df, timestamp):
     """
-    Evaluates the Fractal Flow conditions.
+    Checks if the Fractal Flow conditions are met at a specific timestamp.
     
     Args:
-        vix_1h (pd.DataFrame): 1-Hour VIX data (must contain 'hist')
-        vix_5m (pd.DataFrame): 5-Minute VIX data (must contain 'macd', 'signal')
+        vix_1h_df (pd.DataFrame): 1-Hour resampled VIX data with MACD
+        vix_5m_df (pd.DataFrame): 5-Minute resampled VIX data with MACD
+        timestamp (pd.Timestamp): The current 1-minute bar timestamp
         
     Returns:
-        dict: {
-            'signal': bool,          # True if Triggered
-            'macro_trend': str,      # 'BEARISH_VOL' (Good) or 'BULLISH_VOL' (Bad)
-            'micro_cross': bool,     # True if 5m crossed down
-            'reason': str            # Human readable explanation
-        }
+        dict: {'signal': bool, 'reason': str, ...}
     """
-    # 1. SAFETY CHECKS
-    if vix_1h.empty or vix_5m.empty:
-        return {'signal': False, 'reason': "Insufficient Data"}
-
-    # 2. MACRO ANALYSIS (The River)
-    # Condition: 1H MACD Histogram must be NEGATIVE (Red Bars)
-    # This indicates Bearish Volatility Momentum -> Bullish Market conditions
-    current_macro = vix_1h.iloc[-1]
-    is_macro_aligned = current_macro['hist'] < 0
     
-    macro_status = "BEARISH_VOL (SAFE)" if is_macro_aligned else "BULLISH_VOL (DANGER)"
+    # 1. ALIGNMENT (Get nearest prior closed bars)
+    # We look for the 1H bar that closed just before or at current time
+    # And the 5m bar that closed just before or at current time
+    
+    # Truncate timestamp to hour and 5min to find the relevant row
+    ts_1h = timestamp.floor('1h')
+    ts_5m = timestamp.floor('5min')
+    
+    if ts_1h not in vix_1h_df.index or ts_5m not in vix_5m_df.index:
+        return {'signal': False, 'reason': 'Insufficient Data'}
 
-    # 3. MICRO ANALYSIS (The Ripple)
-    # We need at least 2 bars to detect a crossover (Previous vs Current)
-    if len(vix_5m) < 2:
-        return {'signal': False, 'reason': "Insufficient Micro Data"}
+    current_macro = vix_1h_df.loc[ts_1h]
+    curr_micro = vix_5m_df.loc[ts_5m]
+    
+    # Need previous 5m bar to detect crossover
+    # We step back 5 minutes
+    prev_ts_5m = ts_5m - pd.Timedelta(minutes=5)
+    if prev_ts_5m not in vix_5m_df.index:
+         return {'signal': False, 'reason': 'Initializing Micro Trend'}
+         
+    prev_micro = vix_5m_df.loc[prev_ts_5m]
 
-    curr_micro = vix_5m.iloc[-1]
-    prev_micro = vix_5m.iloc[-2]
+    # 2. MACRO CONDITION (The River)
+    # VIX 1H MACD Histogram must be NEGATIVE (Red)
+    # Negative VIX Momentum = Stabilizing Market (Bullish for Stocks)
+    is_macro_aligned = current_macro['hist'] < 0
 
-    # CROSSUNDER LOGIC:
-    # Previous: MACD >= Signal (Yellow above Cyan)
-    # Current:  MACD < Signal  (Yellow below Cyan)
+    # 3. MICRO CONDITION (The Ripple)
+    # VIX 5m MACD Line crosses BELOW Signal Line (Bearish Cross)
+    # This indicates an immediate volatility crush
     was_above = prev_micro['macd'] >= prev_micro['signal']
     is_below = curr_micro['macd'] < curr_micro['signal']
     
@@ -86,15 +90,12 @@ def check_fractal_setup(vix_1h, vix_5m):
 
     return {
         'signal': signal,
-        'macro_trend': macro_status,
+        'macro_trend': "BEARISH VIX (Bullish SPX)" if is_macro_aligned else "BULLISH VIX",
         'micro_cross': is_micro_cross,
-        'timestamp': curr_micro.name if hasattr(curr_micro, 'name') else None,
+        'timestamp': timestamp,
         'reason': " | ".join(reason)
     }
 
-# ==============================================================================
-# HELPER: RSI FILTER (Optional for v2.5+)
-# ==============================================================================
 def calculate_rsi(df, window=14):
     """
     Calculates Relative Strength Index (RSI).
@@ -106,9 +107,9 @@ def calculate_rsi(df, window=14):
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
     
-    ma_up = up.ewm(com=window-1, adjust=False, min_periods=window).mean()
-    ma_down = down.ewm(com=window-1, adjust=False, min_periods=window).mean()
+    ema_up = up.ewm(com=window-1, adjust=False).mean()
+    ema_down = down.ewm(com=window-1, adjust=False).mean()
     
-    rs = ma_up / ma_down
+    rs = ema_up / ema_down
     df['rsi'] = 100 - (100 / (1 + rs))
     return df

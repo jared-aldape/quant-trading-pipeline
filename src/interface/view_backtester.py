@@ -1,45 +1,52 @@
-import sys
-import os
 import dash
-from dash import dcc, html, Input, Output, State, register_page, callback, ctx
+from dash import dcc, html, callback, Input, Output, State
 import dash_bootstrap_components as dbc
-import subprocess
-import json
-import pandas as pd
 import plotly.graph_objects as go
-from pathlib import Path
+import pandas as pd
+import traceback 
 from datetime import date, datetime, timedelta
+from src.core import engine_backtest
 
 # ==============================================================================
-# 1. PATH CONSTITUTION
+# 1. THE BRIDGE
 # ==============================================================================
-# File: src/interface/view_backtester.py
-# Root: ../../
-ROOT_DIR = Path(__file__).resolve().parents[2]
-sys.path.append(str(ROOT_DIR))
-
-from src.utils import config
-from src.utils.logger import get_logger
-
-logger = get_logger("BacktestView")
+class BacktestArgs:
+    def __init__(self, start, end, bal, mode, tax, trail, gain, be_trigger, selection, export, slip, comm, fee_model, sma_p, rsi_over, rsi_under):
+        self.start_date = start
+        self.end_date = end
+        try: self.start_balance = float(bal) if bal else 600.0
+        except: self.start_balance = 600.0
+        self.strategy_mode = mode if mode else 'LONG_ONLY'
+        try: self.tax_rate = float(tax) if tax else 0.0
+        except: self.tax_rate = 0.0
+        try: self.trailing_stop_pct = (float(trail) / 100.0) if trail else None
+        except: self.trailing_stop_pct = None
+        try: self.ideal_gain_pct = (float(gain) / 100.0) if gain else None
+        except: self.ideal_gain_pct = None
+        try: self.breakeven_pct = (float(be_trigger) / 100.0) if be_trigger else None
+        except: self.breakeven_pct = None
+        self.selection_mode = selection if selection else 'FIRST'
+        self.archive_report = True if (export and export[0]) else False
+        try: self.slippage = float(slip) if slip is not None else 0.0
+        except: self.slippage = 0.0
+        try: self.commission = float(comm) if comm is not None else 0.65
+        except: self.commission = 0.65
+        self.fee_model = fee_model if fee_model else 'NONE'
+        
+        # GATEKEEPER PARAMS
+        try: self.sma_period = int(sma_p) if sma_p else 20
+        except: self.sma_period = 20
+        try: self.rsi_over = float(rsi_over) if rsi_over else 70
+        except: self.rsi_over = 70
+        try: self.rsi_under = float(rsi_under) if rsi_under else 30
+        except: self.rsi_under = 30
 
 # ==============================================================================
-# 2. PAGE REGISTRATION
+# 2. HELPER UI COMPONENTS
 # ==============================================================================
-register_page(__name__, path='/backtester', name='Backtester')
-
-# ==============================================================================
-# 3. HELPER UI & DEFAULTS
-# ==============================================================================
-today = date.today()
-default_start = (today - timedelta(days=45)).strftime("%Y-%m-%d")
-default_end = today.strftime("%Y-%m-%d")
-
 def get_status_ui(status_type, message=None):
     if status_type == "ready":
         return html.Div([html.Div("📊", className="display-4"), html.H4("Ready for Analysis", className="text-muted")], className="text-center")
-    elif status_type == "running":
-        return html.Div([dbc.Spinner(color="primary", type="grow"), html.H4("Running Forensic Backtest...", className="text-primary mt-2")], className="text-center")
     elif status_type == "success":
         return html.Div([html.Div("✅", className="display-4"), html.H4(message, className="text-success")], className="text-center")
     elif status_type == "failure":
@@ -48,302 +55,264 @@ def get_status_ui(status_type, message=None):
         return html.Div([html.Div("💀", className="display-4"), html.H4("Execution Crash", style={"color": "#a855f7"})], className="text-center")
 
 # ==============================================================================
-# 4. LAYOUT
+# 3. RENDER LAYOUT
 # ==============================================================================
-layout = dbc.Container([
-    # HEADER
-    dbc.Row([
-        dbc.Col([
-            html.H2("STRATEGY BACKTESTER", className="display-6 fw-bold text-white"),
-            html.Hr(className="my-2")
-        ], width=12)
-    ], className="mb-4"),
-
-    # CONTROLS
-    dbc.Row([
-        # COLUMN 1: Inputs
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("MISSION PARAMETERS", className="fw-bold text-warning"),
-                dbc.CardBody([
-                    html.Label("Backtest Period"),
-                    dcc.DatePickerRange(
-                        id='bt-date-range',
-                        min_date_allowed=date(2020, 1, 1),
-                        max_date_allowed=today,
-                        start_date=default_start,
-                        end_date=today,
-                        className="mb-3 w-100",
-                    ),
-                    
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("Start Capital ($)"),
-                            dbc.Input(id='bt-balance', type='number', value=600, className="mb-2")
-                        ], width=6),
-                        dbc.Col([
-                            html.Label("Pos Size (%)"),
-                            dbc.Input(id='bt-pos-size', type='number', value=75, step=0.1, className="mb-2")
-                        ], width=6)
-                    ]),
-                    
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("Max Invest ($)"),
-                            dbc.Input(id='bt-max-invest', type='number', value=5000, className="mb-2")
-                        ], width=6),
-                        dbc.Col([
-                            html.Label("Tax Rate (1256)"), 
-                            dbc.Input(id='bt-tax-rate', type='number', value=0.268, step=0.001, className="mb-2")
-                        ], width=6)
-                    ]),
-                    
-                    html.Hr(className="my-2"),
-                    
-                    # STRATEGY SELECTION
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("Execution Strategy"),
-                            dcc.Dropdown(
-                                id='bt-selection-mode',
-                                options=[
-                                    {'label': 'Standard (First Signal)', 'value': 'FIRST'},
-                                    {'label': 'Optimized (Best Signal)', 'value': 'BEST'}
-                                ],
-                                value='FIRST',
-                                clearable=False,
-                                className="mb-2",
-                                style={'color': '#000000'}
-                            ),
-                        ], width=6),
-                        dbc.Col([
-                            html.Label("Strike Selection"),
-                             dcc.Dropdown(
-                                id='bt-strike-offset',
-                                options=[
-                                    {'label': 'Deep ITM (-2)', 'value': -2},
-                                    {'label': 'ITM (-1)', 'value': -1},
-                                    {'label': 'ATM (Default)', 'value': 0},
-                                    {'label': 'OTM (+1)', 'value': 1},
-                                    {'label': 'Deep OTM (+2)', 'value': 2},
-                                ],
-                                value=0,
-                                clearable=False,
-                                className="mb-2",
-                                style={'color': '#000000'}
-                            ),
-                        ], width=6)
-                    ]),
-
-                    dbc.Checklist(options=[{"label": " Enforce RTH (9:30-4:00 EST)", "value": True}], value=[True], id="bt-rth", switch=True, className="mt-2 text-warning"),
-                    html.Hr(),
-                    dbc.Button("▶ RUN SIMULATION", id='bt-run-btn', color="info", className="w-100 fw-bold")
-                ])
-            ], className="shadow mb-3"),
-            
-            dbc.Card([
-                dbc.CardHeader("Risk Management (On Premium)"),
-                dbc.CardBody([
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("Trailing Stop (%)"),
-                            dbc.Input(id='bt-trail-pct', type='number', value=25, className="form-control")
-                        ], width=6),
-                        dbc.Col([
-                            html.Label("Ideal Gain (%)"),
-                            dbc.Input(id='bt-ideal-gain', type='number', value=40, className="form-control")
-                        ], width=6),
-                    ]),
-                    html.Small("Stops applied directly to Option Price (e.g., $2.00 -> $1.50)", className="text-muted mt-2 d-block")
-                ])
-            ], className="mb-3 shadow"),
-            
-        ], width=12, md=4),
-
-        # COLUMN 2: Execution & Results
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("EQUITY CURVE", className="fw-bold text-primary"),
-                dbc.CardBody([
-                    dcc.Graph(id='bt-equity-chart', style={'height': '350px'}, config={'displayModeBar': False}),
-                    html.Div(id='bt-status-area', children=get_status_ui("ready"), className="mb-4 mt-3"),
-                ], style={'padding': '10px'})
-            ], className="mb-3 shadow"),
-
-            dbc.Card([
-                dbc.CardHeader("REPORT SUMMARY", className="fw-bold text-success"),
-                dbc.CardBody([
-                    dbc.Row([
-                        dbc.Col([html.H6("Final Balance"), html.H3(id='bt-res-balance', children="--")], className="text-center"),
-                        dbc.Col([html.H6("Net Return"), html.H3(id='bt-res-return', children="--")], className="text-center"),
-                    ], className="text-center mb-3"),
-                    dbc.Row([
-                        dbc.Col([html.H6("Max Drawdown"), html.H4(id='bt-res-dd', children="--")], className="text-center"),
-                        dbc.Col([html.H6("Win Rate"), html.H4(id='bt-res-win', children="--")], className="text-center"),
-                    ]),
-                    html.Div(id='bt-error-footer', className="text-center text-danger mt-3 fst-italic small")
-                ])
-            ], className="mb-3 shadow"),
-
-        ], width=12, lg=7)
-    ]),
+def render():
+    today = date.today()
+    default_start = (today - timedelta(days=60)).strftime("%Y-%m-%d")
     
-    # LEDGER OUTPUT ROW
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("LEDGER LOGS (Detailed Trades)", className="fw-bold text-light"),
-                dbc.CardBody([
-                    html.Div(id='bt-trade-table'),
-                    
-                    html.Pre(id='bt-log-output', children="Waiting...", style={'backgroundColor': '#0a0a0a', 'color': '#00ff41', 'padding': '15px', 'height': '200px', 'overflowY': 'scroll', 'fontSize': '12px', 'border': '1px solid #333', 'marginTop': '10px'})
-                ])
-            ], className="mb-5 shadow")
-        ], width=12)
-    ])
+    return dbc.Container([
+        dbc.Row([
+            dbc.Col([
+                html.H2("STRATEGY BACKTESTER (v2.23 - The Gatekeeper)", className="display-6 fw-bold text-white"),
+                html.Hr(className="my-2")
+            ], width=12)
+        ], className="mb-4"),
 
-], fluid=True)
+        dbc.Row([
+            # CONTROLS COLUMN
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("MISSION PARAMETERS", className="fw-bold text-warning"),
+                    dbc.CardBody([
+                        html.Label("Backtest Period"),
+                        dcc.DatePickerRange(
+                            id='bt-date-range',
+                            start_date=default_start, end_date=today,
+                            display_format='YYYY-MM-DD',
+                            className="mb-3 w-100",
+                            style={'backgroundColor': '#222', 'color': '#fff', 'border': '1px solid #444'}
+                        ),
+                        dbc.Row([
+                            dbc.Col([html.Label("Start Capital ($)"), dbc.Input(id='bt-balance', type='number', value=600, className="mb-2")], width=6),
+                            dbc.Col([html.Label("Tax Rate (Est.)"), dbc.Input(id='bt-tax-rate', type='number', value=0.26, step=0.01, className="mb-2")], width=6)
+                        ]),
+                        html.Hr(className="my-2"),
+                        html.Label("Portfolio Mode"),
+                        dcc.Dropdown(
+                            id='bt-mode',
+                            options=[
+                                {'label': '🟢 Long Only (Calls)', 'value': 'LONG_ONLY'},
+                                {'label': '⚖️ Hedged (75/25 Split)', 'value': 'HEDGED'},
+                                {'label': '🌊 Macro Flip (Dynamic)', 'value': 'DYNAMIC'}
+                            ],
+                            value='LONG_ONLY', clearable=False, className="mb-3", style={'color': '#000'}
+                        ),
+                        html.Label("Signal Selection Strategy"),
+                        dcc.Dropdown(
+                            id='bt-selection',
+                            options=[
+                                {'label': '⚡ Standard (First Signal)', 'value': 'FIRST'},
+                                {'label': '🔮 Optimized (Best Outcome)', 'value': 'BEST'}
+                            ],
+                            value='FIRST', clearable=False, className="mb-3", style={'color': '#000'}
+                        ),
+                        dbc.Checklist(
+                            options=[{"label": " Export Report to CSV", "value": True}],
+                            value=[], id="bt-export", switch=True, className="mb-3 text-info"
+                        ),
+                        dbc.Button("▶ RUN SIMULATION", id='btn-run-backtest', color="success", className="w-100 fw-bold")
+                    ])
+                ], className="shadow mb-3"),
+                
+                # RISK & FRICTION CARD
+                dbc.Card([
+                    dbc.CardHeader("RISK & FRICTION (The Vig)", className="fw-bold text-white"),
+                    dbc.CardBody([
+                        # ROW 1: Stops
+                        dbc.Row([
+                            dbc.Col([html.Label("Trailing Stop (%)"), dbc.Input(id='bt-trail-pct', type='number', value=25, className="form-control mb-2")], width=6),
+                            dbc.Col([html.Label("Ideal Gain (%)"), dbc.Input(id='bt-ideal-gain', type='number', value=100, className="form-control mb-2")], width=6),
+                        ]),
+                        # ROW 2: Breakeven
+                        dbc.Row([
+                            dbc.Col([html.Label("Breakeven Trigger (%)"), dbc.Input(id='bt-be-trigger', type='number', value=15, className="form-control mb-2")], width=12),
+                        ]),
+                        html.Hr(className="my-2"),
+                        
+                        # ROW 3: FRICTION
+                        html.Label("Fee Structure"),
+                        dcc.Dropdown(
+                            id='bt-fee-model',
+                            options=[
+                                {'label': '⛔ None (Zero Fees)', 'value': 'NONE'},
+                                {'label': '🛠️ Manual (Fixed Rate)', 'value': 'MANUAL'},
+                                {'label': '🏹 Robinhood (Gold)', 'value': 'RH_GOLD'},
+                                {'label': '🏹 Robinhood (Standard)', 'value': 'RH_STD'}
+                            ],
+                            value='RH_GOLD', clearable=False, className="mb-3", style={'color': '#000'}
+                        ),
+
+                        dbc.Row([
+                            dbc.Col([html.Label("Slippage ($/Share)"), dbc.Input(id='bt-slippage', type='number', value=0.01, step=0.01, className="form-control")], width=6),
+                            dbc.Col([html.Label("Manual Comm ($)"), dbc.Input(id='bt-commission', type='number', value=0.65, step=0.01, disabled=True, className="form-control")], width=6),
+                        ]),
+                    ])
+                ], className="shadow mb-3", color="dark", inverse=True),
+
+                # NEW CARD: GATEKEEPER FILTERS
+                dbc.Card([
+                    dbc.CardHeader("GATEKEEPER (Entry Filters)", className="fw-bold text-success"),
+                    dbc.CardBody([
+                        html.Label("Trend (SMA)"),
+                        dbc.Row([
+                            dbc.Col([html.Label("SMA Period"), dbc.Input(id='bt-filter-sma', type='number', value=20, className="form-control")], width=6),
+                            dbc.Col([html.Label("Filter Enabled"), dbc.Checklist(options=[{"label": "ON", "value": True}], value=[], id="bt-filter-sma-on", switch=True, className="mt-2 text-success")], width=6),
+                        ]),
+                        html.Hr(className="my-2"),
+                        html.Label("Momentum (RSI)"),
+                        dbc.Row([
+                            dbc.Col([html.Label("RSI Period"), dbc.Input(id='bt-filter-rsi-p', type='number', value=14, className="form-control")], width=4),
+                            dbc.Col([html.Label("RSI Over"), dbc.Input(id='bt-filter-rsi-over', type='number', value=70, className="form-control")], width=4),
+                            dbc.Col([html.Label("RSI Under"), dbc.Input(id='bt-filter-rsi-under', type='number', value=30, className="form-control")], width=4),
+                        ]),
+                    ])
+                ], className="shadow mb-3", color="dark", inverse=True),
+                
+            ], width=12, md=4),
+
+            # RESULTS COLUMN
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("EQUITY CURVE", className="fw-bold text-primary"),
+                    dbc.CardBody([
+                        dcc.Loading(dcc.Graph(id='bt-equity-chart', style={'height': '350px'})),
+                        # RESTORED STATUS AREA
+                        html.Div(id='bt-status-area', children=get_status_ui("ready"), className="mb-4 mt-3"),
+                    ], style={'padding': '10px'})
+                ], className="mb-3 shadow"),
+
+                dbc.Card([
+                    dbc.CardHeader("REPORT SUMMARY", className="fw-bold text-success"),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([html.H6("Final Balance"), html.H3(id='bt-res-balance', children="--")], className="text-center"),
+                            dbc.Col([html.H6("Net Return (Post-Tax)"), html.H3(id='bt-res-return', children="--")], className="text-center"),
+                            dbc.Col([html.H6("Signal Freq %"), html.H3(id='bt-res-sig-avg', children="--")], className="text-center"),
+                        ], className="text-center mb-3"),
+                        dbc.Row([
+                            dbc.Col([html.H6("Max Drawdown"), html.H4(id='bt-res-dd', children="--")], className="text-center"),
+                            dbc.Col([html.H6("Avg Duration"), html.H4(id='bt-res-duration', children="--")], className="text-center"),
+                            dbc.Col([html.H6("Dominance"), html.H4(id='bt-res-bias', children="--")], className="text-center"),
+                        ]),
+                    ])
+                ], className="mb-3 shadow"),
+                
+                # LEDGER
+                dbc.Card([
+                    dbc.CardHeader("LEDGER LOGS (Detailed Trades)", className="fw-bold text-white"),
+                    dbc.CardBody(html.Div(id='bt-trade-table'))
+                ], className="mb-4 shadow", color="dark", inverse=True)
+
+            ], width=12, lg=8)
+        ])
+    ], fluid=True)
 
 # ==============================================================================
-# 5. CALLBACKS
+# 4. CALLBACKS
 # ==============================================================================
-def generate_trade_table(dates, tickers, entries, exits, reasons, pnl_values, returns_values):
-    table_rows = []
-    
-    for d, tick, ent, ex, rsn, pnl, ret in zip(dates, tickers, entries, exits, reasons, pnl_values, returns_values):
-        is_win = pnl >= 0
-        pnl_text = f"{'+' if is_win else ''}${pnl:,.2f}"
-        ret_text = f"{ret*100:+.1f}%"
-        
-        row_style = {'backgroundColor': 'rgba(0, 255, 65, 0.1)'} if is_win else {'backgroundColor': 'rgba(255, 0, 0, 0.1)'}
-        text_color = '#00ff41' if is_win else '#ff5555'
-        
-        clean_ticker = tick.replace("O:", "")
-        
-        table_rows.append(html.Tr([
-            html.Td(d, className="text-white small"),
-            html.Td(clean_ticker, className="text-info small", style={'fontFamily': 'monospace'}),
-            html.Td(f"${ent:.2f}", className="text-light small"),
-            html.Td(f"${ex:.2f}", className="text-light small"),
-            html.Td(rsn, className="text-warning small fst-italic"),
-            html.Td(pnl_text, style={'color': text_color, 'fontWeight': 'bold'}),
-            html.Td(ret_text, style={'color': text_color}),
-        ], style=row_style))
 
-    return dbc.Table(
-        [html.Thead(html.Tr([
-            html.Th("Date/Time"), 
-            html.Th("Ticker"), 
-            html.Th("Entry"), 
-            html.Th("Exit"), 
-            html.Th("Rslt"), 
-            html.Th("Net P&L"), 
-            html.Th("ROI")
-        ]))] +
-        [html.Tbody(table_rows)],
-        bordered=False, hover=True, size="sm", className="text-white", style={'fontSize': '12px'}
-    )
+@callback(
+    Output('bt-commission', 'disabled'),
+    Input('bt-fee-model', 'value')
+)
+def toggle_commission_input(fee_model):
+    if fee_model == 'MANUAL': return False
+    return True
 
 @callback(
     [Output('bt-res-balance', 'children'), Output('bt-res-return', 'children'),
-     Output('bt-res-dd', 'children'), Output('bt-res-win', 'children'),
-     Output('bt-status-area', 'children'), Output('bt-error-footer', 'children'),
-     Output('bt-log-output', 'children'), Output('bt-equity-chart', 'figure'),
-     Output('bt-trade-table', 'children')],
-    [Input('bt-run-btn', 'n_clicks')],
+     Output('bt-res-sig-avg', 'children'), Output('bt-res-dd', 'children'),
+     Output('bt-res-duration', 'children'), Output('bt-res-bias', 'children'),
+     Output('bt-equity-chart', 'figure'), Output('bt-trade-table', 'children'),
+     Output('bt-status-area', 'children')],
+    [Input('btn-run-backtest', 'n_clicks')],
     [State('bt-date-range', 'start_date'), State('bt-date-range', 'end_date'),
-     State('bt-balance', 'value'), 
-     State('bt-pos-size', 'value'),
-     State('bt-max-invest', 'value'), 
-     State('bt-tax-rate', 'value'), 
-     State('bt-rth', 'value'), 
-     State('bt-trail-pct', 'value'),
-     State('bt-selection-mode', 'value'),
-     State('bt-strike-offset', 'value'), 
-     State('bt-ideal-gain', 'value')] 
+     State('bt-balance', 'value'), State('bt-mode', 'value'),
+     State('bt-tax-rate', 'value'), State('bt-trail-pct', 'value'),
+     State('bt-ideal-gain', 'value'), State('bt-be-trigger', 'value'),
+     State('bt-selection', 'value'), State('bt-export', 'value'),
+     State('bt-slippage', 'value'), State('bt-commission', 'value'),
+     State('bt-fee-model', 'value'), 
+     # NEW STATE VARIABLES
+     State('bt-filter-sma', 'value'), State('bt-filter-rsi-p', 'value'),
+     State('bt-filter-rsi-over', 'value'), State('bt-filter-rsi-under', 'value'),
+     State('bt-filter-sma-on', 'value')]
 )
-def run_backtest_engine(n_clicks, start_date, end_date, start_balance, pos_size, max_invest, tax_rate, rth_value, trail_pct, selection_mode, strike_offset, ideal_gain):
-    if not n_clicks:
-        return "--", "--", "--", "--", get_status_ui("ready"), "", "Waiting...", go.Figure(), None 
-
-    ideal_gain_val = ideal_gain if ideal_gain else 0.0
-    strike_offset_val = strike_offset if strike_offset else 0
+def update_backtest(n, start, end, balance, mode, tax, trail, gain, be_trigger, selection, export, slip, comm, fee_model, sma_p, rsi_p, rsi_over, rsi_under, sma_on):
+    if not n: return dash.no_update
     
-    # [FIX] V2.5 PATHING
-    # The view is in src/interface/, the engine is in src/core/
-    engine_path = ROOT_DIR / "src" / "core" / "engine_backtest.py"
-    
-    if not os.path.exists(engine_path):
-        return "ERR", "ERR", "ERR", "ERR", get_status_ui("crash"), f"Engine Not Found at: {engine_path}", "", go.Figure(), None
-
-    rth_bool = True if rth_value and rth_value[0] is True else False
-    archive_bool = True 
-
-    # CONSTRUCT COMMAND WITH MARKET OPEN SAFETY
-    cmd = [
-        sys.executable, 
-        str(engine_path),
-        "--start_date", str(start_date), "--end_date", str(end_date),
-        "--start_balance", str(start_balance), "--pos_size_pct", str(pos_size / 100.0),
-        "--max_invest", str(max_invest), "--tax_rate", str(tax_rate),
-        "--trailing_stop_pct", str(trail_pct / 100.0), 
-        "--enforce_rth", str(rth_bool), "--archive_report", str(archive_bool),
-        "--selection_mode", str(selection_mode),
-        "--ideal_gain_pct", str(ideal_gain_val / 100.0),
-        "--strike_offset", str(strike_offset_val),
-        "--skip_open_minutes", "15" # SAFETY BUFFER
-    ]
-    
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT_DIR)
-    keys_to_remove = ["WERKZEUG_RUN_MAIN", "WERKZEUG_SERVER_FD"]
-    for key in keys_to_remove: env.pop(key, None)
-        
     try:
-        process = subprocess.run(cmd, capture_output=True, text=True, env=env, close_fds=True)
-        full_output = process.stdout
+        # Pass all new filter parameters
+        args = BacktestArgs(start, end, balance, mode, tax, trail, gain, be_trigger, selection, export, slip, comm, fee_model, sma_p, rsi_over, rsi_under)
+        args.sma_filter_on = True if sma_on and sma_on[0] else False
+        args.rsi_period = rsi_p
         
-        if "JSON_RESULT:" in full_output:
-            log_text, json_text = full_output.split("JSON_RESULT:")
-            result = json.loads(json_text)
+        results = engine_backtest.run_backtest(args)
+        
+        if results is None or results.empty:
+            return "--", "--", "--", "--", "--", "--", go.Figure(), [], get_status_ui("failure", "No trades found.")
             
-            if "error" in result:
-                 return "--", "--", "--", "--", get_status_ui("failure", result['error']), "", log_text, go.Figure(), None 
+        final_balance = results.iloc[-1]['end_balance']
+        gross_profit = final_balance - args.start_balance
+        net_profit = gross_profit * (1 - args.tax_rate) if gross_profit > 0 else gross_profit
+        net_return_pct = (net_profit / args.start_balance) * 100
+        
+        cum_max = results['end_balance'].cummax()
+        drawdown = (results['end_balance'] - cum_max) / cum_max
+        max_dd = drawdown.min() * 100
+        
+        # SIGNAL AVERAGE LOGIC
+        try:
+            mode_sig = results['signal_rank'].mode()[0]
+            total_trades = len(results)
+            freq_pct = (len(results[results['signal_rank'] == mode_sig]) / total_trades) * 100 if total_trades > 0 else 0
+            sig_avg_disp = f"Sig #{mode_sig} ({freq_pct:.0f}%)"
+        except:
+            sig_avg_disp = "--"
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=list(range(len(result['equity_curve']))), 
-                y=result['equity_curve'], 
-                mode='lines', 
-                name="Equity", 
-                line=dict(color='#00ff41', width=3)
-            ))
-            fig.add_hline(y=start_balance, line_dash="dot", line_color="#888")
-            fig.update_layout(template="plotly_dark", title="Equity Curve", margin=dict(t=10, b=10, l=10, r=10), height=350, yaxis_title="$")
+        # AVG DURATION
+        avg_mins = results['duration_mins'].mean()
+        avg_hrs, avg_remainder = divmod(avg_mins * 60, 3600)
+        avg_m, _ = divmod(avg_remainder, 60)
+        dur_disp = f"{int(avg_hrs)}h {int(avg_m)}m" if avg_hrs > 0 else f"{int(avg_m)}m"
 
-            trade_table = generate_trade_table(
-                result['trade_dates'],
-                result.get('trade_tickers', []),
-                result.get('trade_entries', []),
-                result.get('trade_exits', []),
-                result.get('trade_reasons', []),
-                result['trade_pnl'],
-                result['trade_returns']
-            )
+        # DOMINANCE
+        call_count = len(results[results['type'] == 'call'])
+        put_count = len(results[results['type'] == 'put'])
+        bias_disp = f"CALLS ({int((call_count/len(results))*100)}%)" if call_count > put_count else f"PUTS ({int((put_count/len(results))*100)}%)"
 
-            return (
-                f"${result['final_balance']:,.2f}",
-                html.Span(f"{result['total_return_pct']:+.1f}%", className="text-success" if result['total_return_pct'] > 0 else "text-danger"),
-                html.Span(f"{result['max_drawdown_pct']:.1f}%", className="text-danger"),
-                f"{result['win_rate']:.1f}%",
-                get_status_ui("success", "Analysis Complete"), 
-                "", 
-                log_text, 
-                fig, 
-                trade_table
-            )
-        else:
-            return "--", "--", "--", "--", get_status_ui("crash"), "Execution Failed", full_output, go.Figure(), None
+        # CHART
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=results['entry_time'], y=results['end_balance'], mode='lines', line=dict(color='#00bc8c', width=2)))
+        fig.add_hline(y=args.start_balance, line_dash="dot", line_color="#666")
+        fig.update_layout(template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=40), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+
+        # LEDGER
+        table_rows = []
+        for i, row in results.iterrows():
+            is_win = row['pnl'] >= 0
+            style_color = '#00ff41' if is_win else '#ff5555'
+            row_bg = 'rgba(0, 255, 65, 0.05)' if is_win else 'rgba(255, 0, 0, 0.05)'
+            reason = row.get('reason', 'TIME')
+            if reason == "BE_STOP": reason = "🛡️ BREAKEVEN"; row_bg = 'rgba(255, 255, 0, 0.05)'
+            
+            try: exit_time_str = str(row['exit_time']).split('.')[0] if row['exit_time'] else "--"
+            except: exit_time_str = "--"
+
+            table_rows.append(html.Tr([
+                html.Td(str(row['signal_rank']), className="text-center small"), html.Td(str(row['entry_time']).split('.')[0], className="small"),
+                html.Td(row['type'].upper(), className="small"), html.Td(f"${row['start_balance']:,.2f}", className="small text-white-50"),
+                html.Td(row['duration_str'], className="small text-muted"), 
+                html.Td(reason, className="small text-warning fst-italic"),
+                html.Td(f"{row['pnl']:+.2f}", style={'color': style_color, 'fontWeight': 'bold'}),
+                html.Td(f"{row['return_pct']:+.1f}%", style={'color': style_color}) 
+            ], style={'backgroundColor': row_bg}))
+
+        tbl = dbc.Table([html.Thead(html.Tr([html.Th("Sig #"), html.Th("Entry"), html.Th("Type"), html.Th("Start $"), html.Th("Dur"), html.Th("Reason"), html.Th("P&L"), html.Th("ROI %")]))] + [html.Tbody(table_rows)], bordered=False, hover=True, color="dark", size="sm")
+
+        return f"${final_balance:,.2f}", html.Span(f"{net_return_pct:+.1f}%", className="text-success" if net_return_pct > 0 else "text-danger"), sig_avg_disp, html.Span(f"{max_dd:.1f}%", className="text-danger"), dur_disp, html.Span(bias_disp, className="text-info"), fig, tbl, get_status_ui("success", "Simulation Complete")
 
     except Exception as e:
-        return "--", "--", "--", "--", get_status_ui("crash"), f"GUI Error: {str(e)}", "", go.Figure(), None
+        traceback.print_exc()
+        return "--", "--", "--", "--", "--", "--", go.Figure(), [], get_status_ui("crash", str(e))

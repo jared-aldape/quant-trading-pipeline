@@ -1,19 +1,13 @@
 import sys
 import os
-import argparse
 import duckdb
 import pandas as pd
 import numpy as np
-import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from pathlib import Path
 import pytz
+import uuid
 
-# ==============================================================================
-# 1. PATH CONSTITUTION
-# ==============================================================================
-# File Location: src/core/engine_backtest.py
-# Root Location: ../../
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
@@ -22,291 +16,350 @@ from src.utils.logger import get_logger
 
 log = get_logger("BacktestEngine")
 
-# ==============================================================================
-# 2. ARGUMENT PARSING
-# ==============================================================================
-def parse_args():
-    parser = argparse.ArgumentParser(description="Quant OS v2.5 Backtest Engine")
-    
-    # Date & Money
-    parser.add_argument("--start_date", type=str, required=True)
-    parser.add_argument("--end_date", type=str, required=True)
-    parser.add_argument("--start_balance", type=float, required=True)
-    parser.add_argument("--pos_size_pct", type=float, required=True)
-    parser.add_argument("--max_invest", type=float, required=True)
-    
-    # Risk Management
-    parser.add_argument("--tax_rate", type=float, default=0.268) # Section 1256
-    parser.add_argument("--trailing_stop_pct", type=float, default=0.25)
-    parser.add_argument("--ideal_gain_pct", type=float, default=0.0) 
-    
-    # Execution Logic
-    parser.add_argument("--enforce_rth", type=str, default="True") 
-    parser.add_argument("--archive_report", type=str, default="True")
-    parser.add_argument("--selection_mode", type=str, default="FIRST", choices=["FIRST", "BEST"])
-    parser.add_argument("--strike_offset", type=int, default=0)
-    parser.add_argument("--skip_open_minutes", type=int, default=15) # The Hard Deck
+MORNING_EXIT_MINUTES = 80   
+AFTERNOON_EXIT_MINUTES = 21 
+MORNING_CUTOFF_ET = time(12, 30) 
 
-    # v2.5 Roadmap Preparation (Straddle-Bias)
-    parser.add_argument("--strategy_type", type=str, default="DIRECTIONAL", choices=["DIRECTIONAL", "STRADDLE"])
-
-    return parser.parse_args()
+TZ_UTC = pytz.timezone('UTC')
+TZ_PST = pytz.timezone('US/Pacific')
 
 # ==============================================================================
-# 3. HELPER FUNCTIONS
+# 1. HELPER FUNCTIONS
 # ==============================================================================
-def construct_ticker(date_str, xsp_price, offset=0):
-    """
-    Constructs the XSP Option Ticker for a given date and price.
-    Format: O:XSP{YYMMDD}C{00000000}
-    """
+def convert_to_pst(dt_input):
     try:
-        dt = pd.to_datetime(date_str)
-        yymmdd = dt.strftime('%y%m%d')
-        
-        # Round to nearest integer for ATM strike
-        atm_strike = int(round(xsp_price))
-        target_strike = atm_strike + offset
-        
-        # Polygon Format: 8 digits, zero-padded, multiplied by 1000
-        strike_str = f"{target_strike * 1000:08d}"
-        
-        # Currently defaults to Calls (C) as per Directional Strategy
-        return f"O:XSP{yymmdd}C{strike_str}"
-    except Exception as e:
-        return None
+        if dt_input is None: return None
+        if isinstance(dt_input, str): dt_obj = pd.to_datetime(dt_input)
+        else: dt_obj = dt_input
+        if dt_obj.tzinfo is None: dt_obj = TZ_UTC.localize(dt_obj)
+        else: dt_obj = dt_obj.tz_convert(TZ_UTC)
+        return dt_obj.astimezone(TZ_PST)
+    except Exception: return None
 
-def get_execution_start_time(signal_ts_ms, skip_minutes):
-    """
-    Returns the UTC timestamp of the 'Hard Deck' (Earliest allowed execution).
-    Logic: Max(Signal Time, Market Open + Buffer)
-    """
-    # 1. Signal Time (UTC)
-    sig_dt_utc = pd.to_datetime(signal_ts_ms, unit='ms', utc=True)
-    
-    # 2. Market Open for that day (09:30 ET)
-    sig_dt_ny = sig_dt_utc.tz_convert(config.TZ_NY)
-    market_open_ny = sig_dt_ny.replace(hour=9, minute=30, second=0, microsecond=0)
-    
-    # 3. The "Hard Deck" (Open + Buffer)
-    hard_deck_ny = market_open_ny + timedelta(minutes=skip_minutes)
-    
-    # 4. Execution is the LATER of the two
-    # Example: If signal is 10:00 and Deck is 09:45 -> Execute at 10:00
-    # Example: If signal is 09:30 and Deck is 09:45 -> Execute at 09:45
-    execution_start_ny = max(sig_dt_ny, hard_deck_ny)
-    
-    return execution_start_ny.tz_convert('UTC')
+def format_duration(dt_start, dt_end):
+    try:
+        if not dt_start or not dt_end: return "--"
+        delta = dt_end - dt_start
+        total_seconds = int(delta.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if hours > 0: return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+    except: return "--"
 
-def simulate_real_outcome(df_opts, entry_price, trailing_stop_pct, ideal_gain_pct):
-    """
-    Simulates price action bar-by-bar to find Stop Loss or Take Profit.
-    """
-    highest_price = entry_price
-    current_stop = entry_price * (1 - trailing_stop_pct)
-    target_price = entry_price * (1 + ideal_gain_pct) if ideal_gain_pct > 0 else None
-    
-    for i, row in df_opts.iterrows():
-        price_low = row['low']
-        price_high = row['high']
-        time_utc = row['datetime_utc']
-        
-        # Check Low against Stop (Pessimistic Check First)
-        if price_low <= current_stop: 
-            return current_stop, time_utc, "STOP_LOSS"
-            
-        # Check High against Target (Optimistic Check Second)
-        if target_price and price_high >= target_price: 
-            return target_price, time_utc, "TAKE_PROFIT"
-        
-        # Trail the Stop
-        if price_high > highest_price:
-            highest_price = price_high
-            new_stop = highest_price * (1 - trailing_stop_pct)
-            if new_stop > current_stop: 
-                current_stop = new_stop
-                
-    # If Day Ends
-    last_row = df_opts.iloc[-1]
-    return last_row['close'], last_row['datetime_utc'], "EOD_EXIT"
+def reconstruct_ticker(trade_type, xsp_price, date_obj):
+    try:
+        if xsp_price is None: return None
+        try: price_val = float(xsp_price)
+        except: return None
+        if pd.isna(price_val) or price_val <= 0: return None
+        date_str = date_obj.strftime('%y%m%d')
+        opt_type = 'C' if trade_type == 'call' else 'P'
+        strike_raw = round(price_val)
+        strike_str = f"{int(strike_raw * 1000):08d}"
+        return f"O:XSP{date_str}{opt_type}{strike_str}"
+    except Exception: return None
 
-# ==============================================================================
-# 4. CORE ENGINE LOGIC
-# ==============================================================================
-def run_backtest(args):
-    log.info(f"🚀 ENGINE START | Hard Deck: {args.skip_open_minutes}m | Mode: {args.selection_mode}")
-    
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    
-    # 1. FETCH SIGNAL MANIFEST
-    query_manifest = f"""
-        SELECT * FROM {config.TBL_MANIFEST} 
-        WHERE date BETWEEN '{args.start_date}' AND '{args.end_date}' 
-        ORDER BY entry_timestamp_utc ASC
-    """
-    
-    try: 
-        manifest_df = con.execute(query_manifest).df()
-    except Exception as e: 
-        print(json.dumps({"error": f"DB Error: {str(e)}"}))
-        return
-
-    if manifest_df.empty:
-        print(json.dumps({"error": "No Signals in Selected Window"}))
-        return
-    
-    candidate_trades = []
-    
-    # 2. PROCESS SIGNALS
-    for _, signal in manifest_df.iterrows():
-        # A. Apply Hard Deck Law
-        exec_start_utc = get_execution_start_time(signal['entry_timestamp_utc'], args.skip_open_minutes)
-        sql_time_str = exec_start_utc.strftime('%Y-%m-%d %H:%M:%S')
-
-        # B. Construct Ticker
-        # TODO: v2.5 Upgrade - Add logic here for 'PUT' or 'STRADDLE' construction
-        ticker = construct_ticker(signal['date'], signal['xsp_price'], args.strike_offset)
-        if not ticker: continue
-
-        # C. Query Option Data (Post-Hard Deck)
-        opt_query = f"""
-            SELECT datetime_utc, open, high, low, close 
-            FROM {config.TBL_OPTIONS} 
+def lookup_price(con, ticker, query_time):
+    try:
+        ts_str = query_time.strftime('%Y-%m-%d %H:%M:%S')
+        query = f"""
+            SELECT open, datetime_utc 
+            FROM {config.TBL_OPTIONS}
             WHERE ticker = '{ticker}' 
-            AND datetime_utc >= TIMESTAMP '{sql_time_str}' 
+            AND datetime_utc >= '{ts_str}'
+            ORDER BY datetime_utc ASC
+            LIMIT 1
+        """
+        result = con.execute(query).fetchone()
+        if result: return result[0], result[1] 
+        return None, None
+    except Exception: return None, None
+
+def calculate_fees(ticker, num_contracts, fee_model, manual_comm):
+    if fee_model == 'NONE': return 0.0
+    if fee_model == 'MANUAL': return manual_comm
+    
+    is_gold = (fee_model == 'RH_GOLD')
+    fees = config.RH_FEES
+    base = fees['REGULATORY_BASE']
+    broker = fees['CONTRACT_GOLD'] if is_gold else fees['CONTRACT_STD']
+    extra = 0.0
+    is_index = any(x in ticker for x in ["XSP", "SPX", "NDX", "VIX"])
+    
+    if is_index:
+        if "XSP" in ticker and num_contracts >= 10:
+            extra = fees['INDEX_EXCHANGE']
+    else:
+        extra = fees['EQUITY_TAF']
+
+    return base + broker + extra
+
+def manage_trade_exit(con, ticker, entry_price, entry_time, duration_min, stop_pct, target_pct, be_pct, slippage_buffer):
+    try:
+        exit_deadline = entry_time + timedelta(minutes=duration_min)
+        entry_str = entry_time.strftime('%Y-%m-%d %H:%M:%S')
+        deadline_str = exit_deadline.strftime('%Y-%m-%d %H:%M:%S')
+        
+        active_stop_price = entry_price * (1 - stop_pct) if stop_pct else 0
+        target_price = entry_price * (1 + target_pct) if target_pct else 999999
+        be_activation_price = entry_price * (1 + be_pct) if be_pct else 999999
+        is_be_active = False
+
+        query = f"""
+            SELECT open, datetime_utc 
+            FROM {config.TBL_OPTIONS}
+            WHERE ticker = '{ticker}' 
+            AND datetime_utc > '{entry_str}'
+            AND datetime_utc <= '{deadline_str}'
             ORDER BY datetime_utc ASC
         """
+        price_path = con.execute(query).fetchall()
         
-        try: df_opts = con.execute(opt_query).df()
-        except: continue 
-        
-        if df_opts.empty: continue 
+        if not price_path: return None, None, "NO_DATA"
+
+        for price, ts in price_path:
+            if be_pct and not is_be_active and price >= be_activation_price:
+                is_be_active = True
+                active_stop_price = entry_price + (slippage_buffer * 2)
             
-        # D. Execute Trade
-        entry_price = df_opts.iloc[0]['close']
-        entry_time = df_opts.iloc[0]['datetime_utc']
+            if price <= active_stop_price:
+                reason = "BE_STOP" if is_be_active else "STOP_LOSS"
+                return price, ts, reason
+            
+            if target_pct and price >= target_price: 
+                return price, ts, "TAKE_PROFIT"
         
-        exit_price, exit_time, reason = simulate_real_outcome(df_opts, entry_price, args.trailing_stop_pct, args.ideal_gain_pct)
-        roi_pct = (exit_price - entry_price) / entry_price
-        
-        candidate_trades.append({
-            'Entry Time': entry_time, 'Exit Time': exit_time, 'Ticker': ticker,
-            'Entry Price': entry_price, 'Exit Price': exit_price,
-            'Return %': roi_pct, 'Reason': reason,
-            'Day': pd.to_datetime(entry_time).date()
-        })
+        final_price, final_ts = price_path[-1]
+        return final_price, final_ts, "TIME_EXIT"
+    except Exception: return None, None, "ERROR"
 
-    con.close()
-
-    if not candidate_trades:
-        print(json.dumps({"error": "No Executable Trades (Check Data availability or Hard Deck buffer)"}))
-        return
-
-    # 3. FILTER TRADES (Selection Mode)
-    candidates_df = pd.DataFrame(candidate_trades)
-    final_trades = []
+# ==============================================================================
+# 2. PERSISTENCE LAYER (THE BATTERING RAM PROTOCOL)
+# ==============================================================================
+def persist_to_database(df, run_meta):
+    """
+    Writes simulation results to DuckDB.
+    Includes 'Battering Ram' logic to fix schema mismatches automatically.
+    """
+    if df.empty: return
     
-    for day, group in candidates_df.groupby('Day'):
-        if args.selection_mode == "BEST":
-            # Hindsight optimization (for theoretical max)
-            selected = group.sort_values('Return %', ascending=False).iloc[0]
-            selected['Reason'] += " (Best)"
-        else:
-            # Reality (First executable signal)
-            selected = group.sort_values('Entry Time').iloc[0]
-        final_trades.append(selected)
+    con = None
+    try:
+        con = duckdb.connect(str(config.DB_FILE))
         
-    final_trades_df = pd.DataFrame(final_trades).sort_values('Entry Time')
+        # Prepare Data
+        save_df = df.copy()
+        save_df['run_id'] = run_meta['run_id']
+        save_df['strategy_mode'] = run_meta['mode']
+        save_df['timestamp'] = datetime.now()
+        
+        # Register View for bulk insert
+        con.register('df_staging', save_df)
+        
+        # Attempt 1: Gentle Insert (Assumes schema is correct)
+        try:
+            con.execute(f"INSERT INTO {config.TBL_SIM_LOG} SELECT run_id, strategy_mode, timestamp, entry_time, exit_time, ticker, type, signal_rank, duration_str, duration_mins, reason, entry_px, exit_px, return_pct, pnl, position_size, start_balance, end_balance, balance FROM df_staging")
+            log.info(f"✅ Run persisted cleanly.")
+            
+        except Exception as e:
+            # Attempt 2: Battering Ram (Schema Mismatch Detected)
+            log.warning(f"⚠️ Standard Write Failed ({e}). Initiating Schema Repair...")
+            
+            # DROP the incompatible table
+            con.execute(f"DROP TABLE IF EXISTS {config.TBL_SIM_LOG}")
+            
+            # RECREATE with correct v3.0 Schema
+            con.execute(f"""
+                CREATE TABLE {config.TBL_SIM_LOG} (
+                    run_id VARCHAR,
+                    strategy_mode VARCHAR,
+                    timestamp TIMESTAMP,
+                    entry_time TIMESTAMP,
+                    exit_time TIMESTAMP,
+                    ticker VARCHAR,
+                    type VARCHAR,
+                    signal_rank INTEGER,
+                    duration_str VARCHAR,
+                    duration_mins DOUBLE,
+                    reason VARCHAR,
+                    entry_px DOUBLE,
+                    exit_px DOUBLE,
+                    return_pct DOUBLE,
+                    pnl DOUBLE,
+                    position_size DOUBLE,
+                    start_balance DOUBLE,
+                    end_balance DOUBLE,
+                    balance DOUBLE
+                )
+            """)
+            
+            # FORCE INSERT
+            con.execute(f"INSERT INTO {config.TBL_SIM_LOG} SELECT run_id, strategy_mode, timestamp, entry_time, exit_time, ticker, type, signal_rank, duration_str, duration_mins, reason, entry_px, exit_px, return_pct, pnl, position_size, start_balance, end_balance, balance FROM df_staging")
+            log.info(f"✅ Schema Repaired & Data Persisted.")
 
-    # 4. CALCULATE EQUITY CURVE
-    balance = args.start_balance
-    equity_curve = [balance]
-    processed_trades = []
+    except Exception as e:
+        log.error(f"❌ CRITICAL DB FAILURE: {e}")
+    finally:
+        if con:
+            con.unregister('df_staging')
+            con.close()
+
+# ==============================================================================
+# 3. MAIN EXECUTION ROUTINE
+# ==============================================================================
+def run_backtest(args):
+    start_date = getattr(args, 'start_date', None) or '2025-09-11'
+    end_date = getattr(args, 'end_date', None) or '2025-12-01'
+    start_balance = getattr(args, 'start_balance', None) or 600.0
+    strategy_mode = getattr(args, 'strategy_mode', None) or 'LONG_ONLY'
+    selection_mode = getattr(args, 'selection_mode', None) or 'FIRST'
+    archive_report = getattr(args, 'archive_report', False)
+    stop_loss_pct = getattr(args, 'trailing_stop_pct', None)
+    take_profit_pct = getattr(args, 'ideal_gain_pct', None)
+    be_pct = getattr(args, 'breakeven_pct', None)
+    slippage = getattr(args, 'slippage', 0.0)
+    fee_model = getattr(args, 'fee_model', 'NONE')
+    manual_comm = getattr(args, 'commission', 0.65)
     
-    # Re-connect for logging
-    con = duckdb.connect(str(config.DB_FILE))
+    run_id = f"SIM_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    log.info(f"🚀 Starting Run: {run_id}")
+
+    # --- PHASE 1: READ DATA ---
+    if not os.path.exists(config.DB_FILE): return pd.DataFrame()
     
-    for _, trade in final_trades_df.iterrows():
-        if balance <= 0: break 
-        
-        # Position Sizing
-        invest_target = balance * args.pos_size_pct
-        invest_amt = max(0.0, min(invest_target, args.max_invest))
-        
-        if invest_amt < 10: continue # Minimum trade size safety
-
-        # P&L Calculation
-        pnl = invest_amt * trade['Return %']
-        
-        # Tax Drag (Section 1256)
-        # Only tax profits. Losses reduce tax liability in reality, 
-        # but for simple conservative backtest, we just don't tax losses.
-        net_pnl = pnl - (pnl * args.tax_rate if pnl > 0 else 0)
-        
-        balance += net_pnl
-        equity_curve.append(balance)
-        
-        processed_trades.append({
-            'entry_time': trade['Entry Time'], 
-            'ticker': trade['Ticker'],
-            'net_pnl': net_pnl,
-            'return_pct': trade['Return %'],
-            'reason': trade['Reason'],
-            'entry_price': trade['Entry Price'],
-            'exit_price': trade['Exit Price']
-        })
-
-    # 5. LOGGING RESULTS TO DB
-    if processed_trades and args.archive_report == "True":
-        log_df = pd.DataFrame(processed_trades)
-        
-        # Ensure Naive Timestamps for DuckDB compatibility
-        if log_df['entry_time'].dt.tz is not None:
-             log_df['entry_time'] = log_df['entry_time'].dt.tz_convert('UTC').dt.tz_localize(None)
-
-        con.execute(f"""
-            CREATE TABLE IF NOT EXISTS active_simulation_log (
-                entry_time TIMESTAMP, ticker VARCHAR, net_pnl DOUBLE, 
-                return_pct DOUBLE, reason VARCHAR, entry_price DOUBLE, exit_price DOUBLE
-            )
-        """)
-        con.execute("DELETE FROM active_simulation_log")
-        con.execute("INSERT INTO active_simulation_log SELECT * FROM log_df")
-
-    con.close()
-
-    # 6. JSON OUTPUT (For Interface)
-    display_df = pd.DataFrame(processed_trades)
+    manifest_df = pd.DataFrame()
+    flow_df = pd.DataFrame()
     
-    if not display_df.empty:
-        # Convert to Local Time string for UI Display
-        display_df['Date'] = pd.to_datetime(display_df['entry_time'], utc=True).dt.tz_convert(config.TZ_LOCAL).dt.strftime('%Y-%m-%d %H:%M')
-        win_rate = len(display_df[display_df['net_pnl'] > 0]) / len(display_df) * 100
-    else:
-        win_rate = 0.0
-        
-    equity_s = pd.Series(equity_curve)
-    drawdown = (equity_s - equity_s.cummax()) / equity_s.cummax()
-    max_dd_pct = drawdown.min() * 100 if not drawdown.empty else 0.0
-    
-    result_payload = {
-        "final_balance": balance,
-        "total_return_pct": ((balance - args.start_balance)/args.start_balance)*100,
-        "max_drawdown_pct": max_dd_pct,
-        "win_rate": win_rate,
-        "trade_dates": display_df['Date'].tolist() if not display_df.empty else [],
-        "trade_pnl": display_df['net_pnl'].tolist() if not display_df.empty else [],
-        "trade_returns": display_df['return_pct'].tolist() if not display_df.empty else [],
-        "trade_tickers": display_df['ticker'].tolist() if not display_df.empty else [],
-        "trade_entries": display_df['entry_price'].tolist() if not display_df.empty else [],
-        "trade_exits": display_df['exit_price'].tolist() if not display_df.empty else [],
-        "trade_reasons": display_df['reason'].tolist() if not display_df.empty else [],
-        "equity_curve": equity_curve
-    }
-    
-    # The Interface looks for this specific Tag to parse JSON
-    print(f"JSON_RESULT:{json.dumps(result_payload)}")
+    try: 
+        con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        try:
+            flow_df = con.execute(f"SELECT date, flow_bias FROM {config.TBL_MACRO_FLOW}").df()
+            flow_df['date'] = pd.to_datetime(flow_df['date']).dt.date
+            flow_df = flow_df.set_index('date')
+        except: pass
 
-if __name__ == "__main__":
-    args = parse_args()
-    run_backtest(args)
+        query = f"""
+            SELECT * FROM {config.TBL_MANIFEST} 
+            WHERE date >= date('{start_date}') 
+            AND date <= date('{end_date}') 
+            ORDER BY entry_timestamp_utc ASC
+        """
+        manifest_df = con.execute(query).df()
+        con.close() # RELEASE READ LOCK
+    except Exception as e:
+        return pd.DataFrame()
+
+    if manifest_df.empty: return pd.DataFrame()
+
+    # --- PHASE 2: SIMULATION ---
+    # New connection for lookups
+    try: price_lookup_con = duckdb.connect(str(config.DB_FILE), read_only=True)
+    except: return pd.DataFrame()
+
+    balance = start_balance
+    trades = []
+    manifest_df['date'] = pd.to_datetime(manifest_df['date']).dt.date
+    
+    for date, daily_signals in manifest_df.groupby('date'):
+        daily_bias = 'NEUTRAL'
+        if not flow_df.empty and date in flow_df.index: daily_bias = flow_df.loc[date, 'flow_bias']
+        call_weight, put_weight = 0.0, 0.0
+        if strategy_mode == 'LONG_ONLY': call_weight = 1.0; put_weight = 0.0
+        elif strategy_mode == 'HEDGED': call_weight = 0.75; put_weight = 0.25
+        elif strategy_mode == 'DYNAMIC':
+            if daily_bias == 'BEAR': call_weight = 0.25; put_weight = 0.75
+            else: call_weight = 0.75; put_weight = 0.25
+        
+        daily_candidates = []
+        signal_rank_counter = 0 
+        
+        for _, row in daily_signals.iterrows():
+            signal_rank_counter += 1
+            try:
+                trade_type = row.get('trade_type', 'call')
+                final_weight = call_weight if trade_type == 'call' else put_weight
+                if final_weight <= 0: continue
+                allocation_amt = balance * final_weight
+                ticker = reconstruct_ticker(trade_type, row.get('xsp_price'), date)
+                if not ticker: continue
+                entry_ts = pd.Timestamp(row['entry_timestamp_utc'], unit='ms', tz='UTC')
+                
+                raw_entry, actual_entry_time = lookup_price(price_lookup_con, ticker, entry_ts)
+                if not raw_entry: continue
+                
+                eff_entry = raw_entry + slippage
+                contract_cost = eff_entry * 100
+                est_fee = calculate_fees(ticker, 1, fee_model, manual_comm)
+                num_contracts = int(allocation_amt / (contract_cost + est_fee))
+                if num_contracts < 1: continue
+                
+                entry_fees = num_contracts * est_fee
+                actual_invested = (num_contracts * contract_cost) + entry_fees
+
+                entry_et = entry_ts.tz_convert(config.TZ_NY)
+                is_morning = entry_et.time() < MORNING_CUTOFF_ET
+                time_limit = MORNING_EXIT_MINUTES if is_morning else AFTERNOON_EXIT_MINUTES
+                
+                raw_exit, actual_exit_time, reason = manage_trade_exit(
+                    price_lookup_con, ticker, raw_entry, entry_ts, time_limit, 
+                    stop_loss_pct, take_profit_pct, be_pct, slippage
+                )
+                
+                if raw_exit:
+                    eff_exit = raw_exit - slippage
+                    exit_fees = calculate_fees(ticker, num_contracts, fee_model, manual_comm) * num_contracts
+                    gross_proceeds = num_contracts * 100 * eff_exit
+                    net_pnl = (gross_proceeds - exit_fees) - actual_invested
+                    pct_return = net_pnl / actual_invested
+                    
+                    pst_entry = convert_to_pst(actual_entry_time)
+                    pst_exit = convert_to_pst(actual_exit_time)
+                    duration_str = format_duration(actual_entry_time, actual_exit_time)
+                    duration_mins = (actual_exit_time - actual_entry_time).total_seconds() / 60
+                    
+                    daily_candidates.append({
+                        'entry_time': pst_entry, 'exit_time': pst_exit,
+                        'entry_timestamp': entry_ts, 'ticker': ticker, 'type': trade_type,
+                        'signal_rank': signal_rank_counter, 'duration_str': duration_str, 'duration_mins': duration_mins,
+                        'reason': reason, 'entry_px': round(eff_entry, 2), 'exit_px': round(eff_exit, 2),
+                        'return_pct': round(pct_return * 100, 2), 'pnl': net_pnl, 'position_size': actual_invested
+                    })
+            except Exception: continue
+        
+        if not daily_candidates: continue
+        selected_trade = None
+        if selection_mode == 'FIRST':
+            daily_candidates.sort(key=lambda x: x['entry_timestamp'])
+            selected_trade = daily_candidates[0]
+        elif selection_mode == 'BEST':
+            daily_candidates.sort(key=lambda x: x['pnl'], reverse=True)
+            selected_trade = daily_candidates[0]
+            
+        if selected_trade:
+            start_bal_trade = balance
+            balance += selected_trade['pnl']
+            selected_trade['start_balance'] = round(start_bal_trade, 2)
+            selected_trade['end_balance'] = round(balance, 2)
+            selected_trade['balance'] = round(balance, 2)
+            selected_trade['pnl'] = round(selected_trade['pnl'], 2)
+            del selected_trade['entry_timestamp']
+            trades.append(selected_trade)
+
+    price_lookup_con.close()
+    
+    if not trades: return pd.DataFrame()
+    results = pd.DataFrame(trades)
+    
+    # --- PHASE 3: WRITE RESULTS ---
+    persist_to_database(results, {'run_id': run_id, 'mode': strategy_mode})
+    
+    if archive_report:
+        try:
+            report_dir = ROOT_DIR / "reports"
+            report_dir.mkdir(exist_ok=True)
+            filename = f"Backtest_{strategy_mode}_{selection_mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            results.to_csv(report_dir / filename, index=False)
+        except: pass
+
+    return results
