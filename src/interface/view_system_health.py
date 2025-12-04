@@ -13,6 +13,14 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 from src.utils import config
 
+# --- NEON CONSOLE STYLING ---
+# Force "Pitch Black" background to override the grey Bootstrap theme
+CARD_STYLE = {
+    "backgroundColor": "#000000", 
+    "border": "1px solid #333",
+    "color": "white"
+}
+
 def get_db_status():
     """Checks connection to the Vault."""
     start = time.time()
@@ -38,10 +46,8 @@ def get_api_status():
 def get_disk_status():
     """Checks storage space in the correct Data Directory (Environment Aware)."""
     try:
-        # SMART FIX: Use the config path, not a hardcoded Docker path
         target_path = config.DATA_DIR if config.DATA_DIR.exists() else config.PROJECT_ROOT
         total, used, free = shutil.disk_usage(str(target_path))
-        
         free_gb = free / (2**30)
         pct = (used / total) * 100
         return f"{free_gb:.1f} GB Free", pct
@@ -56,11 +62,8 @@ def render():
     
     # 2. Read Project Documentation (Mission Log)
     readme_content = "### 🛑 Mission Log Not Found\nEnsure `readme.md` is in the project root."
-    # Check for lowercase 'readme.md' as seen in your file structure
     readme_path = config.PROJECT_ROOT / "readme.md"
-    
     if not readme_path.exists():
-        # Fallback to uppercase if lowercase missing
         readme_path = config.PROJECT_ROOT / "README.md"
         
     if readme_path.exists():
@@ -93,7 +96,7 @@ def render():
                         html.Br(),
                         html.Small(f"Path: {config.DB_FILE.name}", className="text-muted", style={"fontSize": "10px"})
                     ])
-                ], className="mb-3 bg-dark border-secondary"),
+                ], className="mb-3", style=CARD_STYLE), # <--- APPLIED BLACK STYLE
                 
                 dbc.Card([
                     dbc.CardBody([
@@ -103,7 +106,7 @@ def render():
                         ]),
                         html.Small(f"Latency: {net_msg}", className="text-muted")
                     ])
-                ], className="mb-3 bg-dark border-secondary"),
+                ], className="mb-3", style=CARD_STYLE), # <--- APPLIED BLACK STYLE
 
                 dbc.Card([
                     dbc.CardBody([
@@ -111,7 +114,7 @@ def render():
                         html.P(disk_msg, className="text-white mb-1"),
                         dbc.Progress(value=disk_pct, color="success" if disk_pct < 80 else "danger", className="mb-0", style={"height": "5px"}),
                     ])
-                ], className="mb-3 bg-dark border-secondary"),
+                ], className="mb-3", style=CARD_STYLE), # <--- APPLIED BLACK STYLE
                 
                 html.Div("Diagnostics: " + time.strftime("%H:%M:%S UTC"), className="text-muted mt-2")
 
@@ -128,7 +131,7 @@ def render():
                             style={"fontSize": "14px", "lineHeight": "1.6"}
                         )
                     ])
-                ], className="bg-dark border-secondary", style={"maxHeight": "80vh", "overflowY": "auto"})
+                ], className="mb-3", style={**CARD_STYLE, "maxHeight": "80vh", "overflowY": "auto"}) # <--- APPLIED BLACK STYLE
             ], width=12, lg=8)
         ])
     ])
