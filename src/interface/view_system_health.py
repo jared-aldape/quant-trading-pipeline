@@ -1,11 +1,9 @@
 import dash
 from dash import dcc, html
 import dash_bootstrap_components as dbc
-from dash.dependencies import Input, Output
 import time
 import requests
 import duckdb
-import psutil
 import shutil
 from pathlib import Path
 import sys
@@ -25,7 +23,7 @@ def get_db_status():
         latency = (time.time() - start) * 1000
         return True, f"{latency:.1f}ms"
     except Exception as e:
-        return False, str(e)
+        return False, "ERR"
 
 def get_api_status():
     """Checks latency to Yahoo Finance."""
@@ -38,15 +36,17 @@ def get_api_status():
         return False, "TIMEOUT"
 
 def get_disk_status():
-    """Checks storage space in the correct Data Directory."""
-    # FIXED: Use dynamic path from config instead of hardcoded '/app/data'
+    """Checks storage space in the correct Data Directory (Environment Aware)."""
     try:
-        total, used, free = shutil.disk_usage(str(config.DATA_DIR))
+        # SMART FIX: Use the config path, not a hardcoded Docker path
+        target_path = config.DATA_DIR if config.DATA_DIR.exists() else config.PROJECT_ROOT
+        total, used, free = shutil.disk_usage(str(target_path))
+        
         free_gb = free / (2**30)
         pct = (used / total) * 100
         return f"{free_gb:.1f} GB Free", pct
     except Exception as e:
-        return "Path Error", 0
+        return f"Path Error: {e}", 0
 
 def render():
     # 1. Run Diagnostics
@@ -54,57 +54,81 @@ def render():
     net_ok, net_msg = get_api_status()
     disk_msg, disk_pct = get_disk_status()
     
-    # 2. Styles
-    card_style = {"border": "1px solid #333", "backgroundColor": "#000"}
+    # 2. Read Project Documentation (Mission Log)
+    readme_content = "### 🛑 Mission Log Not Found\nEnsure `readme.md` is in the project root."
+    # Check for lowercase 'readme.md' as seen in your file structure
+    readme_path = config.PROJECT_ROOT / "readme.md"
     
+    if not readme_path.exists():
+        # Fallback to uppercase if lowercase missing
+        readme_path = config.PROJECT_ROOT / "README.md"
+        
+    if readme_path.exists():
+        try:
+            with open(readme_path, "r", encoding="utf-8") as f:
+                readme_content = f.read()
+        except Exception as e:
+            readme_content = f"### ⚠️ Error Reading Log\n{e}"
+
+    # 3. Status Badge Helper
     def status_badge(is_ok):
         color = "#00ff41" if is_ok else "#ff3333"
         text = "ONLINE" if is_ok else "OFFLINE"
         return html.Span(text, style={"color": color, "fontWeight": "bold", "float": "right"})
 
+    # 4. Layout
     return html.Div([
-        html.H2("🏥 SYSTEM HEALTH MONITOR", className="text-white mb-4"),
-        
         dbc.Row([
-            # DATABASE CARD
-            dbc.Col(dbc.Card([
-                dbc.CardBody([
-                    html.H4("The Vault (DuckDB)", className="card-title text-info"),
-                    html.Hr(),
-                    html.P([
-                        "Status: ", status_badge(db_ok),
+            # --- LEFT COLUMN: METRICS (Tactical Status) ---
+            dbc.Col([
+                html.H2("🏥 SYSTEM HEALTH", className="text-white mb-4"),
+                
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H5("The Vault (DB)", className="text-info"),
+                        html.Div([
+                            html.Span("DuckDB Status: "), status_badge(db_ok)
+                        ]),
+                        html.Small(f"Latency: {db_msg}", className="text-muted"),
                         html.Br(),
-                        f"Latency: {db_msg}",
-                        html.Br(),
-                        f"Path: {config.DB_FILE}"
-                    ], className="text-white")
-                ])
-            ], style=card_style), width=4),
+                        html.Small(f"Path: {config.DB_FILE.name}", className="text-muted", style={"fontSize": "10px"})
+                    ])
+                ], className="mb-3 bg-dark border-secondary"),
+                
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H5("The Glass (Feed)", className="text-info"),
+                        html.Div([
+                            html.Span("Data Feed: "), status_badge(net_ok)
+                        ]),
+                        html.Small(f"Latency: {net_msg}", className="text-muted")
+                    ])
+                ], className="mb-3 bg-dark border-secondary"),
 
-            # NETWORK CARD
-            dbc.Col(dbc.Card([
-                dbc.CardBody([
-                    html.H4("The Glass (Network)", className="card-title text-info"),
-                    html.Hr(),
-                    html.P([
-                        "Yahoo Feed: ", status_badge(net_ok),
-                        html.Br(),
-                        f"Latency: {net_msg}",
-                    ], className="text-white")
-                ])
-            ], style=card_style), width=4),
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H5("Storage (Node)", className="text-info"),
+                        html.P(disk_msg, className="text-white mb-1"),
+                        dbc.Progress(value=disk_pct, color="success" if disk_pct < 80 else "danger", className="mb-0", style={"height": "5px"}),
+                    ])
+                ], className="mb-3 bg-dark border-secondary"),
+                
+                html.Div("Diagnostics: " + time.strftime("%H:%M:%S UTC"), className="text-muted mt-2")
 
-            # STORAGE CARD
-            dbc.Col(dbc.Card([
-                dbc.CardBody([
-                    html.H4("System Storage", className="card-title text-info"),
-                    html.Hr(),
-                    html.P(disk_msg, className="text-white mb-2"),
-                    dbc.Progress(value=disk_pct, color="success" if disk_pct < 80 else "danger", className="mb-2"),
-                ])
-            ], style=card_style), width=4),
-        ]),
-        
-        html.Hr(className="my-4"),
-        html.Div("Diagnostics run at: " + time.strftime("%Y-%m-%d %H:%M:%S UTC"), className="text-muted")
+            ], width=12, lg=4),
+
+            # --- RIGHT COLUMN: MISSION LOG (Readme) ---
+            dbc.Col([
+                html.H2("📜 MISSION LOG", className="text-white mb-4"),
+                dbc.Card([
+                    dbc.CardBody([
+                        dcc.Markdown(
+                            readme_content, 
+                            className="text-white",
+                            style={"fontSize": "14px", "lineHeight": "1.6"}
+                        )
+                    ])
+                ], className="bg-dark border-secondary", style={"maxHeight": "80vh", "overflowY": "auto"})
+            ], width=12, lg=8)
+        ])
     ])

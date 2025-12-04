@@ -13,24 +13,29 @@ sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
 
-# IMPORT NEW "FUNCTIONAL" MODULE NAMES
+# IMPORT VIEWS
 from src.interface import (
-    view_live,      # Was view_simulator
-    view_practice,  # Was view_training_gym
-    view_backtest,  # Was view_backtester
-    view_audit,     # Was view_signal_replay
-    view_stats,     # Was view_forensics
-    view_predict,   # Was view_forecast
-    view_growth,    # Was view_capital
-    view_system_health # <--- NEW IMPORT
+    view_live,      
+    view_practice,  
+    view_backtest,  
+    view_audit,     
+    view_stats,     
+    view_predict,   
+    view_growth,    
+    view_system_health 
 )
 
-# Initialize App with Cyborg Theme
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG], suppress_callback_exceptions=True)
+# Initialize App with Cyborg Theme AND Proper Browser Title
+app = dash.Dash(
+    __name__, 
+    external_stylesheets=[dbc.themes.CYBORG], 
+    suppress_callback_exceptions=True,
+    title="Quant OS v3.1" # <--- FIXED: Browser Tab Title
+)
 server = app.server
 
 # ==============================================================================
-# 2. LAYOUT: CHRONOLOGICAL MENU (System -> Past -> Present -> Future)
+# 2. LAYOUT: CHRONOLOGICAL MENU
 # ==============================================================================
 app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
@@ -49,19 +54,19 @@ app.layout = html.Div([
             html.Hr(),
             
             dbc.Nav([
-                # 0. SYSTEM (The Pulse)
+                # 0. SYSTEM
                 html.Small("SYSTEM STATUS", className="text-muted mt-2 mb-1 fw-bold"),
-                dbc.NavLink("Health Monitor", href="/health", active="exact"), # Default Home
+                dbc.NavLink("Health Monitor", href="/health", active="exact"),
                 
                 html.Hr(className="my-2", style={'opacity': '0.3'}),
 
-                # 1. PRESENT (The Now)
+                # 1. PRESENT
                 html.Small("PRESENT (EXECUTION)", className="text-muted mt-2 mb-1 fw-bold"),
                 dbc.NavLink("Live Trading", href="/live", active="exact"),
                 
                 html.Hr(className="my-2", style={'opacity': '0.3'}),
 
-                # 2. PAST (The Analysis)
+                # 2. PAST
                 html.Small("PAST (ANALYSIS)", className="text-muted mt-2 mb-1 fw-bold"),
                 dbc.NavLink("Backtest Engine", href="/backtest", active="exact"),
                 dbc.NavLink("Practice Mode", href="/practice", active="exact"),
@@ -70,7 +75,7 @@ app.layout = html.Div([
 
                 html.Hr(className="my-2", style={'opacity': '0.3'}),
 
-                # 3. FUTURE (The Projection)
+                # 3. FUTURE
                 html.Small("FUTURE (FORECAST)", className="text-muted mt-2 mb-1 fw-bold"),
                 dbc.NavLink("Predictive Analysis", href="/predict", active="exact"),
                 dbc.NavLink("Growth Calculator", href="/growth", active="exact"),
@@ -91,43 +96,43 @@ app.layout = html.Div([
 ])
 
 # ==============================================================================
-# 3. ROUTING LOGIC
+# 3. ROUTING & INTERACTION LOGIC
 # ==============================================================================
 
+# COMBINED CALLBACK: Handles Menu Toggle AND Auto-Close on Navigation
 @app.callback(
     Output("offcanvas", "is_open"),
-    Input("open-offcanvas", "n_clicks"),
+    [Input("open-offcanvas", "n_clicks"), Input("url", "pathname")],
     [State("offcanvas", "is_open")],
 )
-def toggle_offcanvas(n1, is_open):
-    if n1: return not is_open
+def manage_sidebar(n_clicks, pathname, is_open):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return is_open
+    
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    # If Button Clicked -> Toggle Menu
+    if trigger_id == 'open-offcanvas':
+        return not is_open
+    
+    # If URL Changed (Navigation) -> Close Menu
+    if trigger_id == 'url':
+        return False
+        
     return is_open
 
 @app.callback(Output('page-content', 'children'), [Input('url', 'pathname')])
 def display_page(pathname):
-    # SYSTEM (Default Landing)
     if pathname == '/health' or pathname == '/': return view_system_health.render()
-    
-    # PRESENT
     elif pathname == '/live': return view_live.render()
-    
-    # PAST
     elif pathname == '/backtest': return view_backtest.render()
     elif pathname == '/practice': return view_practice.render()
     elif pathname == '/audit': return view_audit.render()
     elif pathname == '/stats': return view_stats.render()
-    
-    # FUTURE
     elif pathname == '/predict': return view_predict.render()
     elif pathname == '/growth': return view_growth.render()
-    
-    # Fallback to Health Monitor
     else: return view_system_health.render()
 
 if __name__ == '__main__':
-    # ---------------------------------------------------------
-    # DOCKER NETWORKING FIX
-    # ---------------------------------------------------------
-    # host='0.0.0.0' exposes the server to the outside world (Host PC).
-    # Without this, Docker keeps the port locked to internal localhost only.
     app.run(debug=True, host='0.0.0.0', port=8050)
