@@ -1,6 +1,6 @@
 import sys
 import dash
-from dash import dcc, html, callback, Input, Output, State
+from dash import dcc, html, dash_table, callback, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
@@ -61,7 +61,6 @@ def fetch_backtest_distribution():
         wins = df[df['pnl'] > 0]
         losses = df[df['pnl'] <= 0]
         
-        # NOTE: Data is already in percent (e.g., 50.0 for 50%), so no *100 needed here
         stats = {
             'count': len(df),
             'win_rate': (len(wins) / len(df)) * 100,
@@ -76,7 +75,6 @@ def run_monte_carlo(start_bal, risk_pct, sim_days, num_sims, return_pool):
     if return_pool is None or len(return_pool) == 0: return np.zeros((num_sims, sim_days))
     sim_results = []
     
-    # Convert pool from 50.0 to 0.50 for calculation
     decimal_pool = return_pool / 100.0
     
     for _ in range(num_sims):
@@ -88,10 +86,7 @@ def run_monte_carlo(start_bal, risk_pct, sim_days, num_sims, return_pool):
             bet_size = balance * (float(risk_pct) / 100.0)
             pnl = bet_size * ret
             balance += pnl
-            
-            # Floor at 0.01 to prevent Log Scale Errors (Log(0) = -inf)
             if balance < 0.01: balance = 0.01
-            
             curve.append(balance)
         sim_results.append(curve)
     return np.array(sim_results)
@@ -107,8 +102,8 @@ def render():
         # --- TITLE ---
         dbc.Row([
             dbc.Col([
-                html.H2("CAPITAL LAB", className="display-6 fw-bold text-white"),
-                html.P("Comparing Strategic Reality (Monte Carlo) vs. The Silver Arrow (Goal)", className="lead", style={'color': '#AAA'}),
+                html.H2("CAPITAL FORECAST", className="display-6 fw-bold text-white"),
+                html.P("Strategic Reality (Monte Carlo) vs. The Silver Arrow (Goal)", className="lead", style={'color': '#AAA'}),
                 html.Hr(style={'borderColor': '#444'})
             ], width=12)
         ]),
@@ -179,7 +174,7 @@ def render():
             ], width=12, md=9)
         ]),
 
-        # --- FOOTER: OUTCOMES ---
+        # --- OUTCOMES ---
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -205,6 +200,53 @@ def render():
                     ], style={'backgroundColor': '#131722'})
                 ], className="mt-4 shadow", style={'border': '1px solid #444'})
             ], width=12)
+        ]),
+
+        # --- NEW: SPECULATIVE LEDGER ---
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("📜 SPECULATIVE LEDGER (Daily Median Variance)", className="fw-bold", style={'backgroundColor': '#1E222D', 'color': '#AAA', 'borderBottom': '1px solid #444'}),
+                    dbc.CardBody([
+                        dash_table.DataTable(
+                            id='cap-ledger',
+                            columns=[
+                                {"name": "Business Day", "id": "date"},
+                                {"name": "Silver Arrow Target", "id": "target"},
+                                {"name": "Median Reality", "id": "reality"},
+                                {"name": "Variance ($)", "id": "variance"},
+                                {"name": "Variance (%)", "id": "pct_var"},
+                            ],
+                            data=[],
+                            style_header={
+                                'backgroundColor': '#1E222D',
+                                'color': 'white',
+                                'fontWeight': 'bold',
+                                'border': '1px solid #333'
+                            },
+                            style_cell={
+                                'backgroundColor': '#000000',
+                                'color': '#DDD',
+                                'border': '1px solid #333',
+                                'fontFamily': 'monospace',
+                                'textAlign': 'right'
+                            },
+                            style_data_conditional=[
+                                {
+                                    'if': {'filter_query': '{variance} > 0', 'column_id': 'variance'},
+                                    'color': '#00ff41', 'fontWeight': 'bold'
+                                },
+                                {
+                                    'if': {'filter_query': '{variance} < 0', 'column_id': 'variance'},
+                                    'color': '#ff3860', 'fontWeight': 'bold'
+                                },
+                            ],
+                            page_size=15,
+                            style_as_list_view=True
+                        )
+                    ], style={'backgroundColor': '#000000'})
+                ], className="mt-4 shadow mb-5", style={'border': '1px solid #444'})
+            ], width=12)
         ])
 
     ], fluid=True, style={'backgroundColor': '#000000', 'minHeight': '100vh', 'padding': '20px'})
@@ -217,7 +259,8 @@ def render():
      Output('cap-dna-status', 'children'), Output('cap-dna-win', 'children'), Output('cap-dna-count', 'children'),
      Output('cap-dna-awin', 'children'), Output('cap-dna-aloss', 'children'),
      Output('cap-out-target', 'children'), Output('cap-out-median', 'children'),
-     Output('cap-out-prob', 'children'), Output('cap-out-ruin', 'children')],
+     Output('cap-out-prob', 'children'), Output('cap-out-ruin', 'children'),
+     Output('cap-ledger', 'data')],
     [Input('cap-run-btn', 'n_clicks')],
     [State('cap-start', 'value'), State('cap-goal', 'value'), State('cap-risk', 'value'),
      State('cap-dates', 'start_date'), State('cap-dates', 'end_date')]
@@ -237,32 +280,37 @@ def update_capital_lab(n_clicks, start_bal, goal_pct, risk_pct, start_date, end_
         margin=dict(l=0, r=0, t=50, b=0)
     )
     
-    if not start_date or not end_date: return empty_fig, "Select Dates", "--", "--", "--", "--", "$0", "$0", "0%", "0%"
+    if not start_date or not end_date: 
+        return empty_fig, "Select Dates", "--", "--", "--", "--", "$0", "$0", "0%", "0%", []
 
     stats, msg = fetch_backtest_distribution()
     if not stats:
         empty_fig.update_layout(
             annotations=[dict(text=f"DATA LINK SEVERED: {msg}", x=0.5, y=0.5, showarrow=False, font=dict(color="#ff3333", size=16))]
         )
-        return empty_fig, msg, "--", "--", "--", "--", "$0", "$0", "0%", "0%"
+        return empty_fig, msg, "--", "--", "--", "--", "$0", "$0", "0%", "0%", []
 
     business_days = get_business_days(start_date, end_date)
-    if len(business_days) < 2: return empty_fig, "Date Range Too Short", "--", "--", "--", "--", "$0", "$0", "0%", "0%"
+    if len(business_days) < 2: 
+        return empty_fig, "Date Range Too Short", "--", "--", "--", "--", "$0", "$0", "0%", "0%", []
         
     silver_arrow_df = calculate_silver_arrow(start_bal, goal_pct, business_days)
     sim_paths = run_monte_carlo(start_bal, risk_pct, len(business_days), 1000, stats['pool'])
 
     final_values = sim_paths[:, -1]
     median_outcome = np.median(final_values)
+    median_path = np.median(sim_paths, axis=0)
+    
     target_outcome = silver_arrow_df['TargetBalance'].iloc[-1]
     prob_success = (np.sum(final_values >= target_outcome) / 1000.0) * 100
     prob_ruin = (np.sum(final_values < (start_bal * 0.1)) / 1000.0) * 100
 
+    # --- CHART GENERATION ---
     fig = go.Figure()
     for i in range(min(50, len(sim_paths))):
         fig.add_trace(go.Scatter(x=silver_arrow_df['Date'], y=sim_paths[i], mode='lines', line=dict(width=1, color='rgba(0, 210, 255, 0.05)'), hoverinfo='skip', showlegend=False))
     
-    fig.add_trace(go.Scatter(x=silver_arrow_df['Date'], y=np.median(sim_paths, axis=0), mode='lines', name='Median Reality', line=dict(color='#00d2ff', width=3)))
+    fig.add_trace(go.Scatter(x=silver_arrow_df['Date'], y=median_path, mode='lines', name='Median Reality', line=dict(color='#00d2ff', width=3)))
     fig.add_trace(go.Scatter(x=silver_arrow_df['Date'], y=silver_arrow_df['TargetBalance'], mode='lines', name=f'Silver Arrow ({goal_pct}%)', line=dict(color='#f39c12', width=3, dash='dot')))
 
     fig.update_layout(
@@ -271,17 +319,34 @@ def update_capital_lab(n_clicks, start_bal, goal_pct, risk_pct, start_date, end_
         margin=dict(l=50, r=50, t=50, b=50),
         yaxis_title="Account Balance ($) - Log Scale",
         font=dict(color="white"),
-        yaxis=dict(gridcolor='#333', showgrid=True, type="log"), # <--- LOG SCALE ENABLED
+        yaxis=dict(gridcolor='#333', showgrid=True, type="log"),
         xaxis=dict(gridcolor='#333', showgrid=True),
         legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
     )
 
+    # --- LEDGER GENERATION ---
+    ledger_data = []
+    for i, date_obj in enumerate(silver_arrow_df['Date']):
+        tgt = silver_arrow_df['TargetBalance'].iloc[i]
+        reality = median_path[i]
+        diff = reality - tgt
+        pct_diff = (diff / tgt) * 100 if tgt != 0 else 0
+        
+        ledger_data.append({
+            'date': date_obj.strftime('%Y-%m-%d'),
+            'target': f"${tgt:,.2f}",
+            'reality': f"${reality:,.2f}",
+            'variance': round(diff, 2), # Keep raw number for conditional formatting check
+            'pct_var': f"{pct_diff:+.2f}%"
+        })
+
     return (fig, "Connected to Vault", 
             f"{stats['win_rate']:.1f}%", 
             f"{stats['count']}", 
-            f"{stats['avg_win']:.1f}%",  # Fix 2: Removed extra *100
-            f"{stats['avg_loss']:.1f}%", # Fix 2: Removed extra *100
+            f"{stats['avg_win']:.1f}%", 
+            f"{stats['avg_loss']:.1f}%", 
             f"${target_outcome:,.0f}", 
             f"${median_outcome:,.0f}", 
             f"{prob_success:.1f}%", 
-            f"{prob_ruin:.1f}%")
+            f"{prob_ruin:.1f}%",
+            ledger_data)

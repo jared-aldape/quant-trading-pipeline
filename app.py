@@ -2,12 +2,8 @@ import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
-import yfinance as yf
-import pandas as pd
-import duckdb
 import pathlib
 import sys
-from datetime import datetime
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
@@ -16,22 +12,25 @@ ROOT_DIR = pathlib.Path(__file__).parent
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
+
+# IMPORT NEW "FUNCTIONAL" MODULE NAMES
 from src.interface import (
-    view_backtester, 
-    view_simulator, 
-    view_forensics, 
-    view_forecast,
-    view_capital,
-    view_signal_replay,
-    view_training_gym
+    view_live,      # Was view_simulator
+    view_practice,  # Was view_training_gym
+    view_backtest,  # Was view_backtester
+    view_audit,     # Was view_signal_replay
+    view_stats,     # Was view_forensics
+    view_predict,   # Was view_forecast
+    view_growth,    # Was view_capital
+    view_system_health # <--- NEW IMPORT
 )
 
-# Initialize App with Cyborg Theme (High Contrast Dark Mode)
+# Initialize App with Cyborg Theme
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG], suppress_callback_exceptions=True)
 server = app.server
 
 # ==============================================================================
-# 2. LAYOUT: HAMBURGER MENU & CONTENT
+# 2. LAYOUT: CHRONOLOGICAL MENU (System -> Past -> Present -> Future)
 # ==============================================================================
 app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
@@ -43,30 +42,45 @@ app.layout = html.Div([
         style={"zIndex": "1050"}
     ),
 
-    # SIDEBAR MENU (Renamed for Simplicity)
+    # SIDEBAR MENU
     dbc.Offcanvas(
         html.Div([
-            html.H4("QUANT OS v3.0", className="text-white mb-4"),
+            html.H4("QUANT OS v3.1", className="text-white mb-4", style={'letterSpacing': '2px'}),
             html.Hr(),
+            
             dbc.Nav([
-                # Live Operations
-                dbc.NavLink("Live Trading", href="/", active="exact"),           # Was: Live Options Simulator
-                dbc.NavLink("Practice Mode", href="/gym", active="exact"),       # Was: Training Gym
+                # 0. SYSTEM (The Pulse)
+                html.Small("SYSTEM STATUS", className="text-muted mt-2 mb-1 fw-bold"),
+                dbc.NavLink("Health Monitor", href="/health", active="exact"), # Default Home
                 
-                # Analysis Suite
-                dbc.NavLink("Historical Test", href="/backtester", active="exact"), # Was: Backtester
-                dbc.NavLink("Trade Auditor", href="/replay", active="exact"),       # Was: Signal Replay
-                dbc.NavLink("Performance Stats", href="/forensics", active="exact"),# Was: Forensics Lab
+                html.Hr(className="my-2", style={'opacity': '0.3'}),
+
+                # 1. PRESENT (The Now)
+                html.Small("PRESENT (EXECUTION)", className="text-muted mt-2 mb-1 fw-bold"),
+                dbc.NavLink("Live Trading", href="/live", active="exact"),
                 
-                # Projections
-                dbc.NavLink("Intraday Targets", href="/forecast", active="exact"),  # Was: Prophet
-                dbc.NavLink("Growth Projection", href="/capital", active="exact"),  # Was: Capital Lab
+                html.Hr(className="my-2", style={'opacity': '0.3'}),
+
+                # 2. PAST (The Analysis)
+                html.Small("PAST (ANALYSIS)", className="text-muted mt-2 mb-1 fw-bold"),
+                dbc.NavLink("Backtest Engine", href="/backtest", active="exact"),
+                dbc.NavLink("Practice Mode", href="/practice", active="exact"),
+                dbc.NavLink("Trade Auditor", href="/audit", active="exact"),
+                dbc.NavLink("Performance Stats", href="/stats", active="exact"),
+
+                html.Hr(className="my-2", style={'opacity': '0.3'}),
+
+                # 3. FUTURE (The Projection)
+                html.Small("FUTURE (FORECAST)", className="text-muted mt-2 mb-1 fw-bold"),
+                dbc.NavLink("Predictive Analysis", href="/predict", active="exact"),
+                dbc.NavLink("Growth Calculator", href="/growth", active="exact"),
+                
             ], vertical=True, pills=True),
         ]),
         id="offcanvas",
-        title="Menu",
+        title="Tactical Command",
         is_open=False,
-        style={"backgroundColor": "#111", "color": "white"}
+        style={"backgroundColor": "#0a0a0a", "color": "white", "borderRight": "1px solid #333"}
     ),
     
     # MAIN CONTENT AREA
@@ -77,7 +91,7 @@ app.layout = html.Div([
 ])
 
 # ==============================================================================
-# 3. CALLBACKS
+# 3. ROUTING LOGIC
 # ==============================================================================
 
 @app.callback(
@@ -91,15 +105,29 @@ def toggle_offcanvas(n1, is_open):
 
 @app.callback(Output('page-content', 'children'), [Input('url', 'pathname')])
 def display_page(pathname):
-    # Routing logic remains consistent with file names to ensure stability
-    if pathname == '/backtester': return view_backtester.render()
-    elif pathname == '/replay': return view_signal_replay.render()
-    elif pathname == '/gym': return view_training_gym.render()
-    elif pathname == '/forensics': return view_forensics.render()
-    elif pathname == '/forecast': return view_forecast.render()
-    elif pathname == '/capital': return view_capital.render()
-    # Default Route -> Live Trading (Simulator)
-    else: return view_simulator.render()
+    # SYSTEM (Default Landing)
+    if pathname == '/health' or pathname == '/': return view_system_health.render()
+    
+    # PRESENT
+    elif pathname == '/live': return view_live.render()
+    
+    # PAST
+    elif pathname == '/backtest': return view_backtest.render()
+    elif pathname == '/practice': return view_practice.render()
+    elif pathname == '/audit': return view_audit.render()
+    elif pathname == '/stats': return view_stats.render()
+    
+    # FUTURE
+    elif pathname == '/predict': return view_predict.render()
+    elif pathname == '/growth': return view_growth.render()
+    
+    # Fallback to Health Monitor
+    else: return view_system_health.render()
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8050)
+    # ---------------------------------------------------------
+    # DOCKER NETWORKING FIX
+    # ---------------------------------------------------------
+    # host='0.0.0.0' exposes the server to the outside world (Host PC).
+    # Without this, Docker keeps the port locked to internal localhost only.
+    app.run(debug=True, host='0.0.0.0', port=8050)

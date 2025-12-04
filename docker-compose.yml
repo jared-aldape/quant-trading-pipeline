@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  # SERVICE 1: THE GLASS (User Interface)
+  quant-ui:
+    build: .
+    container_name: quant_os_glass
+    restart: unless-stopped
+    ports:
+      - "8050:8050"
+    volumes:
+      - ./data:/app/data  # Persistence for The Vault
+      - ./logs:/app/logs  # Persistence for Logs
+    environment:
+      - TZ=America/Los_Angeles # Force Local Time for UI Display
+    command: python app.py
+
+  # SERVICE 2: THE SENTINEL (Automation Daemon)
+  quant-sentinel:
+    build: .
+    container_name: quant_os_sentinel
+    restart: unless-stopped
+    depends_on:
+      - quant-ui
+    volumes:
+      - ./data:/app/data  # Share The Vault with UI
+      - ./logs:/app/logs
+    environment:
+      - TZ=America/Los_Angeles # Force Local Time for Alerts
+    command: python src/core/sentinel.py
