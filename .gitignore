@@ -6,8 +6,6 @@ __pycache__/
 .DS_Store
 .env
 .vscode/
-
-# --- Keep these! ---
 !market_data/.gitkeep
 !logs/.gitkeep
 /data
@@ -15,3 +13,6 @@ __pycache__/
 /data
 data/quant_strategy.duckdb
 /data
+*.pem
+
+# --- Keep these! ---
