@@ -14,3 +14,4 @@ __pycache__/
 *.duckdb
 /data
 data/quant_strategy.duckdb
+/data
