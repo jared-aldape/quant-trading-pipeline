@@ -3,10 +3,12 @@ import duckdb
 import pandas as pd
 import numpy as np
 import pickle
+import json  # <--- CRITICAL FIX: Required for ingest_live_session
 from pathlib import Path
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score
+from datetime import datetime
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
