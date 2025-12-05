@@ -209,10 +209,6 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
     # 3. ASK THE ORACLE
     vix_val, vix_rsi = engine_simulator.get_vix_metrics()
     prob_call = engine_ml.predict_success("CALL", vix_val, vix_rsi)
-    
-    # --- [BUG FIX APPLIED HERE] ---
-    # OLD: prob_put = engine_ml.predict_success("PUT", "PUT", vix_val, vix_rsi)
-    # NEW: Removed redundant argument
     prob_put = engine_ml.predict_success("PUT", vix_val, vix_rsi)
     
     oracle_disp = [
@@ -291,6 +287,7 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
         if not is_closed:
              ledger_entries.append({
                 'time': entry_time_str,
+                'entry_time': active_trade['entry_time'], # <--- FIX: Added Raw Key for Comparison
                 'ticker': f"{active_trade['type']} {active_trade['ticker']}",
                 'action': "BUY",
                 'qty': active_trade['contracts'],
@@ -305,6 +302,7 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
         # Entry Leg (Historical)
         ledger_entries.append({
             'time': t['entry_time'].split(' ')[1],
+            'entry_time': t['entry_time'], # <--- FIX: Added Raw Key for Comparison
             'ticker': f"{t['type']} {t['ticker']}",
             'action': "BUY",
             'qty': t['contracts'],
@@ -333,9 +331,16 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
         rows = []
         for entry in ledger_entries:
             pnl_val = entry['pnl']
-            is_open_buy = (entry['action'] == "BUY" and active_trade and entry['entry_time'] == active_trade['entry_time'])
-            
             # P&L coloring logic
+            # FIX: Ensure 'entry_time' key exists before accessing it in the loop logic
+            # If action is CLOSE, we don't need entry_time comparison, but if it's BUY we do.
+            # We used short-circuiting logic in previous version, but let's be robust.
+            
+            is_open_buy = False
+            if entry['action'] == "BUY" and active_trade:
+                 if entry.get('entry_time') == active_trade['entry_time']:
+                     is_open_buy = True
+            
             if entry['action'] == "CLOSE":
                 pnl_color = "#00bc8c" if pnl_val >= 0 else "#e74c3c"
                 pnl_str = f"${pnl_val:.2f}"
