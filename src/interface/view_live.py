@@ -3,233 +3,243 @@ from dash import dcc, html, callback, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from datetime import datetime
+import pandas as pd
 from src.core import engine_simulator
+from src.core import engine_ml 
 
 # ==============================================================================
-# LAYOUT
+# 1. LAYOUT
 # ==============================================================================
 def render():
     return dbc.Container([
-        # HEADER & TICKER
+        # HEADER & BALANCE
         dbc.Row([
             dbc.Col([
-                html.H2("LIVE OPTIONS SIMULATOR", className="display-6 fw-bold text-white"),
-                html.H5(id="live-ticker-display", className="text-warning font-monospace")
-            ], width=8),
+                html.H2("LIVE TRADING COMMAND", className="display-6 fw-bold text-white"),
+                html.P("Real-time execution interface with Project Delta pricing & ML Oracle.", className="text-muted lead")
+            ], width=7),
             dbc.Col([
-                dbc.Button("RESET SESSION", id="btn-reset-sim", color="danger", outline=True, size="sm", className="float-end")
-            ], width=4)
-        ], className="mb-4"),
-
-        # CONSOLE: CHART + CONTROLS
-        dbc.Row([
-            # LEFT (Controls - 4/12)
-            dbc.Col([
-                # ACCOUNT STATUS
                 dbc.Card([
                     dbc.CardBody([
-                        dbc.Row([
-                            dbc.Col([html.H6("Cash", className="text-muted"), html.H3(id="sim-balance", className="text-success")], width=6),
-                            dbc.Col([html.H6("Active P&L", className="text-muted"), html.H3(id="sim-pnl", className="text-white")], width=6),
-                        ]),
+                        html.H6("ACCOUNT BALANCE", className="text-muted small mb-0"),
+                        html.H3(id='live-balance-display', className="text-success fw-bold font-monospace mb-0"),
+                        html.Small(id='live-clock', className="text-end text-info font-monospace")
                     ])
-                ], className="shadow mb-3", style={'backgroundColor': '#131722', 'border': '1px solid #444'}),
+                ], className="bg-dark border-secondary")
+            ], width=5)
+        ], className="mb-3"),
 
-                # ENTRY PANEL
-                dbc.Card([
-                    dbc.CardHeader("ENTRY COMMAND", className="fw-bold text-info", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody([
-                        dbc.Row([
-                            dbc.Col([
-                                html.Label("Size Value", className="text-white"),
-                                dbc.Input(id="sim-entry-size", type="number", value=600, className="mb-2", style={'backgroundColor': '#2A2E39', 'color': 'white', 'border': '1px solid #555'}),
-                            ], width=7),
-                            dbc.Col([
-                                html.Label("Type", className="text-white"),
-                                dcc.Dropdown(
-                                    id="sim-entry-mode",
-                                    options=[
-                                        {'label': 'USD ($)', 'value': 'AMT'},
-                                        {'label': 'Contracts (#)', 'value': 'QTY'}
-                                    ],
-                                    value='AMT',
-                                    clearable=False,
-                                    style={'color': '#000'} 
-                                )
-                            ], width=5),
-                        ]),
-                        dbc.Row([
-                            dbc.Col(dbc.Button("BUY CALL 🟢", id="btn-buy-call", color="success", className="w-100 mt-3 fw-bold"), width=6),
-                            dbc.Col(dbc.Button("BUY PUT 🔴", id="btn-buy-put", color="danger", className="w-100 mt-3 fw-bold"), width=6),
-                        ]),
-                    ], style={'backgroundColor': '#131722'})
-                ], className="shadow mb-3", style={'border': '1px solid #444'}),
-                
-                # EXIT PANEL (Scale Out)
-                dbc.Card([
-                    dbc.CardHeader("EXIT COMMAND", className="fw-bold text-warning", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody([
-                        dbc.Row([
-                            dbc.Col([
-                                html.Label("Qty to Close", className="text-white"),
-                                dbc.Input(id="sim-exit-qty", type="number", placeholder="All", className="mb-2", style={'backgroundColor': '#2A2E39', 'color': 'white', 'border': '1px solid #555'}),
-                            ], width=6),
-                            dbc.Col([
-                                html.Label("Action", className="text-white"),
-                                dbc.Button("SELL QTY", id="btn-close-qty", color="warning", outline=True, className="w-100"),
-                            ], width=6),
-                        ]),
-                        dbc.Button("CLOSE ALL (FLATTEN)", id="btn-close-all", color="danger", className="w-100 mt-3 fw-bold"),
-                        html.Div(id="sim-action-msg", className="text-white small mt-2 text-center fst-italic")
-                    ], style={'backgroundColor': '#131722'})
-                ], className="shadow mb-4", style={'border': '1px solid #444'}),
-                
-            ], width=12, md=4),
-
-            # RIGHT (Chart - 8/12)
+        # MAIN CONSOLE
+        dbc.Row([
+            # LEFT: CONTROLS & SESSION STATS
             dbc.Col([
+                # EXECUTION PANEL
                 dbc.Card([
-                    dbc.CardHeader("LIVE CANDLESTICK CHART (5m)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody(
-                        dcc.Loading(dcc.Graph(id="sim-live-chart", style={'height': '450px'}), type="cube", color="#00bc8c"),
-                        style={'backgroundColor': '#000000'} # Pitch Black Chart BG
-                    )
-                ], className="shadow mb-4", style={'border': '1px solid #444'}),
-                
-                # Ledger
-                dbc.Card([
-                    dbc.CardHeader("SESSION LEDGER", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody(html.Div(id="sim-ledger-table"), style={'backgroundColor': '#131722'})
-                ], className="shadow mb-4", style={'border': '1px solid #444'})
+                    dbc.CardHeader([
+                        html.Span("EXECUTION TERMINAL", className="fw-bold text-warning"),
+                        dbc.Button("↺ RESET SIM", id='btn-reset-sim', color="danger", size="sm", outline=True, className="float-end py-0")
+                    ], style={'backgroundColor': '#1a1a1a'}),
+                    
+                    dbc.CardBody([
+                        # PRICE CONTEXT
+                        html.H4(id='live-price-display', className="text-center text-white mb-3 font-monospace"),
+                        
+                        # ORACLE
+                        html.Div(id='oracle-display', className="text-center mb-4 font-monospace", style={'fontSize': '1.1rem'}),
 
-            ], width=12, md=8)
+                        # ORDER PARAMETERS
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label("Order Type", className="small text-muted"),
+                                dbc.Select(
+                                    id='input-order-type',
+                                    options=[
+                                        {'label': 'Market Order', 'value': 'MARKET'},
+                                        {'label': 'Limit Order', 'value': 'LIMIT'}
+                                    ],
+                                    value='MARKET',
+                                    className="mb-2 btn-sm bg-dark text-white border-secondary"
+                                )
+                            ], width=6),
+                            dbc.Col([
+                                html.Label("Quantity (Contracts)", className="small text-muted"),
+                                dbc.Input(id='input-qty', type='number', value=1, min=1, step=1, className="mb-2 bg-dark text-white border-secondary"),
+                            ], width=6),
+                        ]),
+
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label("Limit Price ($)", className="small text-muted"),
+                                dbc.Input(id='input-limit-price', type='number', placeholder="MKT", disabled=True, className="mb-3 bg-dark text-white border-secondary"),
+                            ], width=12)
+                        ]),
+
+                        # ENTRY BUTTONS
+                        dbc.Row([
+                            dbc.Col(dbc.Button("BUY CALL", id='btn-buy-call', color="success", className="w-100 fw-bold"), width=6),
+                            dbc.Col(dbc.Button("BUY PUT", id='btn-buy-put', color="danger", className="w-100 fw-bold"), width=6)
+                        ], className="mb-3"),
+
+                        html.Hr(className="border-secondary"),
+
+                        # EXIT CONTROLS
+                        html.Label("Position Management", className="small text-warning mb-2"),
+                        dbc.InputGroup([
+                            dbc.InputGroupText("Sell Qty"),
+                            dbc.Input(id='input-sell-qty', type='number', value=1, min=1, step=1),
+                            dbc.Button("CLOSE / SELL", id='btn-sell', color="warning", className="fw-bold"),
+                        ], className="mb-3"),
+                        
+                        html.Div(id='execution-feedback', className="mt-2 text-center small text-info")
+                    ])
+                ], className="shadow mb-3"),
+
+            ], width=12, lg=4),
+
+            # RIGHT: CHART & LEDGER
+            dbc.Col([
+                # CHART
+                dbc.Card([
+                    dbc.CardBody([
+                        dcc.Loading(
+                            dcc.Graph(id='live-chart', style={'height': '400px'}, config={'displayModeBar': False})
+                        )
+                    ], className="p-1", style={'backgroundColor': '#000'})
+                ], className="mb-3 shadow"),
+
+                # LEDGER
+                dbc.Card([
+                    dbc.CardHeader("TRANSACTION LEDGER", className="fw-bold text-white", style={'backgroundColor': '#1a1a1a'}),
+                    dbc.CardBody(html.Div(id='live-ledger-table', style={'maxHeight': '300px', 'overflowY': 'auto'}))
+                ], className="shadow")
+            ], width=12, lg=8)
         ]),
 
-        dcc.Interval(id="sim-heartbeat", interval=15*1000, n_intervals=0)
+        # THROTTLE: 15 seconds
+        dcc.Interval(id='live-interval', interval=15000, n_intervals=0)
 
-    ], fluid=True, style={'minHeight': '100vh', 'backgroundColor': '#000000'}) 
+    ], fluid=True)
 
 # ==============================================================================
-# CALLBACKS
+# 2. CALLBACKS
 # ==============================================================================
+
+# Enable/Disable Limit Price Input
 @callback(
-    [Output("live-ticker-display", "children"),
-     Output("sim-balance", "children"),
-     Output("sim-pnl", "children"),
-     Output("sim-ledger-table", "children"),
-     Output("sim-live-chart", "figure"), 
-     Output("sim-action-msg", "children")],
-    [Input("sim-heartbeat", "n_intervals"),
-     Input("btn-buy-call", "n_clicks"),
-     Input("btn-buy-put", "n_clicks"),
-     Input("btn-close-qty", "n_clicks"),
-     Input("btn-close-all", "n_clicks"),
-     Input("btn-reset-sim", "n_clicks")],
-    [State("sim-entry-size", "value"),
-     State("sim-entry-mode", "value"),
-     State("sim-exit-qty", "value")]
+    Output('input-limit-price', 'disabled'),
+    Input('input-order-type', 'value')
 )
-def update_simulator(n, btn_call, btn_put, btn_close_qty, btn_close_all, btn_reset, 
-                     entry_val, entry_mode, exit_qty):
-    
-    ctx = dash.callback_context
-    trigger = ctx.triggered[0]['prop_id'] if ctx.triggered else "interval"
-    msg = ""
-    
-    # --- 1. HANDLE ACTIONS ---
-    if "btn-reset-sim" in trigger:
+def toggle_limit_input(order_type):
+    return order_type != 'LIMIT'
+
+@callback(
+    [Output('live-price-display', 'children'),
+     Output('oracle-display', 'children'),
+     Output('live-chart', 'figure'),
+     Output('live-clock', 'children'),
+     Output('live-ledger-table', 'children'),
+     Output('live-balance-display', 'children'),
+     Output('execution-feedback', 'children')],
+    [Input('live-interval', 'n_intervals'),
+     Input('btn-buy-call', 'n_clicks'),
+     Input('btn-buy-put', 'n_clicks'),
+     Input('btn-sell', 'n_clicks'),
+     Input('btn-reset-sim', 'n_clicks')],
+    [State('input-qty', 'value'),
+     State('input-sell-qty', 'value'),
+     State('input-order-type', 'value'),
+     State('input-limit-price', 'value')]
+)
+def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty, order_type, limit_price):
+    ctx_id = dash.callback_context.triggered_id
+    feedback = ""
+
+    # 1. HANDLE EXECUTION
+    if ctx_id == 'btn-reset-sim':
         engine_simulator.reset_session()
-        msg = "Session Reset."
-    elif "btn-buy-call" in trigger:
-        msg = engine_simulator.execute_entry("CALL", entry_val, entry_mode)
-    elif "btn-buy-put" in trigger:
-        msg = engine_simulator.execute_entry("PUT", entry_val, entry_mode)
-    elif "btn-close-qty" in trigger:
-        if exit_qty:
-            msg = engine_simulator.execute_exit(exit_qty, "MANUAL_PARTIAL")
-        else:
-            msg = "Enter Qty to Close."
-    elif "btn-close-all" in trigger:
-        msg = engine_simulator.execute_exit(None, "MANUAL_FLATTEN")
+        feedback = "Simulation Reset Complete."
+        
+    elif ctx_id in ['btn-buy-call', 'btn-buy-put']:
+        side = "CALL" if ctx_id == 'btn-buy-call' else "PUT"
+        # Pass QTY mode to engine
+        # Note: Engine currently fills at market (Black Scholes), but we pass the qty
+        feedback = engine_simulator.execute_entry(side, size_val=qty, size_mode="QTY")
+        if order_type == 'LIMIT' and limit_price:
+            feedback += f" (Limit: ${limit_price})" 
 
-    # --- 2. LOAD STATE & DATA ---
-    state = engine_simulator.load_session()
-    chart_data = engine_simulator.get_live_chart_data(ticker="SPY", interval="5m")
+    elif ctx_id == 'btn-sell':
+        feedback = engine_simulator.execute_exit(exit_qty=sell_qty)
+
+    # 2. FETCH DATA & CONTEXT
+    price = engine_simulator.get_live_price()
+    price_disp = f"SPY: ${price:.2f}" if price else "OFFLINE"
     
-    # --- 3. UI GENERATION ---
-    live_price = engine_simulator.get_live_price("SPY", use_cache=True)
-    ticker_text = f"SPY LIVE: ${live_price:.2f}" if live_price else "MARKET OFFLINE"
-    bal_text = f"${state['balance']:,.2f}"
+    # 3. ASK THE ORACLE
+    vix_val, vix_rsi = engine_simulator.get_vix_metrics()
+    prob_call = engine_ml.predict_success("CALL", vix_val, vix_rsi)
+    prob_put = engine_ml.predict_success("PUT", vix_val, vix_rsi)
     
-    # Live P&L Calculation
-    active_pnl_display = "--"
-    if state['active_trade']:
-        t = state['active_trade']
-        if live_price:
-            T = engine_simulator.get_time_to_close()
-            curr_opt_px = engine_simulator.black_scholes(live_price, t['strike'], T, 0.045, 0.15, t['type'].lower())
-            
-            gross_val = t['contracts'] * curr_opt_px * 100
-            est_exit_fees = engine_simulator.calculate_fees(t['contracts']) 
-            unrealized_pnl = gross_val - est_exit_fees - t['cost_basis']
-            
-            color = "#00ff41" if unrealized_pnl >= 0 else "#ff3333" # Neon Green / Hot Red
-            active_pnl_display = html.Span(f"${unrealized_pnl:+.2f}", style={'color': color, 'fontWeight': 'bold', 'fontSize': '2rem'})
-        else:
-            active_pnl_display = "NO FEED"
+    oracle_disp = [
+        html.Span(f"🤖 CALL: {prob_call}%", style={'color': '#00bc8c' if prob_call > 60 else '#666', 'marginRight': '15px'}),
+        html.Span(f"PUT: {prob_put}%", style={'color': '#e74c3c' if prob_put > 60 else '#666'})
+    ]
     
-    # Chart Generation (TRADINGVIEW STYLE)
+    # 4. BUILD CHART
+    chart_df = engine_simulator.get_live_chart_data()
     fig = go.Figure()
-    if chart_data is not None and not chart_data.empty:
+    if chart_df is not None and not chart_df.empty:
         fig.add_trace(go.Candlestick(
-            x=chart_data['Datetime'], open=chart_data['Open'], 
-            high=chart_data['High'], low=chart_data['Low'], 
-            close=chart_data['Close'], name='SPY',
-            increasing_line_color='#00bc8c', decreasing_line_color='#ef5350' # Standard TV Colors
+            x=chart_df['Datetime'],
+            open=chart_df['Open'], high=chart_df['High'],
+            low=chart_df['Low'], close=chart_df['Close'],
+            increasing_line_color='#00bc8c', decreasing_line_color='#e74c3c'
         ))
-        if state['active_trade']:
-            fig.add_hline(y=state['active_trade']['underlying_at_entry'], 
-                          line_dash="dot", line_color="#ffff00", 
-                          annotation_text=f"Entry: ${state['active_trade']['underlying_at_entry']:.2f}")
-
     fig.update_layout(
-        template="plotly_dark", title=None, 
-        xaxis_rangeslider_visible=False, 
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        height=450, margin=dict(l=10, r=40, t=10, b=10),
-        font=dict(color="white"),
-        yaxis=dict(gridcolor='#333', zerolinecolor='#333'), 
-        xaxis=dict(gridcolor='#333', zerolinecolor='#333')
+        template="plotly_dark", 
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)', 
+        margin=dict(l=40, r=40, t=20, b=40), 
+        xaxis_rangeslider_visible=False,
+        uirevision='live_chart'
     )
 
-    # LEDGER TABLE
-    rows = []
-    if state['active_trade']:
-        t = state['active_trade']
-        rows.append(html.Tr([
-            html.Td("OPEN", className="text-warning fw-bold"),
-            html.Td(t['type']),
-            html.Td(f"${t['entry_px']:.2f}"),
-            html.Td(t['contracts']),
-            html.Td(active_pnl_display), 
-            html.Td("--")
-        ], style={'backgroundColor': '#1E222D'}))
+    # 5. BUILD LEDGER & BALANCE
+    session = engine_simulator.load_session()
+    trades = session.get('trades', [])
+    balance = session.get('balance', 600.0)
     
-    for t in reversed(state['trades']):
-        color = '#00ff41' if t['pnl'] >= 0 else '#ff3333'
-        rows.append(html.Tr([
-            html.Td(t['exit_time'].split(' ')[1], className="small"),
-            html.Td(t['type']),
-            html.Td(f"${t['entry_px']:.2f}"),
-            html.Td(t['contracts']),
-            html.Td(f"${t['pnl']:,.2f}", style={'color': color, 'fontWeight': 'bold'}),
-            html.Td(t['reason'], className="small fst-italic text-white-50")
-        ]))
+    balance_str = f"${balance:,.2f}"
+    
+    if not trades:
+        table_content = html.Div("No transaction records.", className="text-muted text-center italic mt-4")
+    else:
+        rows = []
+        running_bal = 600.0 # Estimate start if not tracked strictly in log, or work backwards
+        # Note: ideally ledger has balance snapshot. For now we list trades.
+        
+        for t in reversed(trades):
+            # Extract details matching the screenshot request
+            action = "BUY" if t['pnl'] == 0 else "SELL" # Simple heuristic if pnl calc happens on exit
+            if 'pnl' in t and t['pnl'] != 0: action = "CLOSE"
+            
+            pnl_val = t.get('pnl', 0)
+            pnl_color = "#00bc8c" if pnl_val >= 0 else "#e74c3c"
+            pnl_str = f"${pnl_val:.2f}" if action == "CLOSE" else "-"
+            
+            rows.append(html.Tr([
+                html.Td(t['exit_time'].split(' ')[1] if action=="CLOSE" else t['entry_time'].split(' ')[1], className="small"),
+                html.Td(f"{t['type']} {t['ticker']}", className="small fw-bold text-white"),
+                html.Td(action, className=f"small fw-bold {'text-success' if action=='BUY' else 'text-warning'}"),
+                html.Td(t['contracts'], className="small text-center"),
+                html.Td(f"${t['exit_px']:.2f}" if action=="CLOSE" else f"${t['entry_px']:.2f}", className="small text-end"),
+                html.Td(pnl_str, style={'color': pnl_color}, className="text-end fw-bold"),
+            ]))
+            
+        table_content = dbc.Table([
+            html.Thead(html.Tr([
+                html.Th("Time"), html.Th("Instrument"), html.Th("Action"), 
+                html.Th("Qty", className="text-center"), html.Th("Price", className="text-end"), html.Th("P&L", className="text-end")
+            ]))
+        ] + [html.Tbody(rows)], bordered=False, hover=True, size='sm', color='dark', className="m-0")
 
-    ledger = dbc.Table(
-        [html.Thead(html.Tr([html.Th("Time"), html.Th("Type"), html.Th("Entry"), html.Th("Qty"), html.Th("P&L"), html.Th("Reason")]))] +
-        [html.Tbody(rows)],
-        bordered=True, hover=True, striped=False, color="dark", size="sm", className="text-white"
-    )
-
-    return ticker_text, bal_text, active_pnl_display, ledger, fig, msg
+    return price_disp, oracle_disp, fig, datetime.now().strftime("%H:%M:%S"), table_content, balance_str, feedback

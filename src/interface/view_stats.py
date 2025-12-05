@@ -3,10 +3,145 @@ from dash import dcc, html, callback, Input, Output
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
-from src.core import engine_forensics
+import duckdb
+from datetime import datetime, timedelta
+from src.utils import config
 
 # ==============================================================================
-# RENDER LAYOUT
+# 1. FORENSICS ENGINE (Direct DB Access)
+# ==============================================================================
+def fetch_simulation_runs():
+    """Fetches unique backtest runs and date ranges for the dropdown."""
+    if not config.DB_FILE.exists(): return []
+    
+    # Standard Time Filters
+    options = [
+        {'label': '⚠️ FULL HISTORY (All Trades)', 'value': 'ALL'},
+        {'label': '📅 Year to Date (YTD)', 'value': 'YTD'},
+        {'label': '📅 Quarter to Date (QTD)', 'value': 'QTD'},
+        {'label': '📅 Month to Date (MTD)', 'value': 'MTD'},
+        {'label': '📅 Week to Date (WTD)', 'value': 'WTD'},
+        {'label': '⏪ Last 30 Days', 'value': 'L30D'},
+        {'label': '⏪ Last 7 Days', 'value': 'L7D'},
+    ]
+
+    try:
+        con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        # Check if table exists
+        tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+        if config.TBL_SIM_LOG not in tables:
+            con.close()
+            return options
+
+        # Dynamic Months from Data
+        try:
+            # Extract distinct YYYY-MM from entry_time
+            query = f"""
+                SELECT DISTINCT strftime(CAST(entry_time AS TIMESTAMP), '%Y-%m') as month_str 
+                FROM {config.TBL_SIM_LOG} 
+                WHERE entry_time IS NOT NULL
+                ORDER BY month_str DESC
+            """
+            months = con.execute(query).fetchall()
+            
+            if months:
+                options.append({'label': '--- MONTHLY ARCHIVES ---', 'value': 'DISABLED', 'disabled': True})
+                for m in months:
+                    m_str = m[0] # "2025-11"
+                    # Convert to "November 2025"
+                    dt_obj = datetime.strptime(m_str, '%Y-%m')
+                    pretty_lbl = dt_obj.strftime('%B %Y')
+                    options.append({'label': f"📂 {pretty_lbl}", 'value': f"MONTH_{m_str}"})
+        except Exception as e:
+            print(f"Error fetching months: {e}")
+
+        con.close()
+        return options
+    except: return options
+
+def fetch_run_metrics(run_id="ALL"):
+    """Fetches trade log from DuckDB and filters by run_id (Date Range)."""
+    if not config.DB_FILE.exists(): return pd.DataFrame()
+    try:
+        con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        
+        # Handle table check
+        tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+        if config.TBL_SIM_LOG not in tables:
+            con.close()
+            return pd.DataFrame()
+
+        # Query
+        query = f"SELECT * FROM {config.TBL_SIM_LOG}"
+        df = con.execute(query).df()
+        con.close()
+        
+        if df.empty: return pd.DataFrame()
+        
+        # --- DATA NORMALIZATION ---
+        if 'pnl' not in df.columns and 'net_pnl' in df.columns: df['pnl'] = df['net_pnl']
+        if 'return_pct' not in df.columns: df['return_pct'] = 0.0
+        
+        # Datetime Conversion
+        if 'entry_time' in df.columns:
+            df['entry_time'] = pd.to_datetime(df['entry_time'])
+        if 'exit_time' in df.columns:
+            df['exit_time'] = pd.to_datetime(df['exit_time'])
+            
+        if 'duration_mins' not in df.columns and 'entry_time' in df.columns and 'exit_time' in df.columns:
+             df['duration_mins'] = (df['exit_time'] - df['entry_time']).dt.total_seconds() / 60
+
+        if 'entry_time' in df.columns:
+            df['hour'] = df['entry_time'].dt.hour
+
+        # --- FILTER LOGIC ---
+        if run_id and run_id != 'ALL' and 'entry_time' in df.columns:
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            if run_id == 'YTD':
+                start_date = today.replace(month=1, day=1)
+                df = df[df['entry_time'] >= start_date]
+                
+            elif run_id == 'QTD':
+                curr_month = today.month
+                quarter_start_month = 3 * ((curr_month - 1) // 3) + 1
+                start_date = today.replace(month=quarter_start_month, day=1)
+                df = df[df['entry_time'] >= start_date]
+                
+            elif run_id == 'MTD':
+                start_date = today.replace(day=1)
+                df = df[df['entry_time'] >= start_date]
+                
+            elif run_id == 'WTD':
+                # Assuming Monday is start of week (0)
+                start_date = today - timedelta(days=today.weekday())
+                df = df[df['entry_time'] >= start_date]
+                
+            elif run_id == 'L7D':
+                start_date = today - timedelta(days=7)
+                df = df[df['entry_time'] >= start_date]
+                
+            elif run_id == 'L30D':
+                start_date = today - timedelta(days=30)
+                df = df[df['entry_time'] >= start_date]
+                
+            elif run_id.startswith('MONTH_'):
+                # Format: MONTH_2025-11
+                parts = run_id.split('_')[1] # "2025-11"
+                target_y, target_m = map(int, parts.split('-'))
+                df = df[(df['entry_time'].dt.year == target_y) & (df['entry_time'].dt.month == target_m)]
+
+        # Sort and sequence
+        df = df.sort_values('entry_time').reset_index(drop=True)
+        df['trade_seq'] = df.index + 1
+        
+        return df
+    except Exception as e:
+        print(f"Stats DB Error: {e}")
+        return pd.DataFrame()
+
+# ==============================================================================
+# 2. LAYOUT
 # ==============================================================================
 def render():
     return dbc.Container([
@@ -14,7 +149,7 @@ def render():
         dbc.Row([
             dbc.Col([
                 html.H2("FORENSICS LAB", className="display-6 fw-bold text-white"),
-                html.Small("Post-Trade Audit & Statistical Breakdown", className="text-muted"),
+                html.Small("Post-Trade Audit & Statistical Breakdown (Historical DB)", className="text-muted"),
                 html.Hr(className="my-2", style={'borderColor': '#444'})
             ], width=12)
         ], className="mb-4"),
@@ -25,20 +160,21 @@ def render():
                 dbc.Card([
                     dbc.CardHeader("CASE FILE SELECTOR (DB)", className="fw-bold text-info", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
                     dbc.CardBody([
-                        html.Label("Select Simulation Run", className="text-white"),
+                        html.Label("Select Dataset", className="text-white"),
                         dcc.Dropdown(
                             id='audit-run-selector',
-                            options=engine_forensics.fetch_simulation_runs(),
-                            placeholder="Select a Backtest Run...",
+                            options=fetch_simulation_runs(),
+                            value='ALL', # Default to ALL
+                            placeholder="Select Data Source...",
                             className="mb-2",
                             style={'color': '#000'}
                         ),
-                        dbc.Button("↻ REFRESH DB", id='audit-refresh-btn', color="secondary", outline=True, size="sm", className="w-100")
+                        dbc.Button("↻ REFRESH FROM VAULT", id='audit-refresh-btn', color="secondary", outline=True, size="sm", className="w-100")
                     ], style={'backgroundColor': '#131722'})
                 ], className="shadow mb-4", style={'border': '1px solid #444'})
             ], width=12, md=4),
             
-            # SUMMARY STATS (Placeholder)
+            # SUMMARY STATS
             dbc.Col([
                 html.Div(id='audit-stats-panel')
             ], width=12, md=8)
@@ -107,7 +243,7 @@ def render():
 )
 def update_forensics(run_id, n_clicks):
     # 1. Refresh Dropdown
-    options = engine_forensics.fetch_simulation_runs()
+    options = fetch_simulation_runs()
     
     # 2. Base Charts (Empty)
     empty_fig = go.Figure().update_layout(
@@ -119,7 +255,7 @@ def update_forensics(run_id, n_clicks):
         return options, empty_fig, empty_fig, empty_fig, empty_fig
 
     # 3. Fetch Data
-    df = engine_forensics.fetch_run_metrics(run_id)
+    df = fetch_run_metrics(run_id)
     if df.empty:
         return options, empty_fig, empty_fig, empty_fig, empty_fig
 
@@ -128,9 +264,9 @@ def update_forensics(run_id, n_clicks):
     fig_decay = go.Figure()
     fig_decay.add_trace(go.Scatter(x=df['trade_seq'], y=df['cum_pnl'], mode='lines+markers', line=dict(color='#00bc8c', width=2), marker=dict(size=4)))
     fig_decay.update_layout(
-        template="plotly_dark", title="Equity Curve (Sequence)", margin=dict(l=40, r=40, t=30, b=30),
+        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
-        yaxis=dict(gridcolor='#333'), xaxis=dict(gridcolor='#333')
+        yaxis=dict(gridcolor='#333'), xaxis=dict(gridcolor='#333', title="Trade Sequence")
     )
 
     # --- CHART 2: DOMINANCE (Win Rate by Type) ---
@@ -141,9 +277,9 @@ def update_forensics(run_id, n_clicks):
     fig_dom = go.Figure()
     fig_dom.add_trace(go.Bar(x=wr_pct.index.str.upper(), y=wr_pct.values, marker_color=['#00d2ff', '#f39c12']))
     fig_dom.update_layout(
-        template="plotly_dark", title="Win Rate % by Type", margin=dict(l=40, r=40, t=30, b=30),
+        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
-        yaxis=dict(range=[0, 100], gridcolor='#333')
+        yaxis=dict(range=[0, 100], gridcolor='#333', title="Win Rate %")
     )
 
     # --- CHART 3: KILL ZONE (Hourly P&L) ---
@@ -153,15 +289,15 @@ def update_forensics(run_id, n_clicks):
     fig_kill = go.Figure()
     fig_kill.add_trace(go.Bar(x=hourly_pnl['hour'], y=hourly_pnl['pnl'], marker_color=colors))
     fig_kill.update_layout(
-        template="plotly_dark", title="Net P&L by Hour of Day", margin=dict(l=40, r=40, t=30, b=30),
+        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
-        xaxis=dict(tickmode='linear', dtick=1, gridcolor='#333'), yaxis=dict(gridcolor='#333')
+        xaxis=dict(tickmode='linear', dtick=1, gridcolor='#333', title="Hour of Day"), yaxis=dict(gridcolor='#333')
     )
 
     # --- CHART 4: THETA RISK (Duration vs ROI) ---
     fig_theta = go.Figure()
     fig_theta.add_trace(go.Scatter(
-        x=df['duration'], y=df['return_pct'], 
+        x=df['duration_mins'], y=df['return_pct'], 
         mode='markers', 
         marker=dict(
             size=8, 
@@ -172,7 +308,7 @@ def update_forensics(run_id, n_clicks):
         )
     ))
     fig_theta.update_layout(
-        template="plotly_dark", title="Duration (Mins) vs ROI %", margin=dict(l=40, r=40, t=30, b=30),
+        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
         xaxis=dict(title="Minutes Held", gridcolor='#333'), yaxis=dict(title="Return %", gridcolor='#333')
     )

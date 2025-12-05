@@ -15,14 +15,14 @@ from src.utils import config
 
 # IMPORT VIEWS
 from src.interface import (
-    view_live,      
-    view_practice,  
-    view_backtest,  
-    view_audit,     
-    view_stats,     
-    view_predict,   
-    view_growth,    
-    view_system_health 
+    view_live,          # Project Delta (Real-Time Execution)
+    view_replay,        # The Gym (Fog of War Simulation)
+    view_backtest,      # The Engine (Historical Validation)
+    view_chart,         # Tactical Forensics (Deep Dive)
+    view_stats,         # Performance Metrics
+    view_predict,       # Future: Predictive Analysis
+    view_growth,        # Future: Compound Calculators
+    view_system_health  # System Diagnostics
 )
 
 # Initialize App with Cyborg Theme AND Proper Browser Title
@@ -30,7 +30,7 @@ app = dash.Dash(
     __name__, 
     external_stylesheets=[dbc.themes.CYBORG], 
     suppress_callback_exceptions=True,
-    title="Quant OS v3.1" # <--- FIXED: Browser Tab Title
+    title="Quant OS v3.3"
 )
 server = app.server
 
@@ -50,35 +50,35 @@ app.layout = html.Div([
     # SIDEBAR MENU
     dbc.Offcanvas(
         html.Div([
-            html.H4("QUANT OS v3.1", className="text-white mb-4", style={'letterSpacing': '2px'}),
+            html.H4("QUANT OS v3.3", className="text-white mb-4", style={'letterSpacing': '2px'}),
             html.Hr(),
             
             dbc.Nav([
                 # 0. SYSTEM
                 html.Small("SYSTEM STATUS", className="text-muted mt-2 mb-1 fw-bold"),
-                dbc.NavLink("Health Monitor", href="/health", active="exact"),
+                dbc.NavLink("System Health", href="/health", active="exact"),
                 
                 html.Hr(className="my-2", style={'opacity': '0.3'}),
 
                 # 1. PRESENT
                 html.Small("PRESENT (EXECUTION)", className="text-muted mt-2 mb-1 fw-bold"),
-                dbc.NavLink("Live Trading", href="/live", active="exact"),
+                dbc.NavLink("Live Console", href="/live", active="exact"),
                 
                 html.Hr(className="my-2", style={'opacity': '0.3'}),
 
                 # 2. PAST
                 html.Small("PAST (ANALYSIS)", className="text-muted mt-2 mb-1 fw-bold"),
-                dbc.NavLink("Backtest Engine", href="/backtest", active="exact"),
-                dbc.NavLink("Practice Mode", href="/practice", active="exact"),
-                dbc.NavLink("Trade Auditor", href="/audit", active="exact"),
-                dbc.NavLink("Performance Stats", href="/stats", active="exact"),
+                dbc.NavLink("Data Generator", href="/backtest", active="exact"),
+                dbc.NavLink("Chart Analysis", href="/chart", active="exact"),
+                dbc.NavLink("Replay Analysis", href="/replay", active="exact"),
+                dbc.NavLink("Statistics Lab", href="/stats", active="exact"),
 
                 html.Hr(className="my-2", style={'opacity': '0.3'}),
 
                 # 3. FUTURE
                 html.Small("FUTURE (FORECAST)", className="text-muted mt-2 mb-1 fw-bold"),
                 dbc.NavLink("Predictive Analysis", href="/predict", active="exact"),
-                dbc.NavLink("Growth Calculator", href="/growth", active="exact"),
+                dbc.NavLink("Growth Forecast", href="/growth", active="exact"),
                 
             ], vertical=True, pills=True),
         ]),
@@ -127,8 +127,8 @@ def display_page(pathname):
     if pathname == '/health' or pathname == '/': return view_system_health.render()
     elif pathname == '/live': return view_live.render()
     elif pathname == '/backtest': return view_backtest.render()
-    elif pathname == '/practice': return view_practice.render()
-    elif pathname == '/audit': return view_audit.render()
+    elif pathname == '/chart': return view_chart.render()
+    elif pathname == '/replay': return view_replay.render()
     elif pathname == '/stats': return view_stats.render()
     elif pathname == '/predict': return view_predict.render()
     elif pathname == '/growth': return view_growth.render()

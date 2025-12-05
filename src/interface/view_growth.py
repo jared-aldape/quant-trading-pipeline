@@ -26,12 +26,14 @@ log = get_logger("CapitalLab")
 # 2. CORE LOGIC
 # ==============================================================================
 def get_business_days(start_date_str, end_date_str):
+    """Generates valid US business days between dates."""
     us_bd = CustomBusinessDay(calendar=USFederalHolidayCalendar())
     start = pd.to_datetime(start_date_str)
     end = pd.to_datetime(end_date_str)
     return pd.date_range(start=start, end=end, freq=us_bd)
 
 def calculate_silver_arrow(start_bal, daily_goal_pct, business_days):
+    """Calculates the geometric growth target (The Silver Arrow)."""
     dates = [business_days[0]]
     balances = [float(start_bal)]
     current_bal = float(start_bal)
@@ -43,6 +45,7 @@ def calculate_silver_arrow(start_bal, daily_goal_pct, business_days):
     return pd.DataFrame({'Date': dates, 'TargetBalance': balances})
 
 def fetch_backtest_distribution():
+    """Fetches real trade returns from the Backtest Log (The DNA)."""
     if not config.DB_FILE.exists(): return None, "Vault Not Found"
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
@@ -71,7 +74,11 @@ def fetch_backtest_distribution():
         return stats, "OK"
     except Exception as e: return None, f"DB Error: {e}"
 
-def run_monte_carlo(start_bal, risk_pct, sim_days, num_sims, return_pool):
+def run_monte_carlo(start_bal, risk_val, risk_mode, sim_days, num_sims, return_pool):
+    """
+    Runs Monte Carlo simulation with Dynamic Position Sizing.
+    risk_mode: 'PCT' (Compound) or 'FIXED' (Linear)
+    """
     if return_pool is None or len(return_pool) == 0: return np.zeros((num_sims, sim_days))
     sim_results = []
     
@@ -83,10 +90,19 @@ def run_monte_carlo(start_bal, risk_pct, sim_days, num_sims, return_pool):
         daily_returns = np.random.choice(decimal_pool, size=sim_days-1)
         
         for ret in daily_returns:
-            bet_size = balance * (float(risk_pct) / 100.0)
+            if risk_mode == 'PCT':
+                # Compounding: Risk % of current balance
+                bet_size = balance * (float(risk_val) / 100.0)
+            else:
+                # Linear: Risk fixed $ amount (cannot exceed balance)
+                bet_size = min(float(risk_val), balance)
+                
             pnl = bet_size * ret
             balance += pnl
+            
+            # Blowup Protection
             if balance < 0.01: balance = 0.01
+            
             curve.append(balance)
         sim_results.append(curve)
     return np.array(sim_results)
@@ -121,9 +137,25 @@ def render():
                         html.Label("Silver Arrow Goal (Daily %)", style={'color': '#f39c12', 'fontWeight': 'bold'}),
                         dbc.Input(id='cap-goal', type='number', value=10.0, step=0.5, className="mb-3", style={'backgroundColor': '#2A2E39', 'color': '#f39c12', 'border': '1px solid #f39c12'}),
                         
-                        html.Label("Allocation per Trade (%)", style={'color': '#00d2ff'}),
-                        dbc.Input(id='cap-risk', type='number', value=20.0, max=100, className="mb-3", style={'backgroundColor': '#2A2E39', 'color': '#00d2ff', 'border': '1px solid #00d2ff'}),
+                        html.Hr(style={'borderColor': '#444'}),
                         
+                        # --- NEW: POSITION SIZING TOGGLE ---
+                        html.Label("Position Sizing Model", style={'color': '#00d2ff', 'fontWeight': 'bold'}),
+                        dbc.RadioItems(
+                            id='cap-sizing-mode',
+                            options=[
+                                {'label': 'Compound (% Equity)', 'value': 'PCT'},
+                                {'label': 'Fixed ($ Risk)', 'value': 'FIXED'},
+                            ],
+                            value='PCT',
+                            inline=True,
+                            className="mb-2 text-white"
+                        ),
+                        
+                        html.Label("Risk Value (% or $)", style={'color': '#AAA'}),
+                        dbc.Input(id='cap-risk', type='number', value=20.0, className="mb-3", style={'backgroundColor': '#2A2E39', 'color': '#00d2ff', 'border': '1px solid #00d2ff'}),
+                        # -----------------------------------
+
                         html.Label("Projection Horizon", style={'color': '#FFF'}),
                         dcc.DatePickerRange(
                             id='cap-dates',
@@ -263,12 +295,13 @@ def render():
      Output('cap-ledger', 'data')],
     [Input('cap-run-btn', 'n_clicks')],
     [State('cap-start', 'value'), State('cap-goal', 'value'), State('cap-risk', 'value'),
-     State('cap-dates', 'start_date'), State('cap-dates', 'end_date')]
+     State('cap-dates', 'start_date'), State('cap-dates', 'end_date'),
+     State('cap-sizing-mode', 'value')]  # <--- NEW STATE INPUT
 )
-def update_capital_lab(n_clicks, start_bal, goal_pct, risk_pct, start_date, end_date):
+def update_capital_lab(n_clicks, start_bal, goal_pct, risk_val, start_date, end_date, sizing_mode):
     start_bal = float(start_bal) if start_bal else 600.0
     goal_pct = float(goal_pct) if goal_pct else 10.0
-    risk_pct = float(risk_pct) if risk_pct else 20.0
+    risk_val = float(risk_val) if risk_val else 20.0
     
     empty_fig = go.Figure()
     empty_fig.update_layout(
@@ -295,7 +328,9 @@ def update_capital_lab(n_clicks, start_bal, goal_pct, risk_pct, start_date, end_
         return empty_fig, "Date Range Too Short", "--", "--", "--", "--", "$0", "$0", "0%", "0%", []
         
     silver_arrow_df = calculate_silver_arrow(start_bal, goal_pct, business_days)
-    sim_paths = run_monte_carlo(start_bal, risk_pct, len(business_days), 1000, stats['pool'])
+    
+    # Run Monte Carlo with Sizing Mode
+    sim_paths = run_monte_carlo(start_bal, risk_val, sizing_mode, len(business_days), 1000, stats['pool'])
 
     final_values = sim_paths[:, -1]
     median_outcome = np.median(final_values)

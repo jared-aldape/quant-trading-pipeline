@@ -1,136 +1,144 @@
 import dash
-from dash import dcc, html, callback, Input, Output, State
+from dash import dcc, html, callback, Input, Output
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-from src.core import engine_forecast
+import pandas as pd
+import numpy as np
+from datetime import datetime, time
+import pytz
+from src.core import engine_simulator, engine_ml
+from src.utils import config
 
 # ==============================================================================
-# RENDER LAYOUT
+# 1. PREDICTIVE MATH (ORB + LINREG)
+# ==============================================================================
+def calculate_orb(df):
+    """Calculates Opening Range Breakout (09:30-10:00) levels."""
+    if df is None or df.empty: return None, None
+    
+    # Filter for RTH start
+    df['time'] = df['Datetime'].dt.time
+    start = time(9, 30)
+    end = time(10, 0)
+    
+    orb_df = df[(df['time'] >= start) & (df['time'] < end)]
+    if orb_df.empty: return None, None
+    
+    return orb_df['High'].max(), orb_df['Low'].min()
+
+def calculate_linreg(df):
+    """Calculates Linear Regression Channel."""
+    if df is None or len(df) < 20: return df
+    
+    df['x'] = np.arange(len(df))
+    # Fit line
+    slope, intercept = np.polyfit(df['x'], df['Close'], 1)
+    df['reg_line'] = slope * df['x'] + intercept
+    
+    # Std Dev Bands
+    std = df['Close'].std()
+    df['upper_band'] = df['reg_line'] + (2 * std)
+    df['lower_band'] = df['reg_line'] - (2 * std)
+    
+    return df
+
+# ==============================================================================
+# 2. LAYOUT
 # ==============================================================================
 def render():
     return dbc.Container([
-        # HEADER
         dbc.Row([
             dbc.Col([
-                html.H2("THE PROPHET (Predictive Modeling)", className="display-6 fw-bold text-white"),
-                html.Hr(className="my-2")
-            ], width=12)
-        ], className="mb-4"),
+                html.H2("PREDICTIVE ANALYSIS (The HUD)", className="display-6 fw-bold text-white"),
+                html.P("Project Echo (ORB) and Project Delta (LinReg) visualization.", className="text-muted lead")
+            ], width=8),
+            dbc.Col([
+                html.Div(id='predict-clock', className="display-6 text-end text-info font-monospace")
+            ], width=4)
+        ], className="mb-3"),
 
-        # CONTROL PANEL
         dbc.Row([
+            # ORACLE PANEL
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("MODEL CONFIG", className="fw-bold text-info", style={'backgroundColor': '#1a1a1a'}),
+                    dbc.CardHeader("🤖 ORACLE CONFIDENCE", className="fw-bold text-warning", style={'backgroundColor': '#1a1a1a'}),
                     dbc.CardBody([
-                        html.Label("Target Asset", className="text-white"),
-                        dbc.Input(id="fc-ticker", type="text", value="SPY", className="mb-3"),
-                        
-                        html.Label("Model Type", className="text-white"),
-                        dcc.Dropdown(
-                            id="fc-model-type", # Added ID
-                            options=[
-                                {'label': 'Statistical Volatility (ORB)', 'value': 'ORB'},
-                                {'label': 'Linear Regression (Trend Channel)', 'value': 'LIN'} # ENABLED
-                            ],
-                            value='ORB',
-                            clearable=False,
-                            className="mb-3",
-                            style={'color': '#000'}
-                        ),
-                        
-                        dbc.Button("🔮 GENERATE FORECAST", id="btn-run-forecast", color="primary", className="w-100 fw-bold")
-                    ], style={'backgroundColor': '#0a0a0a'})
-                ], className="shadow mb-4", style={'border': '1px solid #333'}),
-                
-                # KPI RESULTS
-                html.Div(id="fc-kpi-area")
-                
-            ], width=12, md=4),
-
-            # VISUALIZATION
+                        html.H4(id='predict-oracle-call', className="text-center mb-2"),
+                        html.H4(id='predict-oracle-put', className="text-center")
+                    ])
+                ], className="shadow mb-3")
+            ], width=3),
+            
+            # CHART
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("PROJECTION CONE", className="fw-bold text-white", style={'backgroundColor': '#1a1a1a'}),
-                    dbc.CardBody(
-                        dcc.Loading(dcc.Graph(id="fc-chart", style={'height': '450px'}))
-                    )
-                ], className="shadow", style={'backgroundColor': '#000', 'border': '1px solid #333'})
-            ], width=12, md=8)
-        ])
+                    dbc.CardBody([
+                        dcc.Graph(id='predict-chart', style={'height': '600px'}, config={'displayModeBar': False})
+                    ], className="p-1", style={'backgroundColor': '#000'})
+                ], className="shadow")
+            ], width=9)
+        ]),
 
-    ], fluid=True, style={'backgroundColor': '#000', 'minHeight': '100vh'})
+        dcc.Interval(id='predict-interval', interval=30000, n_intervals=0) # 30s update
+
+    ], fluid=True)
 
 # ==============================================================================
-# CALLBACKS
+# 3. CALLBACKS
 # ==============================================================================
 @callback(
-    [Output("fc-kpi-area", "children"),
-     Output("fc-chart", "figure")],
-    [Input("btn-run-forecast", "n_clicks")],
-    [State("fc-ticker", "value"), State("fc-model-type", "value")] # ADDED MODEL STATE
+    [Output('predict-chart', 'figure'),
+     Output('predict-oracle-call', 'children'),
+     Output('predict-oracle-put', 'children'),
+     Output('predict-clock', 'children')],
+    [Input('predict-interval', 'n_intervals')]
 )
-def update_forecast(n, ticker, model_type):
-    if not n:
-        return "", go.Figure().update_layout(template="plotly_dark", title="Awaiting Command...", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+def update_prediction_hud(n):
+    # 1. Data
+    df = engine_simulator.get_live_chart_data(period="1d", interval="1m")
+    vix_val, vix_rsi = engine_simulator.get_vix_metrics()
     
-    # PASS MODEL TYPE
-    result = engine_forecast.generate_forecast(ticker, model_type)
+    # 2. Oracle
+    p_call = engine_ml.predict_success("CALL", vix_val, vix_rsi)
+    p_put = engine_ml.predict_success("PUT", vix_val, vix_rsi)
     
-    if not result or result['status'] != "ACTIVE":
-        err_msg = result.get('msg', 'Unknown Error') if result else "Connection Failed"
-        return dbc.Alert(f"Prediction Failed: {err_msg}", color="warning"), go.Figure().update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+    call_style = {'color': '#00bc8c' if p_call > 60 else '#555'}
+    put_style = {'color': '#e74c3c' if p_put > 60 else '#555'}
+    
+    call_disp = html.Span(f"CALL: {p_call}%", style=call_style)
+    put_disp = html.Span(f"PUT: {p_put}%", style=put_style)
 
-    # 1. BUILD KPI CARDS
-    mid_label = "REGRESSION MID" if result.get('type') == 'LIN' else "ORB HIGH"
-    low_label = "2-SIGMA LOW" if result.get('type') == 'LIN' else "ORB LOW"
-
-    kpi = dbc.Card([
-        dbc.CardBody([
-            html.H5(f"{result['trend']}", className="text-warning text-center mb-4"),
-            dbc.Row([
-                dbc.Col([html.Small("TARGET HIGH"), html.H3(f"${result['proj_high']:.2f}", className="text-success")], width=6, className="text-center"),
-                dbc.Col([html.Small("TARGET LOW"), html.H3(f"${result['proj_low']:.2f}", className="text-danger")], width=6, className="text-center"),
-            ]),
-            html.Hr(style={'borderColor': '#444'}),
-            dbc.Row([
-                dbc.Col([html.Small(mid_label), html.H5(f"${result['orb_high']:.2f}")], width=6),
-                dbc.Col([html.Small(low_label), html.H5(f"${result['orb_low']:.2f}")], width=6),
-            ], className="text-center text-muted")
-        ])
-    ], color="#1a1a1a", inverse=True, className="border-info")
-
-    # 2. BUILD CHART
-    df = result['dataframe']
+    # 3. Chart Prep
     fig = go.Figure()
     
-    # Price Action
-    fig.add_trace(go.Candlestick(
-        x=df['datetime'], open=df['open'], high=df['high'], low=df['low'], close=df['close'],
-        name='Price', increasing_line_color='#00bc8c', decreasing_line_color='#e74c3c'
-    ))
-    
-    # Linear Regression Specifics
-    if result.get('type') == 'LIN':
-        fig.add_trace(go.Scatter(x=df['datetime'], y=df['reg_line'], mode='lines', line=dict(color='yellow', width=1, dash='dash'), name='Regression'))
-        fig.add_trace(go.Scatter(x=df['datetime'], y=df['upper_band'], mode='lines', line=dict(color='#00bc8c', width=1), name='+2 Sigma'))
-        fig.add_trace(go.Scatter(x=df['datetime'], y=df['lower_band'], mode='lines', line=dict(color='#e74c3c', width=1), name='-2 Sigma'))
-    else:
-        # ORB Lines
-        fig.add_hline(y=result['proj_high'], line_dash="dot", line_color="#00bc8c", annotation_text="Proj HIGH")
-        fig.add_hline(y=result['proj_low'], line_dash="dot", line_color="#e74c3c", annotation_text="Proj LOW")
-        fig.add_hline(y=result['orb_high'], line_dash="dash", line_color="gray", annotation_text="ORB High")
-        fig.add_hline(y=result['orb_low'], line_dash="dash", line_color="gray", annotation_text="ORB Low")
+    if df is not None and not df.empty:
+        # LinReg
+        df = calculate_linreg(df)
+        
+        # Candles
+        fig.add_trace(go.Candlestick(
+            x=df['Datetime'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+            name="SPY", increasing_line_color='#00bc8c', decreasing_line_color='#e74c3c'
+        ))
+        
+        # LinReg Channels
+        fig.add_trace(go.Scatter(x=df['Datetime'], y=df['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Mean"))
+        fig.add_trace(go.Scatter(x=df['Datetime'], y=df['upper_band'], line=dict(color='cyan', width=1), name="+2σ"))
+        fig.add_trace(go.Scatter(x=df['Datetime'], y=df['lower_band'], line=dict(color='cyan', width=1), name="-2σ"))
+        
+        # ORB Levels (Project Echo)
+        orb_h, orb_l = calculate_orb(df)
+        if orb_h:
+            fig.add_hline(y=orb_h, line_color="#00bc8c", line_width=1, line_dash="dash", annotation_text="ORB HIGH")
+            fig.add_hline(y=orb_l, line_color="#e74c3c", line_width=1, line_dash="dash", annotation_text="ORB LOW")
 
     fig.update_layout(
-        template="plotly_dark",
-        title=f"{ticker} Forecast ({model_type})",
-        margin=dict(l=40, r=40, t=40, b=40),
+        template="plotly_dark", 
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)', 
+        margin=dict(l=40, r=40, t=20, b=40), 
         xaxis_rangeslider_visible=False,
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="white"),
-        yaxis=dict(gridcolor='#333'), xaxis=dict(gridcolor='#333')
+        uirevision='predict_chart'
     )
 
-    return kpi, fig
+    return fig, call_disp, put_disp, datetime.now().strftime("%H:%M")

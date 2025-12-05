@@ -16,7 +16,7 @@ class BacktestArgs:
         self.end_date = end
         try: self.start_balance = float(bal) if bal else 600.0
         except: self.start_balance = 600.0
-        self.strategy_mode = mode if mode else 'LONG_ONLY'
+        self.strategy_mode = mode if mode else 'Fractal'
         try: self.tax_rate = float(tax) if tax else 0.0
         except: self.tax_rate = 0.0
         try: self.trailing_stop_pct = (float(trail) / 100.0) if trail else None
@@ -32,8 +32,6 @@ class BacktestArgs:
         try: self.commission = float(comm) if comm is not None else 0.65
         except: self.commission = 0.65
         self.fee_model = fee_model if fee_model else 'NONE'
-        
-        # GATEKEEPER PARAMS
         try: self.sma_period = int(sma_p) if sma_p else 20
         except: self.sma_period = 20
         try: self.rsi_over = float(rsi_over) if rsi_over else 70
@@ -64,13 +62,12 @@ def render():
     return dbc.Container([
         dbc.Row([
             dbc.Col([
-                html.H2("STRATEGY BACKTESTER (v2.23 - The Gatekeeper)", className="display-6 fw-bold text-white"),
+                html.H2("STRATEGY BACKTESTER (v3.2 - Hedged Protocol)", className="display-6 fw-bold text-white"),
                 html.Hr(className="my-2")
             ], width=12)
         ], className="mb-4"),
 
         dbc.Row([
-            # CONTROLS COLUMN
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader("MISSION PARAMETERS", className="fw-bold text-warning"),
@@ -92,11 +89,14 @@ def render():
                         dcc.Dropdown(
                             id='bt-mode',
                             options=[
-                                {'label': '🟢 Long Only (Calls)', 'value': 'LONG_ONLY'},
-                                {'label': '⚖️ Hedged (75/25 Split)', 'value': 'HEDGED'},
-                                {'label': '🌊 Macro Flip (Dynamic)', 'value': 'DYNAMIC'}
+                                {'label': 'Fractal (Scanner Truth)', 'value': 'Fractal'},
+                                {'label': 'Macro (Dynamic Bias)', 'value': 'Macro'},
+                                {'label': 'Call (Long Only)', 'value': 'Call'},
+                                {'label': 'Put (Long Only)', 'value': 'Put'},
+                                {'label': 'Hedged Call (75/25)', 'value': 'Hedged Call'},
+                                {'label': 'Hedged Put (75/25)', 'value': 'Hedged Put'}
                             ],
-                            value='LONG_ONLY', clearable=False, className="mb-3", style={'color': '#000'}
+                            value='Fractal', clearable=False, className="mb-3", style={'color': '#000'}
                         ),
                         html.Label("Signal Selection Strategy"),
                         dcc.Dropdown(
@@ -115,22 +115,17 @@ def render():
                     ])
                 ], className="shadow mb-3"),
                 
-                # RISK & FRICTION CARD
                 dbc.Card([
                     dbc.CardHeader("RISK & FRICTION (The Vig)", className="fw-bold text-white"),
                     dbc.CardBody([
-                        # ROW 1: Stops
                         dbc.Row([
                             dbc.Col([html.Label("Trailing Stop (%)"), dbc.Input(id='bt-trail-pct', type='number', value=25, className="form-control mb-2")], width=6),
                             dbc.Col([html.Label("Ideal Gain (%)"), dbc.Input(id='bt-ideal-gain', type='number', value=100, className="form-control mb-2")], width=6),
                         ]),
-                        # ROW 2: Breakeven
                         dbc.Row([
                             dbc.Col([html.Label("Breakeven Trigger (%)"), dbc.Input(id='bt-be-trigger', type='number', value=15, className="form-control mb-2")], width=12),
                         ]),
                         html.Hr(className="my-2"),
-                        
-                        # ROW 3: FRICTION
                         html.Label("Fee Structure"),
                         dcc.Dropdown(
                             id='bt-fee-model',
@@ -142,7 +137,6 @@ def render():
                             ],
                             value='RH_GOLD', clearable=False, className="mb-3", style={'color': '#000'}
                         ),
-
                         dbc.Row([
                             dbc.Col([html.Label("Slippage ($/Share)"), dbc.Input(id='bt-slippage', type='number', value=0.01, step=0.01, className="form-control")], width=6),
                             dbc.Col([html.Label("Manual Comm ($)"), dbc.Input(id='bt-commission', type='number', value=0.65, step=0.01, disabled=True, className="form-control")], width=6),
@@ -150,7 +144,6 @@ def render():
                     ])
                 ], className="shadow mb-3", color="dark", inverse=True),
 
-                # NEW CARD: GATEKEEPER FILTERS
                 dbc.Card([
                     dbc.CardHeader("GATEKEEPER (Entry Filters)", className="fw-bold text-success"),
                     dbc.CardBody([
@@ -171,13 +164,11 @@ def render():
                 
             ], width=12, md=4),
 
-            # RESULTS COLUMN
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader("EQUITY CURVE", className="fw-bold text-primary"),
                     dbc.CardBody([
                         dcc.Loading(dcc.Graph(id='bt-equity-chart', style={'height': '350px'})),
-                        # RESTORED STATUS AREA
                         html.Div(id='bt-status-area', children=get_status_ui("ready"), className="mb-4 mt-3"),
                     ], style={'padding': '10px'})
                 ], className="mb-3 shadow"),
@@ -198,7 +189,6 @@ def render():
                     ])
                 ], className="mb-3 shadow"),
                 
-                # LEDGER
                 dbc.Card([
                     dbc.CardHeader("LEDGER LOGS (Detailed Trades)", className="fw-bold text-white"),
                     dbc.CardBody(html.Div(id='bt-trade-table'))
@@ -207,10 +197,6 @@ def render():
             ], width=12, lg=8)
         ])
     ], fluid=True)
-
-# ==============================================================================
-# 4. CALLBACKS
-# ==============================================================================
 
 @callback(
     Output('bt-commission', 'disabled'),
@@ -234,22 +220,17 @@ def toggle_commission_input(fee_model):
      State('bt-selection', 'value'), State('bt-export', 'value'),
      State('bt-slippage', 'value'), State('bt-commission', 'value'),
      State('bt-fee-model', 'value'), 
-     # NEW STATE VARIABLES
      State('bt-filter-sma', 'value'), State('bt-filter-rsi-p', 'value'),
      State('bt-filter-rsi-over', 'value'), State('bt-filter-rsi-under', 'value'),
      State('bt-filter-sma-on', 'value')]
 )
 def update_backtest(n, start, end, balance, mode, tax, trail, gain, be_trigger, selection, export, slip, comm, fee_model, sma_p, rsi_p, rsi_over, rsi_under, sma_on):
     if not n: return dash.no_update
-    
     try:
-        # Pass all new filter parameters
         args = BacktestArgs(start, end, balance, mode, tax, trail, gain, be_trigger, selection, export, slip, comm, fee_model, sma_p, rsi_over, rsi_under)
         args.sma_filter_on = True if sma_on and sma_on[0] else False
         args.rsi_period = rsi_p
-        
         results = engine_backtest.run_backtest(args)
-        
         if results is None or results.empty:
             return "--", "--", "--", "--", "--", "--", go.Figure(), [], get_status_ui("failure", "No trades found.")
             
@@ -257,38 +238,34 @@ def update_backtest(n, start, end, balance, mode, tax, trail, gain, be_trigger, 
         gross_profit = final_balance - args.start_balance
         net_profit = gross_profit * (1 - args.tax_rate) if gross_profit > 0 else gross_profit
         net_return_pct = (net_profit / args.start_balance) * 100
-        
         cum_max = results['end_balance'].cummax()
         drawdown = (results['end_balance'] - cum_max) / cum_max
         max_dd = drawdown.min() * 100
-        
-        # SIGNAL AVERAGE LOGIC
         try:
             mode_sig = results['signal_rank'].mode()[0]
             total_trades = len(results)
             freq_pct = (len(results[results['signal_rank'] == mode_sig]) / total_trades) * 100 if total_trades > 0 else 0
             sig_avg_disp = f"Sig #{mode_sig} ({freq_pct:.0f}%)"
-        except:
-            sig_avg_disp = "--"
-
-        # AVG DURATION
+        except: sig_avg_disp = "--"
         avg_mins = results['duration_mins'].mean()
         avg_hrs, avg_remainder = divmod(avg_mins * 60, 3600)
         avg_m, _ = divmod(avg_remainder, 60)
         dur_disp = f"{int(avg_hrs)}h {int(avg_m)}m" if avg_hrs > 0 else f"{int(avg_m)}m"
-
-        # DOMINANCE
         call_count = len(results[results['type'] == 'call'])
         put_count = len(results[results['type'] == 'put'])
-        bias_disp = f"CALLS ({int((call_count/len(results))*100)}%)" if call_count > put_count else f"PUTS ({int((put_count/len(results))*100)}%)"
+        if len(results) > 0:
+            call_pct = int((call_count/len(results))*100)
+            put_pct = int((put_count/len(results))*100)
+            if call_count > put_count: bias_disp = f"CALLS ({call_pct}%)"
+            elif put_count > call_count: bias_disp = f"PUTS ({put_pct}%)"
+            else: bias_disp = "BALANCED (50/50)"
+        else: bias_disp = "--"
 
-        # CHART
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=results['entry_time'], y=results['end_balance'], mode='lines', line=dict(color='#00bc8c', width=2)))
         fig.add_hline(y=args.start_balance, line_dash="dot", line_color="#666")
         fig.update_layout(template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=40), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
 
-        # LEDGER
         table_rows = []
         for i, row in results.iterrows():
             is_win = row['pnl'] >= 0
@@ -296,23 +273,21 @@ def update_backtest(n, start, end, balance, mode, tax, trail, gain, be_trigger, 
             row_bg = 'rgba(0, 255, 65, 0.05)' if is_win else 'rgba(255, 0, 0, 0.05)'
             reason = row.get('reason', 'TIME')
             if reason == "BE_STOP": reason = "🛡️ BREAKEVEN"; row_bg = 'rgba(255, 255, 0, 0.05)'
-            
             try: exit_time_str = str(row['exit_time']).split('.')[0] if row['exit_time'] else "--"
             except: exit_time_str = "--"
-
             table_rows.append(html.Tr([
-                html.Td(str(row['signal_rank']), className="text-center small"), html.Td(str(row['entry_time']).split('.')[0], className="small"),
-                html.Td(row['type'].upper(), className="small"), html.Td(f"${row['start_balance']:,.2f}", className="small text-white-50"),
+                html.Td(str(row['signal_rank']), className="text-center small"), 
+                html.Td(str(row['entry_time']).split('.')[0], className="small"),
+                html.Td(row['type'].upper(), className="small", style={'color': '#00d2ff' if row['type']=='call' else '#ff5555'}), 
+                html.Td(f"${row['start_balance']:,.2f}", className="small text-white-50"),
                 html.Td(row['duration_str'], className="small text-muted"), 
                 html.Td(reason, className="small text-warning fst-italic"),
                 html.Td(f"{row['pnl']:+.2f}", style={'color': style_color, 'fontWeight': 'bold'}),
                 html.Td(f"{row['return_pct']:+.1f}%", style={'color': style_color}) 
             ], style={'backgroundColor': row_bg}))
-
         tbl = dbc.Table([html.Thead(html.Tr([html.Th("Sig #"), html.Th("Entry"), html.Th("Type"), html.Th("Start $"), html.Th("Dur"), html.Th("Reason"), html.Th("P&L"), html.Th("ROI %")]))] + [html.Tbody(table_rows)], bordered=False, hover=True, color="dark", size="sm")
 
-        return f"${final_balance:,.2f}", html.Span(f"{net_return_pct:+.1f}%", className="text-success" if net_return_pct > 0 else "text-danger"), sig_avg_disp, html.Span(f"{max_dd:.1f}%", className="text-danger"), dur_disp, html.Span(bias_disp, className="text-info"), fig, tbl, get_status_ui("success", "Simulation Complete")
-
+        return f"${final_balance:,.2f}", html.Span(f"{net_return_pct:+.1f}%", className="text-success" if net_return_pct > 0 else "text-danger"), sig_avg_disp, html.Span(f"{max_dd:.1f}%", className="text-danger"), dur_disp, html.Span(bias_disp, className="text-info"), fig, tbl, get_status_ui("success", f"Sim Complete: {len(results)} Trades")
     except Exception as e:
         traceback.print_exc()
         return "--", "--", "--", "--", "--", "--", go.Figure(), [], get_status_ui("crash", str(e))
