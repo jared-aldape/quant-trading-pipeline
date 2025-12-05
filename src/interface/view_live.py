@@ -8,25 +8,19 @@ from src.core import engine_simulator
 from src.core import engine_ml 
 
 # ==============================================================================
-# 1. LAYOUT
+# 1. LAYOUT (REFACTORED)
 # ==============================================================================
 def render():
     return dbc.Container([
-        # HEADER & BALANCE
+        # HEADER & CLOCK (BALANCE MOVED)
         dbc.Row([
             dbc.Col([
                 html.H2("LIVE TRADING COMMAND", className="display-6 fw-bold text-white"),
                 html.P("Real-time execution interface with Project Delta pricing & ML Oracle.", className="text-muted lead")
-            ], width=7),
+            ], width=9),
             dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H6("ACCOUNT BALANCE", className="text-muted small mb-0"),
-                        html.H3(id='live-balance-display', className="text-success fw-bold font-monospace mb-0"),
-                        html.Small(id='live-clock', className="text-end text-info font-monospace")
-                    ])
-                ], className="bg-dark border-secondary")
-            ], width=5)
+                html.Small(id='live-clock', className="text-end text-info font-monospace display-6 float-end")
+            ], width=3)
         ], className="mb-3"),
 
         # MAIN CONSOLE
@@ -34,10 +28,17 @@ def render():
             # LEFT: CONTROLS & SESSION STATS
             dbc.Col([
                 
-                # ACTIVE POSITION MANIFEST (NEW)
+                # ACCOUNT BALANCE & ACTIVE POSITION MANIFEST (COMBINED & REFACTORED)
                 dbc.Card([
-                    dbc.CardHeader("🎯 ACTIVE POSITION MANIFEST", className="fw-bold text-info", style={'backgroundColor': '#1a1a1a'}),
-                    dbc.CardBody(html.Div(id='active-position-display', className="text-center font-monospace"))
+                    dbc.CardHeader("💰 ACCOUNT & ACTIVE POSITION MANIFEST", className="fw-bold text-info", style={'backgroundColor': '#1a1a1a'}),
+                    dbc.CardBody([
+                        # BALANCE DISPLAY (Improved Visibility)
+                        html.H6("ACCOUNT BALANCE", className="text-muted small mb-0"),
+                        html.H3(id='live-balance-display', className="text-white fw-bold font-monospace mb-3", style={'color': '#00bc8c !important'}),
+                        
+                        # ACTIVE POSITION (Status Check)
+                        html.Div(id='active-position-display', className="text-center font-monospace")
+                    ])
                 ], className="shadow mb-3"),
                 
                 # EXECUTION PANEL
@@ -81,7 +82,7 @@ def render():
                             ], width=12)
                         ]),
 
-                        # ENTRY BUTTONS
+                        # ENTRY BUTTONS (With disabled check)
                         dbc.Row([
                             dbc.Col(dbc.Button("BUY CALL", id='btn-buy-call', color="success", className="w-100 fw-bold"), width=6),
                             dbc.Col(dbc.Button("BUY PUT", id='btn-buy-put', color="danger", className="w-100 fw-bold"), width=6)
@@ -100,6 +101,10 @@ def render():
                         html.Div(id='execution-feedback', className="mt-2 text-center small text-info")
                     ])
                 ], className="shadow mb-3"),
+                
+                # --- NEW OUTPUTS FOR DYNAMIC BUTTON STATES ---
+                html.Div(id='dummy-output-disable-call', style={'display': 'none'}),
+                html.Div(id='dummy-output-disable-put', style={'display': 'none'}),
 
             ], width=12, lg=4),
 
@@ -138,6 +143,23 @@ def render():
 )
 def toggle_limit_input(order_type):
     return order_type != 'LIMIT'
+    
+# DYNAMIC BUTTON DISABLING (Constraint Override Fix)
+@callback(
+    [Output('btn-buy-call', 'disabled'),
+     Output('btn-buy-put', 'disabled')],
+    [Input('live-interval', 'n_intervals')] # Check every interval
+)
+def update_entry_button_state(n):
+    session = engine_simulator.load_session()
+    active_trade = session.get('active_trade')
+    
+    # If an active trade exists, disable both entry buttons 
+    # (Enforcing the current single-position limitation in engine_simulator.py)
+    if active_trade:
+        return True, True
+    return False, False
+
 
 @callback(
     [Output('live-price-display', 'children'),
@@ -147,7 +169,9 @@ def toggle_limit_input(order_type):
      Output('live-ledger-table', 'children'),
      Output('live-balance-display', 'children'),
      Output('execution-feedback', 'children'),
-     Output('active-position-display', 'children')], # NEW OUTPUT
+     Output('active-position-display', 'children'),
+     Output('dummy-output-disable-call', 'children'), # Dummy output to trigger button callback
+     Output('dummy-output-disable-put', 'children')], # Dummy output
     [Input('live-interval', 'n_intervals'),
      Input('btn-buy-call', 'n_clicks'),
      Input('btn-buy-put', 'n_clicks'),
@@ -185,7 +209,7 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
     # 3. ASK THE ORACLE
     vix_val, vix_rsi = engine_simulator.get_vix_metrics()
     prob_call = engine_ml.predict_success("CALL", vix_val, vix_rsi)
-    prob_put = engine_ml.predict_success("PUT", vix_val, vix_rsi)
+    prob_put = engine_ml.predict_success("PUT", "PUT", vix_val, vix_rsi)
     
     oracle_disp = [
         html.Span(f"🤖 CALL: {prob_call}%", style={'color': '#00bc8c' if prob_call > 60 else '#666', 'marginRight': '15px'}),
@@ -219,7 +243,7 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
     
     balance_str = f"${balance:,.2f}"
     
-    # 6. BUILD ACTIVE POSITION MANIFEST (NEW LOGIC)
+    # 6. BUILD ACTIVE POSITION MANIFEST 
     active_disp = html.Div("NO ACTIVE POSITION", className="text-muted small p-2")
     current_m2m_pnl = 0.0
     
@@ -245,14 +269,36 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
         ], className="p-2")
 
 
-    # 7. BUILD LEDGER (MODIFIED LOGIC)
+    # 7. BUILD LEDGER (MODIFIED LOGIC: Include Active Trade Entry)
     
-    # We must combine ENTRY and EXIT logs for chronological display
     ledger_entries = []
     
+    # ADD ACTIVE TRADE ENTRY (FIX: Must show BUY immediately after entry)
+    if active_trade:
+        # Check if the active trade represents a fresh entry
+        entry_time_str = active_trade['entry_time'].split(' ')[1]
+        
+        # Only add the entry if its action wasn't a CLOSE (which would be in session['trades'])
+        # NOTE: A more robust ledger needs a single journal table, but this hack works for display
+        
+        # Check if this active entry hasn't been closed/logged yet
+        is_closed = any(t['entry_time'] == active_trade['entry_time'] for t in trades)
+        
+        if not is_closed:
+             ledger_entries.append({
+                'time': entry_time_str,
+                'ticker': f"{active_trade['type']} {active_trade['ticker']}",
+                'action': "BUY",
+                'qty': active_trade['contracts'],
+                'price': active_trade['entry_px'],
+                'pnl': current_m2m_pnl, # Show current M2M P&L for open trade
+                'color': 'text-success'
+            })
+
+
     # Add all closed trades (exit leg is recorded here)
     for t in trades:
-        # Entry Leg
+        # Entry Leg (Historical)
         ledger_entries.append({
             'time': t['entry_time'].split(' ')[1],
             'ticker': f"{t['type']} {t['ticker']}",
@@ -262,7 +308,7 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
             'pnl': 0.0,
             'color': 'text-success'
         })
-        # Exit Leg (if P&L exists, it was closed)
+        # Exit Leg 
         ledger_entries.append({
             'time': t['exit_time'].split(' ')[1],
             'ticker': f"{t['type']} {t['ticker']}",
@@ -273,23 +319,29 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
             'color': 'text-warning'
         })
         
-    # Reverse sort by time (latest entry at the top)
-    # NOTE: Since trade log only contains closed trades, this assumes closure time > entry time.
-    # For a *truly* complete chronological ledger, we would need to merge entries and exits 
-    # from a single, unified log, but for now, listing pairs is the fix.
-    
     
     if not ledger_entries:
         table_content = html.Div("No transaction records.", className="text-muted text-center italic mt-4")
     else:
-        # Simple Reverse sort by time string (crude but effective for intraday)
+        # Sort by time string (latest entry at the top)
         ledger_entries.sort(key=lambda x: x['time'], reverse=True)
         
         rows = []
         for entry in ledger_entries:
             pnl_val = entry['pnl']
-            pnl_color = "#00bc8c" if pnl_val >= 0 else "#e74c3c"
-            pnl_str = f"${pnl_val:.2f}" if entry['action'] == "CLOSE" else "-"
+            is_open_buy = (entry['action'] == "BUY" and active_trade and entry['entry_time'] == active_trade['entry_time'])
+            
+            # P&L coloring logic
+            if entry['action'] == "CLOSE":
+                pnl_color = "#00bc8c" if pnl_val >= 0 else "#e74c3c"
+                pnl_str = f"${pnl_val:.2f}"
+            elif is_open_buy:
+                pnl_color = "#00bc8c" if pnl_val >= 0 else "#e74c3c"
+                pnl_str = f"M2M: ${pnl_val:.2f}" # Label open trade P&L
+            else:
+                pnl_color = "text-muted"
+                pnl_str = "-" # Historical BUY entries show no P&L
+            
             
             rows.append(html.Tr([
                 html.Td(entry['time'], className="small"),
@@ -307,4 +359,5 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
             ]))
         ] + [html.Tbody(rows)], bordered=False, hover=True, size='sm', color='dark', className="m-0")
 
-    return price_disp, oracle_disp, fig, datetime.now().strftime("%H:%M:%S"), table_content, balance_str, feedback, active_disp
+    # The button disabling logic is handled by a separate callback (update_entry_button_state)
+    return price_disp, oracle_disp, fig, datetime.now().strftime("%H:%M:%S"), table_content, balance_str, feedback, active_disp, "", ""
