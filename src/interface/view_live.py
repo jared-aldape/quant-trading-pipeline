@@ -4,6 +4,7 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from datetime import datetime
 import pandas as pd
+from src.utils import config  # <--- CRITICAL IMPORT FOR TIMEZONE
 from src.core import engine_simulator
 from src.core import engine_ml 
 
@@ -334,4 +335,7 @@ def master_update(n, btn_call, btn_put, btn_reset, btn_closes, qty, order_type, 
         html.Thead(html.Tr([html.Th("Time"), html.Th("Ticker"), html.Th("Action"), html.Th("Qty"), html.Th("Price"), html.Th("P&L")]))
     ] + [html.Tbody(hist_rows)], bordered=False, hover=True, size='sm', color='dark')
 
-    return price_str, oracle_html, fig, datetime.now().strftime("%H:%M:%S"), active_rows, hist_table, f"${balance:,.2f}", feedback
+    # --- TIMEZONE ENFORCEMENT: USE config.TZ_LOCAL ---
+    current_time_pst = datetime.now(config.TZ_LOCAL).strftime("%H:%M:%S")
+
+    return price_str, oracle_html, fig, current_time_pst, active_rows, hist_table, f"${balance:,.2f}", feedback

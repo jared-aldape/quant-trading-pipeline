@@ -34,6 +34,7 @@ def get_live_price(ticker="SPY", use_cache=True):
         _DATA_CACHE[cache_key] = (now, price)
         return price
     except Exception as e:
+        # Return stale data if available, else None
         if cache_key in _DATA_CACHE: return _DATA_CACHE[cache_key][1]
         return None
 
@@ -115,16 +116,27 @@ def get_live_chart_data(ticker="SPY", interval="5m", period="1d"):
         return None
 
 def black_scholes(S, K, T, r, sigma, option_type="call"):
+    """
+    Standard Black-Scholes Model.
+    CRITICAL FIX: Added Guard Clause for NoneType price (Offline/API Fail).
+    """
+    # --- GUARD CLAUSE ---
+    if S is None or S <= 0:
+        return 0.0
+
     try:
         if T <= 0: return max(0.0, S - K) if option_type == "call" else max(0.0, K - S)
+        
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
         from scipy.stats import norm
+        
         if option_type == "call":
             return (S * norm.cdf(d1, 0.0, 1.0) - K * np.exp(-r * T) * norm.cdf(d2, 0.0, 1.0))
         else:
             return (K * np.exp(-r * T) * norm.cdf(-d2, 0.0, 1.0) - S * norm.cdf(-d1, 0.0, 1.0))
-    except:
+    except Exception:
+        # Fallback for any math errors (e.g. T=0 or overflow)
         return max(0.0, S - K) if option_type == "call" else max(0.0, K - S)
 
 def get_time_to_close():
@@ -149,7 +161,7 @@ def calculate_detailed_fees(num_contracts, fee_model="RH_GOLD"):
     
     # Calculate
     contract_fees = broker_rate * num_contracts
-    reg_fees = reg_base # Simplified per-order reg fee (In reality, scales slightly with notional)
+    reg_fees = reg_base # Simplified per-order reg fee
     
     total = contract_fees + reg_fees
     return total, reg_fees, contract_fees
@@ -164,18 +176,15 @@ def load_session():
             
             # MIGRATION: If old 'active_trade' exists, move it to 'positions'
             if 'active_trade' in data and data['active_trade'] is not None:
-                # Add a UUID to the legacy trade
                 data['active_trade']['trade_id'] = str(uuid.uuid4())
-                
-                # Ensure detailed fees exist (fill with defaults if missing)
                 if 'fees_total' not in data['active_trade']:
-                    data['active_trade']['fees_total'] = 0.54 # Approx default
+                    data['active_trade']['fees_total'] = 0.54 
                     data['active_trade']['fees_reg'] = 0.04
                     data['active_trade']['fees_contract'] = 0.50
 
                 if 'positions' not in data: data['positions'] = []
                 data['positions'].append(data['active_trade'])
-                del data['active_trade'] # Clean up legacy key
+                del data['active_trade'] 
             
             if 'positions' not in data: data['positions'] = []
             return data
@@ -201,11 +210,13 @@ def preview_entry(qty, limit_price=None, fee_model="RH_GOLD"):
         else:
             # Market Order Simulation (ATM Proxy)
             price = get_live_price("SPY", use_cache=True)
-            if not price: return None
+            if not price: return None # <--- GUARD: Return None if Offline
+            
             r, sigma = get_market_context(use_cache=True)
             strike = round(price)
             T = get_time_to_close()
-            # We use CALL as a proxy for premium magnitude (usually similar ATM)
+            
+            # Safe call to BS
             raw = black_scholes(price, strike, T, r, sigma, "call")
             est_fill = raw + 0.01 # Slippage simulation
             is_estimated = True
@@ -235,7 +246,9 @@ def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
     """
     state = load_session()
     price = get_live_price("SPY", use_cache=False)
-    if not price: return "Market Data Error"
+    
+    # GUARD: Ensure we have price data
+    if not price: return "Market Data Error (Offline)"
     
     r, sigma = get_market_context(use_cache=False)
     strike = round(price) 
@@ -267,7 +280,7 @@ def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
     vix_close, vix_rsi = get_vix_metrics()
 
     new_position = {
-        "trade_id": trade_id, # CRITICAL FOR MULTI-LOT TARGETING
+        "trade_id": trade_id, 
         "ticker": f"XSP {int(strike)} {trade_type}",
         "underlying_at_entry": price,
         "strike": strike,
@@ -275,10 +288,10 @@ def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
         "entry_time": entry_time,
         "entry_px": entry_fill,
         "contracts": num_contracts,
-        "cost_basis": cost_basis,           # Total Cost (Prem + Fees)
-        "fees_total": total_fee,            # Total Fees
-        "fees_reg": reg_fee,                # $0.04
-        "fees_contract": broker_fee,        # $0.50
+        "cost_basis": cost_basis,           
+        "fees_total": total_fee,            
+        "fees_reg": reg_fee,                
+        "fees_contract": broker_fee,        
         "implied_vol": sigma,
         "vix_rsi_at_entry": vix_rsi,
         "risk_free": r
@@ -301,6 +314,11 @@ def execute_exit(trade_id, exit_qty=None, reason="MANUAL", fee_model="RH_GOLD"):
     if not target_trade: return "Trade ID Not Found"
     
     price = get_live_price("SPY", use_cache=False)
+    
+    # GUARD: Use entry price if offline to allow emergency close (optional)
+    # But safer to just block or use Last Known
+    if not price: return "Cannot Close: Market Offline"
+    
     r, sigma = get_market_context(use_cache=False)
     T = get_time_to_close()
     
