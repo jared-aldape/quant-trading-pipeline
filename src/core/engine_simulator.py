@@ -168,12 +168,16 @@ def calculate_detailed_fees(num_contracts, fee_model="RH_GOLD"):
 
 def load_session():
     # Schema Migration: Ensure 'positions' list exists
-    default = {"balance": 600.0, "positions": [], "trades": []}
+    default = {"balance": 600.0, "start_balance": 600.0, "positions": [], "trades": []}
     if not SESSION_FILE.exists(): return default
     try:
         with open(SESSION_FILE, 'r') as f: 
             data = json.load(f)
             
+            # MIGRATION: Ensure start_balance exists for P&L tracking
+            if 'start_balance' not in data:
+                data['start_balance'] = 600.0
+
             # MIGRATION: If old 'active_trade' exists, move it to 'positions'
             if 'active_trade' in data and data['active_trade'] is not None:
                 data['active_trade']['trade_id'] = str(uuid.uuid4())
@@ -192,6 +196,39 @@ def load_session():
 
 def save_session(state):
     with open(SESSION_FILE, 'w') as f: json.dump(state, f, indent=4)
+
+def get_portfolio_stats():
+    """
+    NEW: Calculates Total Account Value (Liquid + Open Positions M2M)
+    Returns dictionary with P&L metrics.
+    """
+    state = load_session()
+    start_bal = state.get('start_balance', 600.0)
+    liquid_cash = state['balance']
+    
+    # Calculate Market Value of Open Positions
+    open_equity = 0.0
+    price = get_live_price("SPY", use_cache=True)
+    
+    if price:
+        r, sigma = get_market_context(use_cache=True)
+        T = get_time_to_close()
+        for p in state['positions']:
+            # M2M Valuation
+            opt_val = black_scholes(price, p['strike'], T, r, sigma, p['type'].lower())
+            open_equity += (opt_val * 100 * p['contracts'])
+            
+    total_value = liquid_cash + open_equity
+    pnl_abs = total_value - start_bal
+    pnl_pct = (pnl_abs / start_bal) * 100 if start_bal > 0 else 0.0
+    
+    return {
+        "liquid_cash": liquid_cash,
+        "open_equity": open_equity,
+        "total_value": total_value,
+        "pnl_abs": pnl_abs,
+        "pnl_pct": pnl_pct
+    }
 
 def preview_entry(qty, limit_price=None, fee_model="RH_GOLD"):
     """

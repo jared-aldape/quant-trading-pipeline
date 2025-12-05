@@ -28,13 +28,10 @@ def render():
         dbc.Row([
             # LEFT: EXECUTION & CONTROLS
             dbc.Col([
-                # ACCOUNT BALANCE 
+                # ACCOUNT BALANCE & STATS
                 dbc.Card([
                     dbc.CardHeader("💰 ACCOUNT OVERVIEW", className="fw-bold text-info", style={'backgroundColor': '#1a1a1a'}),
-                    dbc.CardBody([
-                        html.H6("AVAILABLE BALANCE", className="text-muted small mb-0"),
-                        html.H3(id='live-balance-display', className="text-white fw-bold font-monospace mb-0", style={'color': '#00bc8c !important'}),
-                    ])
+                    dbc.CardBody(id='account-stats-container') # <-- NEW ID for Dynamic Content
                 ], className="shadow mb-3"),
                 
                 # EXECUTION TERMINAL
@@ -179,7 +176,7 @@ def update_cost_preview(qty, limit_price, order_type, n):
      Output('live-clock', 'children'),
      Output('active-positions-container', 'children'), # DYNAMIC ROWS
      Output('history-ledger-table', 'children'),
-     Output('live-balance-display', 'children'),
+     Output('account-stats-container', 'children'), # <-- NEW OUTPUT TARGET
      Output('execution-feedback', 'children')],
     [Input('live-interval', 'n_intervals'),
      Input('btn-buy-call', 'n_clicks'),
@@ -335,7 +332,33 @@ def master_update(n, btn_call, btn_put, btn_reset, btn_closes, qty, order_type, 
         html.Thead(html.Tr([html.Th("Time"), html.Th("Ticker"), html.Th("Action"), html.Th("Qty"), html.Th("Price"), html.Th("P&L")]))
     ] + [html.Tbody(hist_rows)], bordered=False, hover=True, size='sm', color='dark')
 
+    # --- C. ACCOUNT STATS ---
+    # Fetch stats using the new function
+    stats = engine_simulator.get_portfolio_stats()
+    
+    # Check if we have valid stats to display
+    if stats:
+        pnl_color = "#00bc8c" if stats['pnl_abs'] >= 0 else "#e74c3c"
+        
+        account_stats_layout = dbc.Row([
+            # Column 1: Available Balance
+            dbc.Col([
+                html.H6("AVAILABLE BALANCE", className="text-muted small mb-0"),
+                html.H3(f"${stats['liquid_cash']:,.2f}", className="text-white fw-bold font-monospace mb-0", style={'color': '#00bc8c !important'}),
+            ], width=6),
+            
+            # Column 2: P&L Metrics
+            dbc.Col([
+                html.H6("TOTAL P&L", className="text-muted small mb-0 text-end"),
+                html.H4(f"${stats['pnl_abs']:+,.2f}", className="fw-bold font-monospace mb-0 text-end", style={'color': pnl_color}),
+                html.Div(f"{stats['pnl_pct']:+.2f}%", className="small font-monospace text-end", style={'color': pnl_color})
+            ], width=6)
+        ])
+    else:
+        account_stats_layout = html.Div("Loading Stats...", className="text-muted")
+
+
     # --- TIMEZONE ENFORCEMENT: USE config.TZ_LOCAL ---
     current_time_pst = datetime.now(config.TZ_LOCAL).strftime("%H:%M:%S")
 
-    return price_str, oracle_html, fig, current_time_pst, active_rows, hist_table, f"${balance:,.2f}", feedback
+    return price_str, oracle_html, fig, current_time_pst, active_rows, hist_table, account_stats_layout, feedback
