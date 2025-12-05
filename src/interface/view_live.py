@@ -33,6 +33,13 @@ def render():
         dbc.Row([
             # LEFT: CONTROLS & SESSION STATS
             dbc.Col([
+                
+                # ACTIVE POSITION MANIFEST (NEW)
+                dbc.Card([
+                    dbc.CardHeader("🎯 ACTIVE POSITION MANIFEST", className="fw-bold text-info", style={'backgroundColor': '#1a1a1a'}),
+                    dbc.CardBody(html.Div(id='active-position-display', className="text-center font-monospace"))
+                ], className="shadow mb-3"),
+                
                 # EXECUTION PANEL
                 dbc.Card([
                     dbc.CardHeader([
@@ -139,7 +146,8 @@ def toggle_limit_input(order_type):
      Output('live-clock', 'children'),
      Output('live-ledger-table', 'children'),
      Output('live-balance-display', 'children'),
-     Output('execution-feedback', 'children')],
+     Output('execution-feedback', 'children'),
+     Output('active-position-display', 'children')], # NEW OUTPUT
     [Input('live-interval', 'n_intervals'),
      Input('btn-buy-call', 'n_clicks'),
      Input('btn-buy-put', 'n_clicks'),
@@ -162,12 +170,12 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
     elif ctx_id in ['btn-buy-call', 'btn-buy-put']:
         side = "CALL" if ctx_id == 'btn-buy-call' else "PUT"
         # Pass QTY mode to engine
-        # Note: Engine currently fills at market (Black Scholes), but we pass the qty
         feedback = engine_simulator.execute_entry(side, size_val=qty, size_mode="QTY")
         if order_type == 'LIMIT' and limit_price:
             feedback += f" (Limit: ${limit_price})" 
 
     elif ctx_id == 'btn-sell':
+        # NOTE: execute_exit handles partial fills.
         feedback = engine_simulator.execute_exit(exit_qty=sell_qty)
 
     # 2. FETCH DATA & CONTEXT
@@ -203,35 +211,92 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
         uirevision='live_chart'
     )
 
-    # 5. BUILD LEDGER & BALANCE
+    # 5. FETCH SESSION STATE
     session = engine_simulator.load_session()
     trades = session.get('trades', [])
     balance = session.get('balance', 600.0)
+    active_trade = session.get('active_trade')
     
     balance_str = f"${balance:,.2f}"
     
-    if not trades:
+    # 6. BUILD ACTIVE POSITION MANIFEST (NEW LOGIC)
+    active_disp = html.Div("NO ACTIVE POSITION", className="text-muted small p-2")
+    current_m2m_pnl = 0.0
+    
+    if active_trade and price:
+        # Calculate Mark-to-Market (M2M) P&L
+        r, sigma = engine_simulator.get_market_context()
+        T = engine_simulator.get_time_to_close()
+        
+        raw_premium = engine_simulator.black_scholes(price, active_trade['strike'], T, r, sigma, active_trade['type'].lower())
+        m2m_price = raw_premium # Using raw premium as M2M price proxy
+        
+        current_contract_value = (m2m_price * 100)
+        total_market_value = current_contract_value * active_trade['contracts']
+        current_m2m_pnl = total_market_value - active_trade['cost_basis']
+        
+        pnl_color = "#00bc8c" if current_m2m_pnl >= 0 else "#e74c3c"
+        
+        active_disp = html.Div([
+            html.Span(f"{active_trade['contracts']}x {active_trade['type'].upper()} {active_trade['strike']}", className="fw-bold text-white me-3"),
+            html.Span(f"Entry: ${active_trade['entry_px']:.2f}", className="text-muted small me-3"),
+            html.Span(f"M2M: ${m2m_price:.2f}", className="text-muted small me-3"),
+            html.Span(f"P&L: ${current_m2m_pnl:.2f}", style={'color': pnl_color}, className="fw-bold")
+        ], className="p-2")
+
+
+    # 7. BUILD LEDGER (MODIFIED LOGIC)
+    
+    # We must combine ENTRY and EXIT logs for chronological display
+    ledger_entries = []
+    
+    # Add all closed trades (exit leg is recorded here)
+    for t in trades:
+        # Entry Leg
+        ledger_entries.append({
+            'time': t['entry_time'].split(' ')[1],
+            'ticker': f"{t['type']} {t['ticker']}",
+            'action': "BUY",
+            'qty': t['contracts'],
+            'price': t['entry_px'],
+            'pnl': 0.0,
+            'color': 'text-success'
+        })
+        # Exit Leg (if P&L exists, it was closed)
+        ledger_entries.append({
+            'time': t['exit_time'].split(' ')[1],
+            'ticker': f"{t['type']} {t['ticker']}",
+            'action': "CLOSE",
+            'qty': t['contracts'],
+            'price': t['exit_px'],
+            'pnl': t['pnl'],
+            'color': 'text-warning'
+        })
+        
+    # Reverse sort by time (latest entry at the top)
+    # NOTE: Since trade log only contains closed trades, this assumes closure time > entry time.
+    # For a *truly* complete chronological ledger, we would need to merge entries and exits 
+    # from a single, unified log, but for now, listing pairs is the fix.
+    
+    
+    if not ledger_entries:
         table_content = html.Div("No transaction records.", className="text-muted text-center italic mt-4")
     else:
-        rows = []
-        running_bal = 600.0 # Estimate start if not tracked strictly in log, or work backwards
-        # Note: ideally ledger has balance snapshot. For now we list trades.
+        # Simple Reverse sort by time string (crude but effective for intraday)
+        ledger_entries.sort(key=lambda x: x['time'], reverse=True)
         
-        for t in reversed(trades):
-            # Extract details matching the screenshot request
-            action = "BUY" if t['pnl'] == 0 else "SELL" # Simple heuristic if pnl calc happens on exit
-            if 'pnl' in t and t['pnl'] != 0: action = "CLOSE"
-            
-            pnl_val = t.get('pnl', 0)
+        rows = []
+        for entry in ledger_entries:
+            pnl_val = entry['pnl']
             pnl_color = "#00bc8c" if pnl_val >= 0 else "#e74c3c"
-            pnl_str = f"${pnl_val:.2f}" if action == "CLOSE" else "-"
+            pnl_str = f"${pnl_val:.2f}" if entry['action'] == "CLOSE" else "-"
             
             rows.append(html.Tr([
-                html.Td(t['exit_time'].split(' ')[1] if action=="CLOSE" else t['entry_time'].split(' ')[1], className="small"),
-                html.Td(f"{t['type']} {t['ticker']}", className="small fw-bold text-white"),
-                html.Td(action, className=f"small fw-bold {'text-success' if action=='BUY' else 'text-warning'}"),
-                html.Td(t['contracts'], className="small text-center"),
-                html.Td(f"${t['exit_px']:.2f}" if action=="CLOSE" else f"${t['entry_px']:.2f}", className="small text-end"),
+                html.Td(entry['time'], className="small"),
+                html.Td(entry['ticker'], className="small fw-bold text-white"),
+                html.Td(entry['action'], className=f"small fw-bold {entry['color']}"),
+                html.Td(entry['qty'], className="small text-center"),
+                html.Td(f"${entry['price']:.2f}", className="small text-end"),
                 html.Td(pnl_str, style={'color': pnl_color}, className="text-end fw-bold"),
             ]))
             
@@ -242,4 +307,4 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
             ]))
         ] + [html.Tbody(rows)], bordered=False, hover=True, size='sm', color='dark', className="m-0")
 
-    return price_disp, oracle_disp, fig, datetime.now().strftime("%H:%M:%S"), table_content, balance_str, feedback
+    return price_disp, oracle_disp, fig, datetime.now().strftime("%H:%M:%S"), table_content, balance_str, feedback, active_disp
