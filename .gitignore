@@ -13,6 +13,7 @@ __pycache__/
 /data
 data/quant_strategy.duckdb
 /data
+quant-key.pem
 *.pem
 
 # --- Keep these! ---
