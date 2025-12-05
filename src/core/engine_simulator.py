@@ -184,6 +184,50 @@ def load_session():
 def save_session(state):
     with open(SESSION_FILE, 'w') as f: json.dump(state, f, indent=4)
 
+def preview_entry(qty, limit_price=None, fee_model="RH_GOLD"):
+    """
+    NEW: Estimates cost without executing trade.
+    Returns dictionary with breakdown.
+    """
+    try:
+        qty = int(qty)
+        if qty < 1: return None
+        
+        # Determine Price Source
+        if limit_price and float(limit_price) > 0:
+            est_fill = float(limit_price)
+            is_estimated = False
+            price_source = "LIMIT"
+        else:
+            # Market Order Simulation (ATM Proxy)
+            price = get_live_price("SPY", use_cache=True)
+            if not price: return None
+            r, sigma = get_market_context(use_cache=True)
+            strike = round(price)
+            T = get_time_to_close()
+            # We use CALL as a proxy for premium magnitude (usually similar ATM)
+            raw = black_scholes(price, strike, T, r, sigma, "call")
+            est_fill = raw + 0.01 # Slippage simulation
+            is_estimated = True
+            price_source = f"MKT (~${est_fill:.2f})"
+
+        contract_cost = est_fill * 100
+        total_fee, reg_fee, broker_fee = calculate_detailed_fees(qty, fee_model)
+        total_cost = (qty * contract_cost) + total_fee
+        
+        return {
+            "est_fill": est_fill,
+            "qty": qty,
+            "fees_total": total_fee,
+            "fees_reg": reg_fee,
+            "fees_contract": broker_fee,
+            "total_cost": total_cost,
+            "is_estimated": is_estimated,
+            "source": price_source
+        }
+    except Exception as e:
+        return None
+
 def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
     """
     Supports Multiple Positions (Scaling In).

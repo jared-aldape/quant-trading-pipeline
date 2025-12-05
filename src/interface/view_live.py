@@ -69,6 +69,9 @@ def render():
                                 dbc.Input(id='input-limit-price', type='number', placeholder="Limit Price ($)", disabled=True, className="mb-3 bg-dark text-white border-secondary"),
                             ], width=12)
                         ]),
+                        
+                        # --- NEW: COST PREVIEW DISPLAY ---
+                        html.Div(id='cost-preview-display', className="mb-3 p-2 border border-secondary rounded bg-black small font-monospace", style={'minHeight': '60px'}),
 
                         # BUY BUTTONS
                         dbc.Row([
@@ -107,7 +110,7 @@ def render():
         ]),
 
         # THROTTLE
-        dcc.Interval(id='live-interval', interval=10000, n_intervals=0) # 10s refresh
+        dcc.Interval(id='live-interval', interval=5000, n_intervals=0) # 5s refresh
 
     ], fluid=True)
 
@@ -120,6 +123,52 @@ def render():
     Input('input-order-type', 'value')
 )
 def toggle_limit(val): return val != 'LIMIT'
+
+# NEW: PREVIEW CALLBACK
+@callback(
+    Output('cost-preview-display', 'children'),
+    [Input('input-qty', 'value'),
+     Input('input-limit-price', 'value'),
+     Input('input-order-type', 'value'),
+     Input('live-interval', 'n_intervals')]
+)
+def update_cost_preview(qty, limit_price, order_type, n):
+    if not qty or qty < 1: return html.Div("Enter Quantity", className="text-muted text-center")
+    
+    # Fetch preview data
+    # Note: If Limit, it uses limit_price. If Market, it fetches live "Proxy" ATM price.
+    limit_val = limit_price if order_type == 'LIMIT' else None
+    
+    data = engine_simulator.preview_entry(qty, limit_val)
+    if not data: return html.Div("Calculating...", className="text-muted text-center")
+    
+    # Check Solvency
+    session = engine_simulator.load_session()
+    balance = session.get('balance', 0)
+    is_solvent = balance >= data['total_cost']
+    
+    total_color = "#00bc8c" if is_solvent else "#e74c3c"
+    warning_text = "" if is_solvent else " (INSUFFICIENT FUNDS)"
+    
+    return html.Div([
+        dbc.Row([
+            dbc.Col(f"Est. Fill: ${data['est_fill']:.2f}", width=6, className="text-muted"),
+            dbc.Col(f"Qty: {data['qty']}", width=6, className="text-end text-muted")
+        ]),
+        dbc.Row([
+            dbc.Col(f"Fees: ${data['fees_total']:.2f}", width=12, className="text-warning small")
+        ]),
+        html.Div(f"Reg: ${data['fees_reg']:.2f} | Contract: ${data['fees_contract']:.2f}", className="text-muted small mb-1", style={'fontSize': '0.7em'}),
+        html.Hr(className="my-1 border-secondary"),
+        dbc.Row([
+            dbc.Col("TOTAL ESTIMATED COST:", width=6, className="text-white fw-bold"),
+            dbc.Col([
+                html.Span(f"${data['total_cost']:.2f}", style={'color': total_color, 'fontSize': '1.2em'}),
+                html.Span(warning_text, className="small text-danger fw-bold")
+            ], width=6, className="text-end fw-bold")
+        ])
+    ])
+
 
 # MASTER CALLBACK (Handles Updates, Buys, and Dynamic Closes)
 @callback(
@@ -139,9 +188,10 @@ def toggle_limit(val): return val != 'LIMIT'
     [State('input-qty', 'value'),
      State('input-order-type', 'value'),
      State('input-limit-price', 'value'),
-     State({'type': 'input-close-qty', 'index': ALL}, 'value')] # GET QTY FROM DYNAMIC ROW
+     State({'type': 'input-close-qty', 'index': ALL}, 'value'),
+     State({'type': 'input-close-qty', 'index': ALL}, 'id')] # Need IDs to map values
 )
-def master_update(n, btn_call, btn_put, btn_reset, btn_closes, qty, order_type, limit_price, close_qtys):
+def master_update(n, btn_call, btn_put, btn_reset, btn_closes, qty, order_type, limit_price, close_qtys, close_ids):
     
     # Identify Trigger
     trigger_id = ctx.triggered_id if ctx.triggered_id else 'interval'
@@ -161,30 +211,15 @@ def master_update(n, btn_call, btn_put, btn_reset, btn_closes, qty, order_type, 
         # Get the Trade ID from the button's index
         trade_id = trigger_id['index']
         
-        # Find which input box corresponds to this button (Dash returns lists for ALL inputs)
-        # We need to map the triggered button index to the correct input value
-        # This is tricky in Dash. Simplification: The order of `close_qtys` matches the order of rendered inputs.
-        # However, relying on index order is risky if list changes. 
-        # Robust method: engine handles 'None' qty as 'Close All'. 
-        
-        # Finding the specific qty value from the list of all input values:
-        # We reconstruct the mapping based on the current context inputs list.
-        # But for now, let's assume Close All if specific parsing fails, or pass specific value if simple.
-        
-        # Hack for "All vs Specific": For this revision, we will grab the value corresponding to the button press.
-        # Inputs are passed in order of creation. 
-        
-        # To simplify: We just tell the engine to close '1' or 'All'. 
-        # But the user wants a toggle. 
-        # We need to find the specific value in `close_qtys` that corresponds to `trade_id`.
-        # Since `ctx.inputs_list` contains the mapping.
-        
-        # Advanced Dash Pattern Matching Extraction:
+        # Find which input box corresponds to this button
         user_qty = None
-        for input_obj in ctx.states_list[3]: # Index 3 is 'input-close-qty'
-            if input_obj['id']['index'] == trade_id:
-                user_qty = input_obj['value']
-                break
+        
+        # Map the list of values to the list of IDs to find the match
+        if close_qtys and close_ids:
+            for val, id_obj in zip(close_qtys, close_ids):
+                if id_obj['index'] == trade_id:
+                    user_qty = val
+                    break
         
         feedback = engine_simulator.execute_exit(trade_id, exit_qty=user_qty)
 
@@ -219,19 +254,24 @@ def master_update(n, btn_call, btn_put, btn_reset, btn_closes, qty, order_type, 
     if not positions:
         active_rows = html.Div("No active positions.", className="text-muted text-center p-3")
     else:
+        # Sort by entry time (newest on top)
+        positions.sort(key=lambda x: x['entry_time'], reverse=True)
+        
         for p in positions:
             # Mark to Market
             r, sigma = engine_simulator.get_market_context()
             T = engine_simulator.get_time_to_close()
             curr_prem = engine_simulator.black_scholes(price, p['strike'], T, r, sigma, p['type'].lower())
             
+            # Financial Calcs
             mkt_val = curr_prem * 100 * p['contracts']
-            unrealized_pnl = mkt_val - p['cost_basis']
+            # P&L is Market Value - Cost Basis
+            unrealized_pnl = mkt_val - p['cost_basis'] 
             pnl_pct = (unrealized_pnl / p['cost_basis']) * 100 if p['cost_basis'] > 0 else 0
             
             color = "#00bc8c" if unrealized_pnl >= 0 else "#e74c3c"
             
-            # THE ROW LAYOUT
+            # THE ROW LAYOUT (Robinhood Style)
             row = dbc.Card([
                 dbc.CardBody([
                     dbc.Row([
@@ -239,42 +279,39 @@ def master_update(n, btn_call, btn_put, btn_reset, btn_closes, qty, order_type, 
                         dbc.Col([
                             html.Div(p['entry_time'].split(' ')[1], className="small text-muted"),
                             html.Div(f"{p['type']} {p['strike']}", className="fw-bold text-white"),
+                            html.Div(f"{p['contracts']}x Contracts", className="small text-info"),
                         ], width=2),
                         
-                        # 2. COST BASIS & FEES
+                        # 2. COST BASIS & FEES (The requested breakdown)
                         dbc.Col([
-                            html.Div(f"Cost: ${p['cost_basis']:.2f}", className="small text-white"),
-                            html.Div(f"Fees: ${p['fees_total']:.2f}", className="small text-muted", style={'fontSize': '0.7em'}),
-                            html.Div(f"Prem: ${p['entry_px']:.2f}", className="small text-muted", style={'fontSize': '0.7em'}),
-                        ], width=2),
+                            html.Div(f"Entry: ${p['entry_px']:.2f}", className="small text-muted"),
+                            html.Div(f"Fees: ${p.get('fees_total', 0):.2f}", className="small text-warning", style={'fontSize': '0.7em'}),
+                            html.Div(f"Cost: ${p['cost_basis']:.2f}", className="small text-white fw-bold"),
+                        ], width=3),
                         
-                        # 3. MARKET DATA
+                        # 3. MARKET DATA & PNL
                         dbc.Col([
-                            html.Div(f"Val: ${mkt_val:.2f}", className="small text-white"),
-                            html.Div(f"Mark: ${curr_prem:.2f}", className="small text-info"),
-                        ], width=2),
-                        
-                        # 4. P&L
-                        dbc.Col([
+                            html.Div(f"Mark: ${curr_prem:.2f}", className="small text-muted"),
                             html.Div(f"${unrealized_pnl:.2f}", style={'color': color}, className="fw-bold"),
-                            html.Div(f"{pnl_pct:.1f}%", style={'color': color}, className="small"),
-                        ], width=2),
+                            html.Div(f"{pnl_pct:+.2f}%", style={'color': color}, className="small fw-bold"),
+                        ], width=3),
                         
-                        # 5. ACTIONS (RIGHT SIDE)
+                        # 4. ACTIONS (RIGHT SIDE)
                         dbc.Col([
                             dbc.InputGroup([
+                                dbc.InputGroupText("Qty", className="bg-dark text-muted border-secondary small"),
                                 dbc.Input(
                                     id={'type': 'input-close-qty', 'index': p['trade_id']},
                                     type='number', min=1, max=p['contracts'], value=p['contracts'], step=1,
-                                    size="sm"
+                                    size="sm", className="bg-dark text-white border-secondary"
                                 ),
                                 dbc.Button(
                                     "CLOSE", 
                                     id={'type': 'btn-close-position', 'index': p['trade_id']},
-                                    color="warning", size="sm"
+                                    color="warning", size="sm", className="fw-bold"
                                 )
                             ], size="sm")
-                        ], width=4, className="text-end"),
+                        ], width=4, className="text-end align-self-center"),
                     ], align="center")
                 ], className="p-2")
             ], className="mb-2 border-secondary", style={'backgroundColor': '#222'})
