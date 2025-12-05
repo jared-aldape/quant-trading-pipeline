@@ -209,7 +209,11 @@ def update_live_console(n, btn_call, btn_put, btn_sell, btn_reset, qty, sell_qty
     # 3. ASK THE ORACLE
     vix_val, vix_rsi = engine_simulator.get_vix_metrics()
     prob_call = engine_ml.predict_success("CALL", vix_val, vix_rsi)
-    prob_put = engine_ml.predict_success("PUT", "PUT", vix_val, vix_rsi)
+    
+    # --- [BUG FIX APPLIED HERE] ---
+    # OLD: prob_put = engine_ml.predict_success("PUT", "PUT", vix_val, vix_rsi)
+    # NEW: Removed redundant argument
+    prob_put = engine_ml.predict_success("PUT", vix_val, vix_rsi)
     
     oracle_disp = [
         html.Span(f"🤖 CALL: {prob_call}%", style={'color': '#00bc8c' if prob_call > 60 else '#666', 'marginRight': '15px'}),
