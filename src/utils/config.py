@@ -81,3 +81,11 @@ ENABLE_DISCORD = True
 # ==============================================================================
 # The Master Variable for ORB Synchronization
 ORB_WINDOW_MINUTES = 30
+# ==============================================================================
+# 9. RISK PROTOCOLS (CIRCUIT BREAKER)
+# ==============================================================================
+# If Daily PnL drops below this % (e.g., -5.0%), the system LIQUIDATES ALL.
+RISK_MAX_DAILY_LOSS_PCT = 5.0 
+
+# If VIX exceeds this level, the system enters "BUNKER MODE" (No new entries).
+RISK_MAX_VIX_LEVEL = 40.0

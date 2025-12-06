@@ -16,45 +16,30 @@ from src.utils import config
 from src.utils.logger import get_logger
 import src.core.strat_fractal as strat_fractal
 from src.core.engine_confirmation import ConfirmationEngine
+from src.core import engine_simulator
 
 log = get_logger("Sentinel")
 SCAN_INTERVAL = 60 
 
 # ==============================================================================
-# 1. ORB INTELLIGENCE (Project Echo)
+# 1. ORB INTELLIGENCE
 # ==============================================================================
 def get_orb_levels(ticker="SPY"):
-    """
-    Calculates the Opening Range Breakout (ORB) levels based on CONFIG window.
-    """
     now_ny = datetime.now(config.TZ_NY)
     today_str = now_ny.strftime('%Y-%m-%d')
-    
-    # Define ORB Window Dynamically from Config
     orb_start = config.TZ_NY.localize(datetime.combine(now_ny.date(), dtime(9, 30)))
     orb_end = orb_start + timedelta(minutes=config.ORB_WINDOW_MINUTES)
     
-    if now_ny < orb_end:
-        return None, None # Still forming
-        
+    if now_ny < orb_end: return None, None
     try:
         df = yf.Ticker(ticker).history(start=today_str, interval="1m")
         if df.empty: return None, None
-        
-        if df.index.tz is None:
-            df.index = df.index.tz_localize(config.TZ_NY)
-        else:
-            df.index = df.index.tz_convert(config.TZ_NY)
-            
+        if df.index.tz is None: df.index = df.index.tz_localize(config.TZ_NY)
+        else: df.index = df.index.tz_convert(config.TZ_NY)
         orb_df = df[(df.index >= orb_start) & (df.index < orb_end)]
-        
         if orb_df.empty: return None, None
-        
         return orb_df['High'].max(), orb_df['Low'].min()
-        
-    except Exception as e:
-        log.error(f"ORB Calc Failed: {e}")
-        return None, None
+    except: return None, None
 
 # ==============================================================================
 # 2. MARKET DATA
@@ -77,55 +62,75 @@ def get_live_price(ticker="SPY"):
     return 0.0
 
 # ==============================================================================
-# 3. ALERTING SYSTEM
+# 3. RISK MANAGEMENT (CIRCUIT BREAKER)
+# ==============================================================================
+def check_circuit_breaker():
+    """
+    Monitors Daily PnL. Triggers LIQUIDATION if limit breached.
+    """
+    stats = engine_simulator.get_portfolio_stats()
+    current_pnl_pct = stats.get('pnl_pct', 0.0)
+    
+    if current_pnl_pct <= -5.0: # Hardcoded 5% limit if config missing
+        limit = getattr(config, 'RISK_MAX_DAILY_LOSS_PCT', 5.0)
+        if current_pnl_pct <= -limit:
+            dispatch_alert({"signal_type": "MAYDAY", "reason": f"Daily Loss {current_pnl_pct:.2f}% exceeds limit"}, "CIRCUIT BREAKER TRIGGERED")
+            
+            session = engine_simulator.load_session()
+            positions = session.get('positions', [])
+            
+            if positions:
+                print(f"\n[💀] CIRCUIT BREAKER: LIQUIDATING {len(positions)} POSITIONS...")
+                for p in positions:
+                    res = engine_simulator.execute_exit(p['trade_id'], reason="CIRCUIT_BREAKER")
+                    print(f"    -> {res}")
+                return True
+            
+    return False
+
+# ==============================================================================
+# 4. ALERTING
 # ==============================================================================
 def dispatch_alert(signal_data, gatekeeper_note="", orb_status=""):
     timestamp = datetime.now(config.TZ_LOCAL).strftime("%H:%M:%S")
     spy_price = get_live_price("SPY")
     bias = signal_data.get('signal_type', 'NEUTRAL') 
-    reason = signal_data.get('reason')
     
     print("\n" + "="*60)
     print(f"🚨 SENTINEL ALERT // {timestamp}")
     print(f"TYPE:    {bias}")
-    print(f"CONTEXT: SPY ${spy_price:.2f} | {orb_status}")
-    print(f"LOGIC:   {reason}")
-    print(f"GATE:    {gatekeeper_note}")
+    print(f"STATUS:  {gatekeeper_note}")
     print("="*60 + "\n")
 
     if config.ENABLE_DISCORD and "http" in config.DISCORD_WEBHOOK:
-        color = 15158332 if "SHORT" in bias or "PUT" in bias else 5763719
+        color = 15548997 if "MAYDAY" in bias else 5763719
         payload = {
             "username": "Quant OS Sentinel",
             "embeds": [{
-                "title": f"🚨 {bias} DETECTED",
+                "title": f"🚨 {bias}",
                 "color": color, 
                 "fields": [
                     {"name": "SPY Price", "value": f"${spy_price:.2f}", "inline": True},
-                    {"name": "ORB Status", "value": orb_status, "inline": True},
-                    {"name": "Logic", "value": reason, "inline": False},
-                    {"name": "Gatekeeper", "value": f"✅ {gatekeeper_note}", "inline": False},
-                    {"name": "Time", "value": timestamp, "inline": False}
+                    {"name": "Note", "value": gatekeeper_note, "inline": False},
+                    {"name": "Logic", "value": signal_data.get('reason', 'N/A'), "inline": False}
                 ],
-                "footer": {"text": f"Quant OS v3.3 // ORB-{config.ORB_WINDOW_MINUTES}m"}
+                "footer": {"text": f"Quant OS v3.3"}
             }]
         }
-        try:
-            requests.post(config.DISCORD_WEBHOOK, json=payload)
+        try: requests.post(config.DISCORD_WEBHOOK, json=payload)
         except: pass
 
 # ==============================================================================
-# 4. SENTINEL LOOP
+# 5. MAIN LOOP
 # ==============================================================================
 def run_sentinel():
-    print(f"\n   SENTINEL v3.3 // PROJECT ECHO ACTIVE (ORB: {config.ORB_WINDOW_MINUTES}m)")
-    print("   ------------------------------------")
-    mtc = ConfirmationEngine("SPY")
-    print("   [✓] GATEKEEPER:    ONLINE")
+    print(f"\n   SENTINEL v3.3 // TACTICAL COMMAND ACTIVE")
+    limit = getattr(config, 'RISK_MAX_DAILY_LOSS_PCT', 5.0)
+    print(f"   [🛡️] CIRCUIT BREAKER: ARMED (-{limit}%)")
+    print(f"   [✓] ORB MONITOR:     ARMED ({config.ORB_WINDOW_MINUTES}m)")
     
     orb_high, orb_low = None, None
     orb_end_time = (datetime.combine(datetime.today(), dtime(9, 30)) + timedelta(minutes=config.ORB_WINDOW_MINUTES)).time()
-    print(f"   [✓] ORB MONITOR:   ARMED (09:30 - {orb_end_time.strftime('%H:%M')} ET)")
     
     while True:
         try:
@@ -138,30 +143,32 @@ def run_sentinel():
                 time.sleep(300)
                 continue
 
-            # --- ORB FORMATION PHASE ---
+            # --- CIRCUIT BREAKER CHECK ---
+            if check_circuit_breaker():
+                print("\n[💀] SYSTEM LOCKDOWN. Manual Reset Required.")
+                time.sleep(3600)
+                continue
+
+            # --- ORB PHASE ---
             if current_time < orb_end_time:
-                print(f"\r[OBSERVE] Forming Opening Range (Ends {orb_end_time.strftime('%H:%M')} ET)... SPY: ${get_live_price():.2f}", end="")
+                print(f"\r[OBSERVE] Forming ORB (Ends {orb_end_time.strftime('%H:%M')} ET)... SPY: ${get_live_price():.2f}", end="")
                 time.sleep(30)
                 continue
             
-            # --- ORB CALCULATION ---
             if orb_high is None:
                 orb_high, orb_low = get_orb_levels("SPY")
-                if orb_high:
-                    print(f"\n[🔒] ORB LOCKED: High ${orb_high:.2f} | Low ${orb_low:.2f}")
-                else:
-                    print(f"\r[WAIT] Waiting for data...", end="")
+                if orb_high: print(f"\n[🔒] ORB LOCKED: {orb_high:.2f} | {orb_low:.2f}")
+                else: 
                     time.sleep(10)
                     continue
 
-            # --- SCANNING PHASE ---
+            # --- SCAN PHASE ---
             print(f"\r[SCAN] VIX Structures... SPY: ${get_live_price():.2f}", end="")
             
             vix_1h, vix_5m = fetch_live_vix()
             if vix_1h is None: continue
             
             current_rsi = strat_fractal.calculate_rsi(vix_5m).iloc[-1]['rsi']
-            
             res = strat_fractal.check_fractal_flow(
                 strat_fractal.calculate_macd(vix_1h),
                 strat_fractal.calculate_macd(vix_5m),
@@ -171,37 +178,24 @@ def run_sentinel():
             
             if res['signal_type']:
                 spy_price = get_live_price("SPY")
-                orb_status = "INSIDE CHOP"
-                is_valid_orb = False
+                valid = False
                 
-                if res['signal_type'] == 'call':
-                    if spy_price > orb_high:
-                        orb_status = "✅ BREAKOUT (Above ORB High)"
-                        is_valid_orb = True
-                    else:
-                        orb_status = "🛑 BLOCKED (Below ORB High)"
-                elif res['signal_type'] == 'put':
-                    if spy_price < orb_low:
-                        orb_status = "✅ BREAKDOWN (Below ORB Low)"
-                        is_valid_orb = True
-                    else:
-                        orb_status = "🛑 BLOCKED (Above ORB Low)"
+                if res['signal_type'] == 'call' and spy_price > orb_high: valid = True
+                elif res['signal_type'] == 'put' and spy_price < orb_low: valid = True
 
-                if is_valid_orb:
-                    print(f"\n[!] ORB CONFIRMED. Requesting MTC...")
-                    dispatch_alert(res, gatekeeper_note="ORB Validated", orb_status=orb_status)
+                if valid:
+                    print(f"\n[!] SIGNAL CONFIRMED.")
+                    dispatch_alert(res, gatekeeper_note="ORB Breakout Confirmed")
                     time.sleep(300)
                 else:
-                    print(f"\n[🛡️] ECHO GUARD: Signal {res['signal_type']} blocked. {orb_status}")
+                    print(f"\n[🛡️] ECHO GUARD: Signal blocked by ORB.")
                     time.sleep(60)
 
             time.sleep(SCAN_INTERVAL)
 
-        except KeyboardInterrupt:
-            print("\n🛑 Sentinel Deactivated.")
-            sys.exit()
+        except KeyboardInterrupt: sys.exit()
         except Exception as e:
-            log.error(f"Sentinel Loop Error: {e}")
+            log.error(f"Sentinel Error: {e}")
             time.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
