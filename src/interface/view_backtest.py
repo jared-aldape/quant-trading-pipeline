@@ -20,7 +20,8 @@ class BacktestArgs:
         self.strategy_mode = mode if mode else 'Fractal'
         try: self.tax_rate = float(tax) if tax else 0.0
         except: self.tax_rate = 0.0
-        # Execution Params
+        
+        # Execution Params (Passed to Engine logic if supported)
         try: self.trailing_stop_pct = (float(trail) / 100.0) if trail else None
         except: self.trailing_stop_pct = None
         try: self.ideal_gain_pct = (float(gain) / 100.0) if gain else None
@@ -283,17 +284,14 @@ def update_backtest(n, start, end, balance, mode, tax, trail, gain, be_trigger, 
         results['clean_bal'] = results['Balance'].apply(clean_money)
         
         # --- DURATION CALCULATION ---
-        # The engine returns strings like "10:00" for entry/exit. We need to parse them to calc duration.
-        # Since date is in 'Date' column, we combine.
         try:
+            # We construct datetime objects for accurate timedelta calc
             results['dt_entry'] = pd.to_datetime(results['Date'].astype(str) + ' ' + results['Time'])
-            results['dt_exit'] = pd.to_datetime(results['Date'].astype(str) + ' ' + results['Exit_Time']) # Engine needs to provide 'Exit_Time' key
+            results['dt_exit'] = pd.to_datetime(results['Date'].astype(str) + ' ' + results['Exit_Time']) # Expects 'Exit_Time' from engine
             
-            # Fallback if engine doesn't provide Exit_Time explicitly in the DF
-            # In engine_backtest.py we added 'exit_time' to the daily_candidates dict but we need to ensure it's in the final DF
-            # If not available, we simulate 60 mins based on engine logic
+            # Fallback if engine hasn't been updated to return 'Exit_Time' explicitly
             if 'Exit_Time' not in results.columns:
-                 # Temporary fix: Assume 60 mins per engine logic
+                 # Logic assumes 60m hold if not specified
                  duration_mins = 60
                  avg_duration_str = "60m"
             else:
@@ -301,7 +299,8 @@ def update_backtest(n, start, end, balance, mode, tax, trail, gain, be_trigger, 
                 avg_mins = results['duration'].mean()
                 avg_duration_str = f"{int(avg_mins)}m"
         except:
-            avg_duration_str = "60m" # Default fallback
+            # Safe Fallback
+            avg_duration_str = "60m" 
 
         # Stats
         final_balance = results.iloc[-1]['clean_bal']
@@ -341,8 +340,7 @@ def update_backtest(n, start, end, balance, mode, tax, trail, gain, be_trigger, 
             row_bg = 'rgba(0, 255, 65, 0.05)' if is_win else 'rgba(255, 0, 0, 0.05)'
             
             # Calculate duration for row if possible
-            # Assuming 60m standard for now based on engine logic
-            duration_disp = "60m" 
+            duration_disp = "60m" # Default fallback
             
             table_rows.append(html.Tr([
                 html.Td(row['Date'], className="small text-muted"), 
