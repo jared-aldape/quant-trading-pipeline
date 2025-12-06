@@ -40,33 +40,44 @@ def generate_logo_asset():
     except AttributeError:
         version_str = "QUANT OS v3.3"
 
-    # The Vector Blueprint (v3.3.1 - Stabilized Orbit)
+    print(f"⚙️ GENERATING ASSET: quant_logo.svg [{version_str}]")
+
+    # THE MAGITEK SWORD (Simplified / Stable Protocol)
+    # Uses ONLY standard paths and system fonts. No gradients or imports.
     svg_content = f"""<svg width="400" height="400" viewBox="0 0 400 400" fill="none" xmlns="http://www.w3.org/2000/svg">
     <style>
-        @keyframes radar-spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
-        .orbit-group {{ transform-origin: 200px 200px; transform-box: view-box; animation: radar-spin 4s linear infinite; }}
+        /* Simple Pulse Animation (Same as working radar) */
         @keyframes core-pulse {{ 0% {{ stroke-opacity: 1; }} 50% {{ stroke-opacity: 0.5; }} 100% {{ stroke-opacity: 1; }} }}
         .core-node {{ animation: core-pulse 3s ease-in-out infinite; }}
     </style>
-    <rect width="400" height="400" rx="40" fill="#0B0C10"/>
-    <path d="M40 200H360" stroke="#1F2833" stroke-width="2"/>
-    <path d="M200 40V360" stroke="#1F2833" stroke-width="2"/>
-    <path d="M200 50 L329.9 125 V275 L200 350 L70.1 275 V125 L200 50 Z" stroke="#45A29E" stroke-width="8" stroke-linecap="round" fill="none"/>
-    <path d="M200 80 L300 137 V263 L200 320 L100 263 V137 L140 114" stroke="#C5C6C7" stroke-width="4" stroke-linecap="round" stroke-dasharray="10 10"/>
-    <circle class="core-node" cx="200" cy="200" r="30" fill="#1F2833" stroke="#66FCF1" stroke-width="4"/>
-    <path d="M185 200 L200 215 L230 185" stroke="#66FCF1" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-    <g class="orbit-group"><rect x="195" y="40" width="10" height="20" fill="#FFA500"/></g>
     
-    <text x="200" y="380" font-family="Courier New, monospace" font-weight="bold" font-size="24" fill="#C5C6C7" text-anchor="middle" letter-spacing="4">{version_str}</text>
+    <rect width="400" height="400" rx="40" fill="#101830" stroke="#b5b8b9" stroke-width="4"/>
+    
+    <path d="M40 200H360" stroke="#283878" stroke-width="2"/>
+    <path d="M200 40V360" stroke="#283878" stroke-width="2"/>
+    
+    <path d="M200 60 L240 130 L220 340 L200 360 L180 340 L160 130 Z" stroke="#f3f5f9" stroke-width="4" fill="none"/>
+    
+    <path d="M200 90 L225 140 L210 320 L200 330 L190 320 L175 140 Z" stroke="#b5b8b9" stroke-width="2" stroke-dasharray="10 10"/>
+    
+    <path d="M140 130 L260 130" stroke="#fde722" stroke-width="8" stroke-linecap="round"/>
+    
+    <circle class="core-node" cx="200" cy="130" r="15" fill="#101830" stroke="#fde722" stroke-width="4"/>
+    
+    <text x="200" y="370" font-family="Courier New, monospace" font-weight="bold" font-size="32" fill="#fde722" text-anchor="middle" letter-spacing="4">{version_str}</text>
 </svg>"""
 
     # Ensure assets directory exists
     asset_path = ROOT_DIR / "assets"
     asset_path.mkdir(exist_ok=True)
     
-    # Write the asset
-    with open(asset_path / "quant_logo.svg", "w") as f:
-        f.write(svg_content)
+    # Write the asset (UTF-8 Forced)
+    try:
+        with open(asset_path / "quant_logo.svg", "w", encoding="utf-8") as f:
+            f.write(svg_content)
+        print("✅ ASSET GENERATED: assets/quant_logo.svg")
+    except Exception as e:
+        print(f"❌ ASSET ERROR: {e}")
 
 # EXECUTE ASSET GENERATION
 generate_logo_asset()
@@ -78,7 +89,7 @@ app = dash.Dash(
     __name__, 
     external_stylesheets=[dbc.themes.CYBORG], 
     suppress_callback_exceptions=True,
-    title=f"Quant OS {getattr(config, 'SYSTEM_VERSION', 'v3.3')}" # Safe attribute access
+    title=f"Quant OS {getattr(config, 'SYSTEM_VERSION', 'v3.3')}"
 )
 server = app.server
 
@@ -128,7 +139,7 @@ app.layout = html.Div([
             ], vertical=True, pills=True),
         ]),
         id="offcanvas",
-        title="", # <--- FIXED: Title removed to eliminate obstruction
+        title="", 
         is_open=False,
         style={"backgroundColor": "#0B0C10", "color": "white", "borderRight": "1px solid #1F2833"}
     ),
