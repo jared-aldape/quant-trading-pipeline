@@ -34,8 +34,11 @@ def generate_logo_asset():
     Generates the SVG Logo dynamically on startup using the version 
     defined in config.py. ensuring the 'Glass' always matches the 'Vault'.
     """
-    version_str = f"QUANT OS {config.SYSTEM_VERSION}"
-    
+    try:
+        version_str = f"QUANT OS {config.SYSTEM_VERSION}"
+    except AttributeError:
+        version_str = "QUANT OS v3.3"
+
     # The Vector Blueprint (v3.3.1 - Stabilized Orbit)
     svg_content = f"""<svg width="400" height="400" viewBox="0 0 400 400" fill="none" xmlns="http://www.w3.org/2000/svg">
     <style>
@@ -74,7 +77,7 @@ app = dash.Dash(
     __name__, 
     external_stylesheets=[dbc.themes.CYBORG], 
     suppress_callback_exceptions=True,
-    title=f"Quant OS {config.SYSTEM_VERSION}" # <--- Dynamic Browser Title
+    title=f"Quant OS {getattr(config, 'SYSTEM_VERSION', 'v3.3')}" 
 )
 server = app.server
 
@@ -124,7 +127,7 @@ app.layout = html.Div([
             ], vertical=True, pills=True),
         ]),
         id="offcanvas",
-        title="Tactical Command",
+        title="", # <--- FIXED: Title removed to prevent obstruction
         is_open=False,
         style={"backgroundColor": "#0B0C10", "color": "white", "borderRight": "1px solid #1F2833"}
     ),
