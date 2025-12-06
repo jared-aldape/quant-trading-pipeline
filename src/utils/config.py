@@ -73,7 +73,8 @@ GLOBAL_SESSION.headers.update({
 # ==============================================================================
 # 7. COMMUNICATION CHANNELS (TACTICAL ALERTING)
 # ==============================================================================
-DISCORD_WEBHOOK = "YOUR_DISCORD_WEBHOOK_URL_HERE"
+# DISCORD INTEGRATION (v3.3)
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1446796399340556358/baydGMXNytREvepaKy4lZvlXgO6cvLvylDBVMBNQ1WHtwmTMc2oLz5MhYEbpzVOlJ6sv"
 ENABLE_DISCORD = True
 
 # ==============================================================================
@@ -81,6 +82,7 @@ ENABLE_DISCORD = True
 # ==============================================================================
 # The Master Variable for ORB Synchronization
 ORB_WINDOW_MINUTES = 30
+
 # ==============================================================================
 # 9. RISK PROTOCOLS (CIRCUIT BREAKER)
 # ==============================================================================
