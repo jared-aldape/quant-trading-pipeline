@@ -1,0 +1,136 @@
+/* QUANT OS THEME: FINAL FANTASY VI (SNES) */
+/* "There's no reason to be afraid. I'm just a Magitek Knight." */
+
+@import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+
+:root {
+    --ff-blue-bg: #283878;       /* The Classic Window Blue */
+    --ff-text: #f3f5f9;          /* Off-White Text */
+    --ff-gold: #fde722;          /* Cursor/Highlight Gold */
+    --ff-border: #b5b8b9;        /* Window Frame Grey */
+    --ff-black: #000000;         /* Void Background */
+    --ff-shadow: rgba(0, 0, 0, 0.6);
+}
+
+/* 1. THE VOID (Global Reset) */
+body {
+    background-color: var(--ff-black);
+    /* Optional: Subtle Scanline effect for CRT vibe */
+    background-image: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+    background-size: 100% 2px, 3px 100%;
+    font-family: 'VT323', monospace;
+    font-size: 1.3rem;
+    color: var(--ff-text);
+}
+
+/* 2. THE WINDOW (Card Override) */
+/* The signature rounded blue box with the white frame */
+.card {
+    background: linear-gradient(to bottom, #283878 0%, #1c2855 100%);
+    border: 4px solid var(--ff-border);
+    border-radius: 12px; /* SNES Rounded Corners */
+    box-shadow: 
+        inset 0 0 10px #000, /* Inner Depth */
+        0 0 0 2px #000,      /* Outer Outline */
+        5px 5px 0px rgba(0,0,0,0.5); /* Drop Shadow */
+    margin-bottom: 20px;
+}
+
+.card-header {
+    background: transparent;
+    border-bottom: 2px solid rgba(181, 184, 185, 0.3);
+    color: var(--ff-gold); /* Header Text is Gold */
+    text-shadow: 2px 2px #000;
+    font-size: 1.6rem;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+/* 3. THE MENU (Sidebar) */
+#offcanvas {
+    background: linear-gradient(to right, #283878, #182248) !important;
+    border-right: 4px double var(--ff-border) !important;
+    color: var(--ff-text);
+}
+
+/* 4. THE GLOVED HAND (Navigation) */
+.nav-link {
+    color: var(--ff-text) !important;
+    font-size: 1.4rem;
+    padding-left: 20px;
+    transition: all 0.1s;
+}
+
+/* When Hovered or Active: Show the "Finger" */
+.nav-link:hover, .nav-link.active {
+    color: var(--ff-gold) !important;
+    text-shadow: 0 0 5px var(--ff-gold);
+    transform: translateX(10px); /* Move slightly right */
+}
+
+.nav-link.active::before {
+    content: "☛"; /* The White Glove Finger Proxy */
+    color: #fff;
+    margin-right: 10px;
+    font-size: 1.2rem;
+    text-shadow: 2px 2px #000;
+}
+
+/* 5. INPUTS (The Config Screen) */
+.form-control, .Select-control {
+    background-color: #101830 !important; /* Darker Blue */
+    border: 2px solid var(--ff-border) !important;
+    color: var(--ff-text) !important;
+    font-family: 'VT323', monospace;
+    border-radius: 4px;
+}
+
+/* 6. BUTTONS (Fight / Item / Magic) */
+.btn {
+    font-family: 'VT323', monospace;
+    text-transform: uppercase;
+    border: 2px solid #fff;
+    box-shadow: 2px 2px 0px #000;
+    border-radius: 6px;
+    font-size: 1.2rem;
+}
+
+.btn-success {
+    background-color: #006400; /* Bio/Poison Green */
+    color: #fff;
+}
+
+.btn-primary {
+    background-color: var(--ff-blue-bg);
+    color: var(--ff-gold);
+}
+
+/* 7. TABLES (The Bestiary / Inventory) */
+.table {
+    color: var(--ff-text);
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.table thead th {
+    border-bottom: 2px solid var(--ff-border);
+    color: var(--ff-gold);
+    font-size: 1.3rem;
+}
+
+.table tbody tr:hover {
+    background-color: rgba(253, 231, 34, 0.15) !important; /* Gold Highlight */
+    cursor: pointer;
+}
+
+/* 8. ALERTS & STATUS */
+/* "Limit Break" Styling */
+.text-danger {
+    color: #ff4d4d !important; /* Limit Break Red */
+    text-shadow: 0 0 5px #ff0000;
+}
+
+.text-success {
+    color: #55ff55 !important; /* Cure Green */
+    text-shadow: 0 0 5px #00ff00;
+}

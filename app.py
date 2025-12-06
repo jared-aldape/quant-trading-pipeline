@@ -34,6 +34,7 @@ def generate_logo_asset():
     Generates the SVG Logo dynamically on startup using the version 
     defined in config.py. ensuring the 'Glass' always matches the 'Vault'.
     """
+    # Defensive check for config version
     try:
         version_str = f"QUANT OS {config.SYSTEM_VERSION}"
     except AttributeError:
@@ -77,7 +78,7 @@ app = dash.Dash(
     __name__, 
     external_stylesheets=[dbc.themes.CYBORG], 
     suppress_callback_exceptions=True,
-    title=f"Quant OS {getattr(config, 'SYSTEM_VERSION', 'v3.3')}" 
+    title=f"Quant OS {getattr(config, 'SYSTEM_VERSION', 'v3.3')}" # Safe attribute access
 )
 server = app.server
 
@@ -127,7 +128,7 @@ app.layout = html.Div([
             ], vertical=True, pills=True),
         ]),
         id="offcanvas",
-        title="", # <--- FIXED: Title removed to prevent obstruction
+        title="", # <--- FIXED: Title removed to eliminate obstruction
         is_open=False,
         style={"backgroundColor": "#0B0C10", "color": "white", "borderRight": "1px solid #1F2833"}
     ),
