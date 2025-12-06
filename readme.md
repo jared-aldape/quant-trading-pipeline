@@ -1,96 +1,106 @@
-# **🚀 Quant OS v3.1: The Tactical Command System**
+# **⚔️ QUANT OS v3.3: THE TACTICAL COMMAND SYSTEM**
 
-**"Hybrid Truth in the Vault. Surgical Precision on the Glass."**
+**"Hybrid Truth in the Vault. Surgical Precision on the Glass. Vigilance in the Void."**
 
-Quant OS v3.1 is a professional-grade financial operating system designed to eliminate emotional bias and validate trading profitability using real-world market friction and advanced statistical analysis. It operates on a **Hybrid Architecture**: Polygon.io for historical "Truth" (Vault) and Yahoo Finance for real-time "Speed" (Glass).
+* **Version:** v3.3.1 (Stable / Magitek Build)  
+* **Status:** Command Mode Active  
+* **Node:** Quant-OS-Node-1 (AWS US-East-2)  
+* **Last Update:** December 06, 2025
 
-## **⚡ SYSTEM STATUS: DEPLOYED (AWS)**
+## **I. THE PRIME DIRECTIVE**
 
-* **Node:** Quant-OS-Node-1 (US-East-2)  
-* **Sentinel:** **ARMED** (24/7 Daemon)  
-* **Pipeline:** **AUTOMATED** (Daily Cron @ 06:00 PST)  
-* **Interface:** **ONLINE** (Port 8050\)
+Quant OS is not just a backtester; it is a **Tactical Command System** designed to eliminate emotional bias through strict algorithmic enforcement. It operates on a **Hybrid Architecture**:
 
-## **🏛️ The Six Laws of Quant OS (Core)**
+1. **Truth (The Vault):** Polygon.io (Historical) & DuckDB (Storage).  
+2. **Speed (The Glass):** Yahoo Finance (Real-time) & Dash (Visualization).  
+3. **Vigilance (The Sentinel):** Python Daemon (Automation).
 
-These laws define the non-negotiable standards of data integrity and trade execution within the system:
+## **II. THE SIX LAWS OF QUANT OS (CORE PROTOCOL)**
 
-1. **🕰️ The Timezone Law:** \* **Vault:** All database timestamps are **Naive UTC**.  
+*These laws are non-negotiable. Breaking them corrupts the data and invalidates the strategy.*
+
+1. **🕰️ The Timezone Law:**  
+   * **Vault:** All database timestamps are **Naive UTC**.  
    * **Glass:** All visualizations convert strictly to **Local Time (PST)**.  
-2. **⚖️ The Scaling Law:** \* **Reality:** We trade **XSP** (Mini-SPX).  
-   * **Alignment:** SPY (ETF) is used as the high-speed price proxy. Futures (/ES) are scaled (1/10th) to align visually.  
-3. **🛡️ The Hard Deck Law:** \* **Safety:** The engine is forbidden from executing trades within **15 minutes** of the Opening Bell (09:30 ET) to prevent unrealistic fills during spread chaos.  
-4. **💰 The Friction Law:** \* **Reality:** The engine applies **Slippage ($/Share)** and **Robinhood Regulatory Fees** (XSP/Equity logic) to all fills, revealing the *true* cost and expectancy of the strategy.  
-5. **🧠** The Gatekeeper **Law:** \* **Filter:** Entry signals are blocked unless they pass **Trend Filters (SMA)** and **Momentum Filters (RSI)**, ensuring only high-quality, non-counter-trend signals are considered.  
-6. **🌊 The Flow Law:** \* **Bias:** Trades are weighted dynamically based on the 20-Day Macro Flow (Bull/Bear Bias).
+   * *Rationale:* Preventing "look-ahead bias" caused by timezone shifts.  
+2. **⚖️ The Scaling Law:**  
+   * **Reality:** We trade **XSP** (Mini-SPX) for tax efficiency (60/40 rule).  
+   * **Alignment:** SPY is the high-speed proxy. Futures (/ES) are scaled (1/10th) for overlays.  
+3. **🛡️ The Hard Deck Law:**  
+   * **Restriction:** No executions within **15 minutes** of the Opening Bell (09:30 ET).  
+   * **Expiration:** 0DTE options strictly expire at 16:00 ET (Value \= Intrinsic Only). No "Ghost Extrinsic" value allowed.  
+4. **💰 The Friction Law:**  
+   * **Cost:** Every simulation deducts **Slippage ($0.01)** and **Regulatory Fees** (Robinhood/SEC rates).  
+   * *Rationale:* A strategy is only profitable if it beats the friction.  
+5. **🧠 The Gatekeeper Law:**  
+   * **Filter:** Entries require **Fractal Flow** (VIX Macro/Micro alignment) \+ **RSI Momentum**.  
+   * *Rationale:* Preventing counter-trend entries during high-volatility chop.  
+6. **🌊 The Flow Law:**  
+   * **Bias:** Position sizing is weighted by the **20-Day Macro Flow Bias** (Bull/Bear).  
+   * *Rationale:* "Don't fight the ocean."
 
-## **🛠️ The Interface (Chronological Workflow)**
+## **III. SYSTEM ARCHITECTURE**
 
-The Quant OS Interface (src/interface) is accessible via the **Dash UI**:
+The system uses a smart config.py to auto-detect its environment (Local vs. Cloud).
 
-| Timeline | UI Name | Function |
-| :---- | :---- | :---- |
-| **SYSTEM** | **Health Monitor** | Real-time diagnostics for Disk, DB Latency, and Network heartbeat. Displays this Mission Log. |
-| **PRESENT** | **Live** **Trading** | Real-time execution dashboard with cached data throttling (15s) and "Neon Console" visuals. |
-| **PAST** | **Backtest Engine** | The verification engine. Runs strategies against the Vault with "Battering Ram" persistence. |
-| **PAST** | **Practice Mode** | "Fog of War" historical replay tool. Test your reflexes on past market days candle-by-candle. |
-| **PAST** | **Trade Auditor** | Deep-dive forensic microscope. Overlays XSP Price, Futures (/ES), and VIX Indicators for tick-level analysis. |
-| **FUTURE** | **Predictive Analysis** | Intraday predictive modeling engine using Volatility (ORB) and Linear Regression channels. |
+QUANT-OS/  
+├── data/                 \<-- The Vault (DuckDB \+ JSON State)  
+├── assets/               \<-- Visual Protocols (Magitek SVG)  
+├── src/  
+│   ├── core/             \<-- Logic Engines  
+│   │   ├── engine\_simulator.py  \<-- Live Execution (Multi-Threaded)  
+│   │   ├── engine\_backtest.py   \<-- Historical Validation  
+│   │   └── sentinel.py          \<-- Automation Daemon  
+│   ├── interface/        \<-- The "Glass" (Dash Views)  
+│   └── utils/            \<-- Config & Logging  
+├── app.py                \<-- Main UI Entry Point (Port 8050\)  
+└── main\_pipeline.py      \<-- Daily Data Cron Job (06:00 PST)
 
-## **🤖 The Sentinel (Automation Layer)**
+## **IV. OPERATIONAL WORKFLOW**
 
-The **Sentinel** is a headless daemon (quant-sentinel.service) running silently in the background of the AWS Node.
+### **1\. The Morning Ritual (06:15 PST)**
 
-* **Cycle:** Scans SPY/VIX every 60 seconds.  
-* **Logic:** Applies the "Fractal Flow" strategy (VIX Macro/Micro).  
-* **Alerts:** Dispatches **Discord Webhooks** immediately upon finding a valid setup.  
-* **Control:** Managed via systemctl on the remote server.
+* **Objective:** Ensure the "Vault" has ingested yesterday's closing data.  
+* **Action:** Check the **System Health** page. Verify "DB Latency" is \< 24 hours.
 
-## **🏗️ System Architecture (Environment Aware)**
+### **2\. The Watch (06:30 \- 13:00 PST)**
 
-The system uses a smart config.py that auto-detects its environment:
+* **Objective:** Monitor for Fractal Flow signals.  
+* **Tool:** **Live Console**.  
+* **Automation:** The **Sentinel** scans ^VIX every 60s and dispatches Discord alerts.
 
-QUANT-OS/
+### **3\. The Review (Post-Market)**
 
-├── data/ \<-- The Vault (DuckDB \+ JSON State)
+* **Objective:** Audit performance against the model.  
+* **Tool:** **Statistics Lab** & **Chart Analysis**.  
+* **Action:** Run the **Data Generator** to see if the "Perfect Robot" would have taken your trades.
 
-├── logs/ \<-- System Logs (Cron & App)
+## **V. STRATEGIC ROADMAP**
 
-├── src/
+### **🔴 Priority Alpha: The Hedge Protocol**
 
-│ ├── core/ \<-- Logic Engines (Backtest, Sentinel, Greeks)
+* **Objective:** Enable concurrent Long Call and Long Put positions (Straddles/Hedges).  
+* **Status:** **DEPLOYED (v3.3.1)**.  
+* **Notes:** engine\_simulator.py refactored to support multi-lot portfolios and atomic ledger writing.
 
-│ ├── interface/ \<-- Dash Views (Health, Live, Audit)
+### **🟡 Priority Bravo: Machine Learning Optimization**
 
-│ └── utils/ \<-- Config (Auto-detects Local vs. AWS paths)
+* **Objective:** Train a Random Forest classifier on TBL\_SIM\_LOG.  
+* **Goal:** Predict trade success probability based on VIX Level and Time of Day.  
+* **Status:** **Pending Integration**. Logic exists but is not wired to Live Console.
 
-├── app.py \<-- Main UI Entry Point
+### **⚪ Priority Charlie: Multi-Leg Execution**
 
-└── main\_pipeline.py \<-- Daily Data Cron Job (06:00 PST)
+* **Objective:** Vertical Spreads (Debit Spreads) to cap risk.  
+* **Status:** Concept Phase.
 
-## **🚀 Operational Workflow (Commander's Card)**
+## **VI. PROJECT LOG**
 
-**1\.** Morning Check **(06:15 PST):**
-
-* Login: ssh \-i quant-key.pem ubuntu@\<IP\>  
-* Verify Pipeline: Check "Health Monitor" for updated data latency.  
-* Check Logs: tail \-f logs/cron\_pipeline.log
-
-**2\. The Watch (06:30 PST):**
-
-* Access GUI: http://\<IP\>:8050  
-* Keep **Live Trading** open.  
-* Wait for **Sentinel** alerts on Discord.
-
-**3\. Deployment (CI/CD):**
-
-* **Local:** Edit code \-\> git commit \-\> git push  
-* **Remote:** ssh \-\> cd QUANT-OS \-\> git pull \-\> pkill \-f app.py \-\> nohup python app.py &
-
-## **📜 Project Log: Phase 7-10 (Cloud Injection)**
-
-* **M16: Cloud Injection:** Successfully deployed to AWS t3.micro instance.  
-* **M17: Memory Protocol:** Implemented Swap File to stabilize Pandas/DuckDB on low-RAM environment.  
-* **M18: Sentinel Daemon:** Converted sentinel.py to a systemd background service for 24/7 uptime.  
-* **M19: Environment Awareness:** Patched config.py to support dynamic paths for seamless Local/Cloud development.  
-* **M20: The Glass Refactor:** Updated UI for mobile
+* **M16:** Cloud Injection (AWS EC2 Deployment).  
+* **M17:** Memory Protocol (Swap File for low-RAM stability).  
+* **M18:** Sentinel Daemon (Systemd Service).  
+* **M19:** Environment Awareness (Dynamic Config).  
+* **M20:** The Glass Refactor (Mobile Responsiveness).  
+* **M21:** **Architecture Consolidation (v3.3)** – Merged "Training Gym" into Replay Analysis.  
+* **M22:** **Visual Protocol Update** – Implemented **"Magitek" (Final Fantasy VI)** theme and SVG logic.  
+* **M23:** **Simulation Core Patch** – Fixed "Ghost Trade" bug, enforced 0DTE Expiration Hard Deck, and enabled Multi-Threaded Portfolios.
