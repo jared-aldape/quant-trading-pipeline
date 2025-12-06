@@ -4,7 +4,7 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import pytz
 from src.core import engine_simulator, engine_ml
 from src.utils import config
@@ -13,13 +13,18 @@ from src.utils import config
 # 1. PREDICTIVE MATH (ORB + LINREG)
 # ==============================================================================
 def calculate_orb(df):
-    """Calculates Opening Range Breakout (09:30-10:00) levels."""
+    """Calculates Opening Range Breakout levels based on CONFIG window."""
     if df is None or df.empty: return None, None
     
     # Filter for RTH start
     df['time'] = df['Datetime'].dt.time
     start = time(9, 30)
-    end = time(10, 0)
+    
+    # Dynamic End Time Calculation
+    dummy_date = datetime.now().date()
+    start_dt = datetime.combine(dummy_date, start)
+    end_dt = start_dt + timedelta(minutes=config.ORB_WINDOW_MINUTES)
+    end = end_dt.time()
     
     orb_df = df[(df['time'] >= start) & (df['time'] < end)]
     if orb_df.empty: return None, None
@@ -27,19 +32,13 @@ def calculate_orb(df):
     return orb_df['High'].max(), orb_df['Low'].min()
 
 def calculate_linreg(df):
-    """Calculates Linear Regression Channel."""
     if df is None or len(df) < 20: return df
-    
     df['x'] = np.arange(len(df))
-    # Fit line
     slope, intercept = np.polyfit(df['x'], df['Close'], 1)
     df['reg_line'] = slope * df['x'] + intercept
-    
-    # Std Dev Bands
     std = df['Close'].std()
     df['upper_band'] = df['reg_line'] + (2 * std)
     df['lower_band'] = df['reg_line'] - (2 * std)
-    
     return df
 
 # ==============================================================================
@@ -50,7 +49,7 @@ def render():
         dbc.Row([
             dbc.Col([
                 html.H2("PREDICTIVE ANALYSIS (The HUD)", className="display-6 fw-bold text-white"),
-                html.P("Project Echo (ORB) and Project Delta (LinReg) visualization.", className="text-muted lead")
+                html.P(f"Project Echo (ORB-{config.ORB_WINDOW_MINUTES}m) and Project Delta (LinReg) visualization.", className="text-muted lead")
             ], width=8),
             dbc.Col([
                 html.Div(id='predict-clock', className="display-6 text-end text-info font-monospace")
@@ -58,7 +57,6 @@ def render():
         ], className="mb-3"),
 
         dbc.Row([
-            # ORACLE PANEL
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader("🤖 ORACLE CONFIDENCE", className="fw-bold text-warning", style={'backgroundColor': '#1a1a1a'}),
@@ -68,8 +66,6 @@ def render():
                     ])
                 ], className="shadow mb-3")
             ], width=3),
-            
-            # CHART
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
@@ -78,9 +74,7 @@ def render():
                 ], className="shadow")
             ], width=9)
         ]),
-
-        dcc.Interval(id='predict-interval', interval=30000, n_intervals=0) # 30s update
-
+        dcc.Interval(id='predict-interval', interval=30000, n_intervals=0) 
     ], fluid=True)
 
 # ==============================================================================
@@ -94,11 +88,9 @@ def render():
     [Input('predict-interval', 'n_intervals')]
 )
 def update_prediction_hud(n):
-    # 1. Data
     df = engine_simulator.get_live_chart_data(period="1d", interval="1m")
     vix_val, vix_rsi = engine_simulator.get_vix_metrics()
     
-    # 2. Oracle
     p_call = engine_ml.predict_success("CALL", vix_val, vix_rsi)
     p_put = engine_ml.predict_success("PUT", vix_val, vix_rsi)
     
@@ -108,25 +100,17 @@ def update_prediction_hud(n):
     call_disp = html.Span(f"CALL: {p_call}%", style=call_style)
     put_disp = html.Span(f"PUT: {p_put}%", style=put_style)
 
-    # 3. Chart Prep
     fig = go.Figure()
-    
     if df is not None and not df.empty:
-        # LinReg
         df = calculate_linreg(df)
-        
-        # Candles
         fig.add_trace(go.Candlestick(
             x=df['Datetime'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
             name="SPY", increasing_line_color='#00bc8c', decreasing_line_color='#e74c3c'
         ))
-        
-        # LinReg Channels
         fig.add_trace(go.Scatter(x=df['Datetime'], y=df['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Mean"))
         fig.add_trace(go.Scatter(x=df['Datetime'], y=df['upper_band'], line=dict(color='cyan', width=1), name="+2σ"))
         fig.add_trace(go.Scatter(x=df['Datetime'], y=df['lower_band'], line=dict(color='cyan', width=1), name="-2σ"))
         
-        # ORB Levels (Project Echo)
         orb_h, orb_l = calculate_orb(df)
         if orb_h:
             fig.add_hline(y=orb_h, line_color="#00bc8c", line_width=1, line_dash="dash", annotation_text="ORB HIGH")
@@ -140,5 +124,4 @@ def update_prediction_hud(n):
         xaxis_rangeslider_visible=False,
         uirevision='predict_chart'
     )
-
     return fig, call_disp, put_disp, datetime.now().strftime("%H:%M")

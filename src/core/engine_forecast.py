@@ -116,13 +116,16 @@ def generate_forecast(ticker="SPY", model_type="ORB"):
     if len(today_df) < 6:
         return {"status": "WAITING", "msg": "Insufficient data (Need 30+ minutes of candles)"}
 
-    # 2. Calculate Opening Range (First 60 Mins)
+    # 2. Calculate Opening Range (Dynamic from Config)
     open_time = today_df.iloc[0]['datetime']
-    orb_end_time = open_time + timedelta(minutes=60)
+    # FIX: Use Config Variable instead of Hardcoded 60
+    orb_end_time = open_time + timedelta(minutes=config.ORB_WINDOW_MINUTES)
+    
     orb_df = today_df[today_df['datetime'] <= orb_end_time]
     
     if orb_df.empty: 
-        return {"status": "WAITING", "msg": "ORB not yet calculated (Wait for 10:30 AM EST)"}
+        # FIX: Dynamic message
+        return {"status": "WAITING", "msg": f"ORB not yet calculated (Wait for {orb_end_time.strftime('%H:%M')} ET)"}
 
     orb_high = orb_df['high'].max()
     orb_low = orb_df['low'].min()

@@ -25,39 +25,32 @@ SCAN_INTERVAL = 60
 # ==============================================================================
 def get_orb_levels(ticker="SPY"):
     """
-    Calculates the 30-minute Opening Range Breakout (ORB) levels.
-    Returns: (orb_high, orb_low) or (None, None) if not yet 10:00 ET.
+    Calculates the Opening Range Breakout (ORB) levels based on CONFIG window.
     """
     now_ny = datetime.now(config.TZ_NY)
     today_str = now_ny.strftime('%Y-%m-%d')
     
-    # Define ORB Window: 09:30 - 10:00 ET
+    # Define ORB Window Dynamically from Config
     orb_start = config.TZ_NY.localize(datetime.combine(now_ny.date(), dtime(9, 30)))
-    orb_end = config.TZ_NY.localize(datetime.combine(now_ny.date(), dtime(10, 0)))
+    orb_end = orb_start + timedelta(minutes=config.ORB_WINDOW_MINUTES)
     
     if now_ny < orb_end:
         return None, None # Still forming
         
     try:
-        # Fetch 1m data for today
         df = yf.Ticker(ticker).history(start=today_str, interval="1m")
         if df.empty: return None, None
         
-        # Localize if needed
         if df.index.tz is None:
             df.index = df.index.tz_localize(config.TZ_NY)
         else:
             df.index = df.index.tz_convert(config.TZ_NY)
             
-        # Filter for the first 30 mins
         orb_df = df[(df.index >= orb_start) & (df.index < orb_end)]
         
         if orb_df.empty: return None, None
         
-        orb_high = orb_df['High'].max()
-        orb_low = orb_df['Low'].min()
-        
-        return orb_high, orb_low
+        return orb_df['High'].max(), orb_df['Low'].min()
         
     except Exception as e:
         log.error(f"ORB Calc Failed: {e}")
@@ -89,7 +82,7 @@ def get_live_price(ticker="SPY"):
 def dispatch_alert(signal_data, gatekeeper_note="", orb_status=""):
     timestamp = datetime.now(config.TZ_LOCAL).strftime("%H:%M:%S")
     spy_price = get_live_price("SPY")
-    bias = signal_data.get('signal_type', 'NEUTRAL') # Fixed key access
+    bias = signal_data.get('signal_type', 'NEUTRAL') 
     reason = signal_data.get('reason')
     
     print("\n" + "="*60)
@@ -114,7 +107,7 @@ def dispatch_alert(signal_data, gatekeeper_note="", orb_status=""):
                     {"name": "Gatekeeper", "value": f"✅ {gatekeeper_note}", "inline": False},
                     {"name": "Time", "value": timestamp, "inline": False}
                 ],
-                "footer": {"text": "Quant OS v3.2 // Project Echo"}
+                "footer": {"text": f"Quant OS v3.3 // ORB-{config.ORB_WINDOW_MINUTES}m"}
             }]
         }
         try:
@@ -125,32 +118,33 @@ def dispatch_alert(signal_data, gatekeeper_note="", orb_status=""):
 # 4. SENTINEL LOOP
 # ==============================================================================
 def run_sentinel():
-    print("\n   SENTINEL v3.2 // PROJECT ECHO ACTIVE")
+    print(f"\n   SENTINEL v3.3 // PROJECT ECHO ACTIVE (ORB: {config.ORB_WINDOW_MINUTES}m)")
     print("   ------------------------------------")
     mtc = ConfirmationEngine("SPY")
     print("   [✓] GATEKEEPER:    ONLINE")
     
     orb_high, orb_low = None, None
-    print("   [✓] ORB MONITOR:   ARMED (09:30 - 10:00 ET)")
+    orb_end_time = (datetime.combine(datetime.today(), dtime(9, 30)) + timedelta(minutes=config.ORB_WINDOW_MINUTES)).time()
+    print(f"   [✓] ORB MONITOR:   ARMED (09:30 - {orb_end_time.strftime('%H:%M')} ET)")
     
     while True:
         try:
             now_ny = datetime.now(config.TZ_NY)
             current_time = now_ny.time()
             
-            # --- MARKET HOURS GUARD (09:30 - 16:00 ET) ---
+            # --- MARKET HOURS GUARD ---
             if now_ny.weekday() >= 5 or current_time < dtime(9, 30) or current_time >= dtime(16, 0):
                 print(f"\r[SLEEP] Market Closed ({now_ny.strftime('%H:%M')})...", end="")
                 time.sleep(300)
                 continue
 
-            # --- ORB FORMATION PHASE (09:30 - 10:00) ---
-            if current_time < dtime(10, 0):
-                print(f"\r[OBSERVE] Forming Opening Range (Ends 10:00 ET)... SPY: ${get_live_price():.2f}", end="")
+            # --- ORB FORMATION PHASE ---
+            if current_time < orb_end_time:
+                print(f"\r[OBSERVE] Forming Opening Range (Ends {orb_end_time.strftime('%H:%M')} ET)... SPY: ${get_live_price():.2f}", end="")
                 time.sleep(30)
                 continue
             
-            # --- ORB CALCULATION (Once per day logic) ---
+            # --- ORB CALCULATION ---
             if orb_high is None:
                 orb_high, orb_low = get_orb_levels("SPY")
                 if orb_high:
@@ -166,8 +160,6 @@ def run_sentinel():
             vix_1h, vix_5m = fetch_live_vix()
             if vix_1h is None: continue
             
-            # 1. Fractal Check
-            # Get latest RSI for Gatekeeper Law
             current_rsi = strat_fractal.calculate_rsi(vix_5m).iloc[-1]['rsi']
             
             res = strat_fractal.check_fractal_flow(
@@ -182,14 +174,12 @@ def run_sentinel():
                 orb_status = "INSIDE CHOP"
                 is_valid_orb = False
                 
-                # 2. ORB FILTER (Project Echo)
                 if res['signal_type'] == 'call':
                     if spy_price > orb_high:
                         orb_status = "✅ BREAKOUT (Above ORB High)"
                         is_valid_orb = True
                     else:
                         orb_status = "🛑 BLOCKED (Below ORB High)"
-                
                 elif res['signal_type'] == 'put':
                     if spy_price < orb_low:
                         orb_status = "✅ BREAKDOWN (Below ORB Low)"
@@ -197,12 +187,10 @@ def run_sentinel():
                     else:
                         orb_status = "🛑 BLOCKED (Above ORB Low)"
 
-                # 3. FINAL DISPATCH
                 if is_valid_orb:
                     print(f"\n[!] ORB CONFIRMED. Requesting MTC...")
-                    # Optional: Add extra MTC check here if desired
                     dispatch_alert(res, gatekeeper_note="ORB Validated", orb_status=orb_status)
-                    time.sleep(300) # Cooldown
+                    time.sleep(300)
                 else:
                     print(f"\n[🛡️] ECHO GUARD: Signal {res['signal_type']} blocked. {orb_status}")
                     time.sleep(60)

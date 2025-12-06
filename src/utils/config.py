@@ -9,13 +9,9 @@ import pytz
 CURRENT_FILE = Path(__file__).resolve()
 
 # DETECT ENVIRONMENT:
-# Check if the specific AWS production folder exists.
 if Path("/home/ubuntu/QUANT-OS").exists():
-    # We are on the AWS Cloud Node -> Force Absolute Path
     PROJECT_ROOT = Path("/home/ubuntu/QUANT-OS")
 else:
-    # We are on Local Windows -> Calculate relative path
-    # src/utils/config.py -> parents[0]=utils, parents[1]=src, parents[2]=ROOT
     PROJECT_ROOT = CURRENT_FILE.parents[2]
 
 DATA_DIR = PROJECT_ROOT / "data"      
@@ -23,7 +19,6 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 REPORTS_DIR = PROJECT_ROOT / "reports"
 SRC_DIR = PROJECT_ROOT / "src"
 
-# Ensure directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -78,6 +73,11 @@ GLOBAL_SESSION.headers.update({
 # ==============================================================================
 # 7. COMMUNICATION CHANNELS (TACTICAL ALERTING)
 # ==============================================================================
-# Paste your Discord Webhook URL below. 
 DISCORD_WEBHOOK = "YOUR_DISCORD_WEBHOOK_URL_HERE"
 ENABLE_DISCORD = True
+
+# ==============================================================================
+# 8. STRATEGIC CONSTANTS (GLOBAL)
+# ==============================================================================
+# The Master Variable for ORB Synchronization
+ORB_WINDOW_MINUTES = 30
