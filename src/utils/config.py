@@ -91,3 +91,8 @@ RISK_MAX_DAILY_LOSS_PCT = 5.0
 
 # If VIX exceeds this level, the system enters "BUNKER MODE" (No new entries).
 RISK_MAX_VIX_LEVEL = 40.0
+
+# ==============================================================================
+# 10. SYSTEM METADATA
+# ==============================================================================
+SYSTEM_VERSION = "v3.3"
