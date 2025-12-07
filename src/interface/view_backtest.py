@@ -70,8 +70,8 @@ def render():
     return dbc.Container([
         dbc.Row([
             dbc.Col([
-                html.H2("STRATEGY BACKTESTER (The Lab)", className="display-6 fw-bold text-white"),
-                html.P("Historical Strategy Validation Engine. Simulates 'Perfect Robot' execution.", className="text-muted lead")
+                html.H2("DATA GENERATOR", className="display-6 fw-bold text-white"),
+                html.P("Historical Strategy Validation Engine", className="text-muted lead")
             ], width=12)
         ], className="mb-4"),
 

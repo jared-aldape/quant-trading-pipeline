@@ -105,13 +105,17 @@ def render():
             dbc.Col([
                 dbc.Row([
                     dbc.Col([
-                        dbc.Button("↻ REFRESH", id='btn-manual-refresh', color="info", outline=True, size="sm", className="mt-1")
-                    ], width="auto"),
+                        # MOBILE LINK
+                        dbc.Button("📱 MOBILE", href="/mobile", color="link", className="text-decoration-none text-warning fw-bold d-block text-end mb-1", size="sm"),
+                        # REFRESH BUTTON
+                        dbc.Button("↻ REFRESH", id='btn-manual-refresh', color="info", outline=True, size="sm", className="float-end")
+                    ], width=4),
+                    
                     dbc.Col([
                         html.H4(id='live-clock-time', className="text-info font-monospace mb-0 text-end fw-bold"),
                         html.Div(id='live-market-status', className="text-end small font-monospace"),
                         html.Div(id='live-next-day', className="text-end text-muted small font-monospace")
-                    ], width=True)
+                    ], width=8)
                 ])
             ], width=5, className="align-self-center")
         ], className="mb-3 border-bottom border-secondary pb-2"),

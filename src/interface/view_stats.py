@@ -16,6 +16,7 @@ def fetch_simulation_runs():
     
     # Standard Time Filters
     options = [
+        {'label': '🔴 LIVE COMBAT LOG (The Ledger)', 'value': 'LIVE_LEDGER'},
         {'label': '⚠️ FULL HISTORY (All Trades)', 'value': 'ALL'},
         {'label': '📅 Year to Date (YTD)', 'value': 'YTD'},
         {'label': '📅 Quarter to Date (QTD)', 'value': 'QTD'},
@@ -65,6 +66,37 @@ def fetch_run_metrics(run_id="ALL"):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
         
+        # --- CASE: LIVE LEDGER ---
+        if run_id == 'LIVE_LEDGER':
+            query = f"""
+                SELECT 
+                    entry_time, 
+                    exit_time, 
+                    ticker, 
+                    asset_type as type, 
+                    net_pnl as pnl, 
+                    return_pct, 
+                    qty,
+                    entry_price, 
+                    exit_price 
+                FROM {config.TBL_LIVE_LOG}
+                ORDER BY entry_time ASC
+            """
+            try:
+                df = con.execute(query).df()
+            except Exception: # Table might not exist yet
+                df = pd.DataFrame()
+            con.close()
+            
+            if not df.empty:
+                df['entry_time'] = pd.to_datetime(df['entry_time'])
+                df['exit_time'] = pd.to_datetime(df['exit_time'])
+                df['duration_mins'] = (df['exit_time'] - df['entry_time']).dt.total_seconds() / 60
+                df['hour'] = df['entry_time'].dt.hour
+                df['trade_seq'] = df.index + 1
+            return df
+
+        # --- CASE: BACKTEST LOGS ---
         # Handle table check
         tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
         if config.TBL_SIM_LOG not in tables:
@@ -94,7 +126,7 @@ def fetch_run_metrics(run_id="ALL"):
         if 'entry_time' in df.columns:
             df['hour'] = df['entry_time'].dt.hour
 
-        # --- FILTER LOGIC ---
+        # --- FILTER LOGIC (For Backtests) ---
         if run_id and run_id != 'ALL' and 'entry_time' in df.columns:
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             
@@ -113,7 +145,6 @@ def fetch_run_metrics(run_id="ALL"):
                 df = df[df['entry_time'] >= start_date]
                 
             elif run_id == 'WTD':
-                # Assuming Monday is start of week (0)
                 start_date = today - timedelta(days=today.weekday())
                 df = df[df['entry_time'] >= start_date]
                 
@@ -126,8 +157,7 @@ def fetch_run_metrics(run_id="ALL"):
                 df = df[df['entry_time'] >= start_date]
                 
             elif run_id.startswith('MONTH_'):
-                # Format: MONTH_2025-11
-                parts = run_id.split('_')[1] # "2025-11"
+                parts = run_id.split('_')[1]
                 target_y, target_m = map(int, parts.split('-'))
                 df = df[(df['entry_time'].dt.year == target_y) & (df['entry_time'].dt.month == target_m)]
 
@@ -148,8 +178,8 @@ def render():
         # HEADER
         dbc.Row([
             dbc.Col([
-                html.H2("FORENSICS LAB", className="display-6 fw-bold text-white"),
-                html.Small("Post-Trade Audit & Statistical Breakdown (Historical DB)", className="text-muted"),
+                html.H2("STATISTICS LAB", className="display-6 fw-bold text-white"),
+                html.Small("Post-Trade Audit & Statistical Breakdown", className="text-muted"),
                 html.Hr(className="my-2", style={'borderColor': '#444'})
             ], width=12)
         ], className="mb-4"),
@@ -270,12 +300,14 @@ def update_forensics(run_id, n_clicks):
     )
 
     # --- CHART 2: DOMINANCE (Win Rate by Type) ---
+    # Case insensitive type
+    df['type'] = df['type'].str.upper()
     win_rates = df[df['pnl'] > 0].groupby('type').size()
     total_counts = df.groupby('type').size()
     wr_pct = (win_rates / total_counts * 100).fillna(0)
     
     fig_dom = go.Figure()
-    fig_dom.add_trace(go.Bar(x=wr_pct.index.str.upper(), y=wr_pct.values, marker_color=['#00d2ff', '#f39c12']))
+    fig_dom.add_trace(go.Bar(x=wr_pct.index, y=wr_pct.values, marker_color=['#00d2ff', '#f39c12']))
     fig_dom.update_layout(
         template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),

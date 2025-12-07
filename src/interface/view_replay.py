@@ -9,9 +9,7 @@ from datetime import datetime, time, timedelta
 import pytz
 from src.utils import config
 
-# ==============================================================================
-# 1. SCOUT INTELLIGENCE (Navigation Logic)
-# ==============================================================================
+# ... (Data logic remains same until scout_day_performance) ...
 def fetch_unique_dates(trade_type_filter='call'):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
@@ -63,17 +61,31 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             end_str = config.TZ_NY.localize(datetime.combine(day_date, time(16, 0))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
             
             try:
-                pq = f"SELECT open FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}'"
+                pq = f"SELECT datetime_utc, open FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}' ORDER BY datetime_utc ASC"
                 prices = con.execute(pq).df()
                 gain_str = "N/A"
+                
                 if not prices.empty:
-                    entry_px = prices.iloc[0]['open']
-                    max_px = prices['open'].max()
-                    gain_val = ((max_px - entry_px) / entry_px) * 100
-                    gain_str = f"+{gain_val:.1f}%"
-                    if gain_val > max_gain_overall:
-                        max_gain_overall = gain_val
-                        best_ts = ts
+                    # FIX: Precision Entry Matching
+                    signal_ts_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc)
+                    idx = prices['datetime_utc'].sub(signal_ts_dt).abs().idxmin()
+                    entry_px = prices.loc[idx, 'open']
+                    
+                    prices_after_entry = prices.loc[idx:]
+                    if not prices_after_entry.empty:
+                        max_px = prices_after_entry['open'].max()
+                    else:
+                        max_px = entry_px
+                    
+                    if entry_px > 0.05:
+                        gain_val = ((max_px - entry_px) / entry_px) * 100
+                        gain_str = f"+{gain_val:.1f}%"
+                        # CRITICAL: Logic to identify best signal
+                        if gain_val > max_gain_overall:
+                            max_gain_overall = gain_val
+                            best_ts = ts
+                    else:
+                        gain_str = "Noise"
             except:
                 gain_str = "--"
 
@@ -85,12 +97,14 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             options_list.append({'label': label, 'value': ts})
 
         con.close()
+        
+        # FALLBACK: If no best found (e.g. all noise), default to first signal
+        if best_ts is None and options_list:
+            best_ts = options_list[0]['value']
+            
         return options_list, best_ts
     except: return [], None
 
-# ==============================================================================
-# 2. BATTLEFIELD DATA (Chart Data)
-# ==============================================================================
 def fetch_replay_data(entry_ts_ms):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
@@ -139,29 +153,32 @@ def fetch_replay_data(entry_ts_ms):
         return None, None, None, None
 
 # ==============================================================================
-# 3. LAYOUT (OPTIMIZED)
+# 3. LAYOUT (OPTIMIZED HEADER)
 # ==============================================================================
 def render():
     return dbc.Container([
         dbc.Row([
             dbc.Col([
-                html.H2("REPLAY ANALYSIS (The Gym)", className="display-6 fw-bold text-white"),
-                html.P("Historical simulation with Fog of War.", className="text-muted lead")
-            ], width=8),
-            dbc.Col([
-                html.Label("PROTOCOL SELECTOR", className="fw-bold text-warning small"),
-                dbc.RadioItems(
-                    id='replay-mode-select-v2',
-                    options=[{'label': '🟢 BULLISH (Calls)', 'value': 'call'}, {'label': '🔴 BEARISH (Puts)', 'value': 'put'}],
-                    value='call',
-                    inline=True,
-                    class_name="btn-group",
-                    input_class_name="btn-check",
-                    label_class_name="btn btn-outline-secondary",
-                    label_checked_class_name="active"
-                )
-            ], width=4, className="text-end pt-2")
-        ], className="mb-3"),
+                html.H2("REPLAY ANALYSIS", className="display-6 fw-bold text-white"),
+                html.P("Historical simulation", className="text-muted lead mb-2"),
+                
+                # TOGGLE - LEFT ALIGNED
+                html.Div([
+                    html.Span("PROTOCOL: ", className="fw-bold text-warning small me-2 align-middle"),
+                    dbc.RadioItems(
+                        id='replay-mode-select-v2',
+                        options=[{'label': 'CALLS', 'value': 'call'}, {'label': 'PUTS', 'value': 'put'}],
+                        value='call',
+                        inline=True,
+                        class_name="btn-group",
+                        input_class_name="btn-check",
+                        label_class_name="btn btn-outline-secondary btn-sm",
+                        label_checked_class_name="active"
+                    )
+                ], className="d-inline-block")
+                
+            ], width=12)
+        ], className="mb-3 border-bottom border-secondary pb-3"),
 
         dbc.Card([
             dbc.CardBody([
@@ -203,7 +220,6 @@ def render():
             ])
         ], className="mb-3 shadow-sm", style={'backgroundColor': '#1a1a1a'}),
 
-        # FIX: REMOVED dcc.Loading Wrapper to prevent flickering
         dbc.Row([dbc.Col([dcc.Graph(id='replay-chart-v2', style={'height': '800px'})], width=12)]),
         
         dcc.Interval(id='replay-stepper-v2', interval=1000, n_intervals=0, disabled=True),
@@ -212,7 +228,7 @@ def render():
     ], fluid=True)
 
 # ==============================================================================
-# 4. CALLBACKS
+# 4. CALLBACKS (Auto-Load Logic)
 # ==============================================================================
 
 @callback(
@@ -229,6 +245,7 @@ def update_dates(mode):
 )
 def update_signals(date_str, mode):
     if not date_str: return [], None
+    # THE FIX: This function now guarantees a 'best' value return
     options, best = scout_day_performance(date_str, mode)
     return options, best
 
@@ -269,7 +286,6 @@ def update_replay_unified(entry_ts, minutes, reveal):
     current_time_ny = market_open + timedelta(minutes=minutes)
     current_time_local = current_time_ny.astimezone(config.TZ_LOCAL)
     
-    # Fog of War Slicing
     spx_slice = spx[spx.index <= current_time_local]
     vix_slice = vix[vix.index <= current_time_local]
     opt_slice = opt[opt['dt'] <= current_time_local]
@@ -317,7 +333,6 @@ def update_replay_unified(entry_ts, minutes, reveal):
         fig.add_hline(y=70, line_dash="dot", line_color="#e74c3c", row=4, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="#00bc8c", row=4, col=1)
 
-    # FIX: ADD UIREVISION TO PREVENT FLICKER
     fig.update_layout(
         template="plotly_dark", 
         paper_bgcolor='rgba(0,0,0,0)', 
@@ -325,7 +340,7 @@ def update_replay_unified(entry_ts, minutes, reveal):
         margin=dict(l=50, r=50, t=30, b=50), 
         showlegend=False, 
         height=900,
-        uirevision='dataset' # <--- PREVENTS REDRAW/FLICKER ON UPDATES
+        uirevision='dataset'
     )
     fig.update_xaxes(rangeslider_visible=False)
     

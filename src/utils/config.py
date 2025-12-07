@@ -49,6 +49,7 @@ TBL_IRX = "risk_free_rate_daily"
 TBL_MANIFEST = "trade_manifest"       
 TBL_SIM_LOG = "active_simulation_log" 
 TBL_MACRO_FLOW = "macro_flow_state"   
+TBL_LIVE_LOG = "live_trade_ledger"    # <--- NEW: The Bridge
 
 # ==============================================================================
 # 5. BROKER FEES (Robinhood / Regulatory)

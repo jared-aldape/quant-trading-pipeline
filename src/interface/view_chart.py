@@ -10,10 +10,9 @@ import pytz
 from src.utils import config
 
 # ==============================================================================
-# 1. DATA INGESTION (THE FORENSICS)
+# 1. DATA INGESTION
 # ==============================================================================
 def fetch_unique_dates(trade_type_filter='call'):
-    """Stage 1: Get unique dates. (Optimized for speed - no deep P&L calc here)"""
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
         query = f"""
@@ -25,29 +24,18 @@ def fetch_unique_dates(trade_type_filter='call'):
         """
         df = con.execute(query).df()
         con.close()
-        
         if df.empty: return []
-        
-        # Format: "2025-11-25 (3 Signals)"
         options = []
         for _, row in df.iterrows():
             d_str = row['date'].strftime('%Y-%m-%d')
             label = f"{d_str} ({row['sig_count']} Signals)"
             options.append({'label': label, 'value': d_str})
-            
         return options
-    except Exception:
-        return []
+    except Exception: return []
 
 def scout_day_performance(date_str, trade_type_filter='call'):
-    """
-    Stage 2 (THE SCOUT): Fetches signals AND calculates max P&L for each.
-    Auto-ranks the best trade for the dropdown default.
-    """
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
-        
-        # 1. Get Signals
         query = f"""
             SELECT entry_timestamp_utc, signal_type, xsp_price, meta_data 
             FROM {config.TBL_MANIFEST}
@@ -56,52 +44,60 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             ORDER BY entry_timestamp_utc ASC
         """
         signals = con.execute(query).df()
-        
         if signals.empty: 
-            con.close()
-            return [], None
+            con.close(); return [], None
 
-        # 2. Batch Calc P&L
         options_list = []
         best_ts = None
         max_gain_overall = -999.0
 
         for i, row in signals.iterrows():
             ts = row['entry_timestamp_utc']
-            
-            # Reconstruct Ticker
             entry_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc).astimezone(config.TZ_NY)
             date_fmt = entry_dt.strftime('%y%m%d')
             opt_code = 'C' if trade_type_filter == 'call' else 'P'
             strike = int(round(float(row['xsp_price'])) * 1000)
             ticker = f"O:XSP{date_fmt}{opt_code}{strike:08d}"
             
-            # Query Price Path (Fast Limit)
             day_date = entry_dt.date()
-            start_str = entry_dt.strftime('%Y-%m-%d %H:%M:%S') # From entry...
-            end_str = config.TZ_NY.localize(datetime.combine(day_date, time(16, 0))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S') # ...to close
+            start_str = entry_dt.strftime('%Y-%m-%d %H:%M:%S')
+            end_str = config.TZ_NY.localize(datetime.combine(day_date, time(16, 0))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
             
-            pq = f"SELECT open FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}'"
+            pq = f"SELECT datetime_utc, open FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}' ORDER BY datetime_utc ASC"
             prices = con.execute(pq).df()
-            
-            gain_str = "N/A"
-            gain_val = -100.0
+            gain_str, gain_val = "N/A", -100.0
             
             if not prices.empty:
-                entry_px = prices.iloc[0]['open']
-                max_px = prices['open'].max()
-                gain_val = ((max_px - entry_px) / entry_px) * 100
-                gain_str = f"+{gain_val:.1f}%"
+                # --- FIX: NAIVE UTC ALIGNMENT ---
+                # Convert signal TS to UTC, then STRIP timezone to match DuckDB Naive format
+                signal_ts_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc).replace(tzinfo=None)
+                
+                try:
+                    # Find closest timestamp index
+                    idx = prices['datetime_utc'].sub(signal_ts_dt).abs().idxmin()
+                    entry_px = prices.loc[idx, 'open']
+                    
+                    prices_after_entry = prices.loc[idx:]
+                    if not prices_after_entry.empty:
+                        max_px = prices_after_entry['open'].max()
+                    else:
+                        max_px = entry_px
+                    
+                    if entry_px > 0.05:
+                        gain_val = ((max_px - entry_px) / entry_px) * 100
+                        gain_str = f"+{gain_val:.1f}%"
+                    else:
+                        gain_str = "Noise"
+                        gain_val = 0
+                except:
+                    gain_str = "Err"
             
-            # Track Best
             if gain_val > max_gain_overall:
                 max_gain_overall = gain_val
                 best_ts = ts
 
-            # Format Label: "Signal #1 (+24.5%) | VIX CRUSH..."
             time_str = entry_dt.astimezone(config.TZ_LOCAL).strftime('%H:%M')
-            clean_meta = row['meta_data'].replace('VIX_FRACTAL_LONG', '').replace('VIX_FRACTAL_SHORT', '').strip()
-            # Clean up the meta string if it duplicates info
+            clean_meta = str(row['meta_data']).replace('VIX_FRACTAL_LONG', '').replace('VIX_FRACTAL_SHORT', '').strip()
             if "|" in clean_meta: clean_meta = clean_meta.split('|')[-1].strip()
             
             label = f"Signal #{i+1} ({time_str}) | Gain: {gain_str} | {clean_meta}"
@@ -109,9 +105,7 @@ def scout_day_performance(date_str, trade_type_filter='call'):
 
         con.close()
         return options_list, best_ts
-
     except Exception as e:
-        print(f"Scout Error: {e}")
         return [], None
 
 def fetch_trade_performance(entry_ts_ms, trade_type, xsp_price):
@@ -134,13 +128,22 @@ def fetch_trade_performance(entry_ts_ms, trade_type, xsp_price):
 
         if df.empty: return None, ticker
 
-        entry_dt_utc = datetime.fromtimestamp(entry_ts_ms / 1000, tz=pytz.utc)
+        # --- FIX: NAIVE UTC ALIGNMENT ---
+        entry_dt_utc = datetime.fromtimestamp(entry_ts_ms / 1000, tz=pytz.utc).replace(tzinfo=None)
+        
+        # Find index of closest time
         try:
-            entry_row = df.iloc[df['datetime_utc'].sub(entry_dt_utc).abs().argsort()[:1]]
-            entry_price = entry_row['open'].values[0]
-        except: entry_price = df.iloc[0]['open']
+            idx = df['datetime_utc'].sub(entry_dt_utc).abs().idxmin()
+            entry_price = df.loc[idx, 'open']
+        except:
+            entry_price = df.iloc[0]['open']
 
-        df['pnl_pct'] = ((df['open'] - entry_price) / entry_price) * 100
+        # Raw Dollar Calc
+        df['pnl_dollars_raw'] = (df['open'] - entry_price) * 100
+        
+        entry_price_safe = entry_price if entry_price > 0.05 else 9999.9 
+        df['pnl_pct'] = ((df['open'] - entry_price) / entry_price_safe) * 100
+        
         df['datetime_local'] = df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
         return df, ticker
     except Exception: return None, "ERROR"
@@ -167,7 +170,6 @@ def fetch_indicators(entry_ts_ms):
         es = pd.DataFrame()
         if not df_fut.empty:
             df_fut['datetime_local'] = df_fut['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
-            # FIX 1: Removed division by 10 to match SPX price levels
             df_fut['scaled_close'] = df_fut['close']
             es = df_fut.set_index('datetime_local')
 
@@ -194,22 +196,25 @@ def render():
         dbc.Row([
             dbc.Col([
                 html.H2("CHART ANALYSIS (Tactical Forensics)", className="display-6 fw-bold text-white"),
-                html.P("Visual validation of the Hedged Protocol.", className="text-muted lead")
-            ], width=8),
-            dbc.Col([
-                html.Label("PROTOCOL SELECTOR", className="fw-bold text-warning small"),
-                dbc.RadioItems(
-                    id='chart-mode-select',
-                    options=[{'label': '🟢 BULLISH (Calls)', 'value': 'call'}, {'label': '🔴 BEARISH (Puts)', 'value': 'put'}],
-                    value='call',
-                    inline=True,
-                    class_name="btn-group",
-                    input_class_name="btn-check",
-                    label_class_name="btn btn-outline-secondary",
-                    label_checked_class_name="active"
-                )
-            ], width=4, className="text-end pt-2")
-        ], className="mb-3"),
+                html.P("Visual validation of the Hedged Protocol.", className="text-muted lead mb-2"),
+                
+                # TOGGLE
+                html.Div([
+                    html.Span("PROTOCOL: ", className="fw-bold text-warning small me-2 align-middle"),
+                    dbc.RadioItems(
+                        id='chart-mode-select',
+                        options=[{'label': 'CALLS', 'value': 'call'}, {'label': 'PUTS', 'value': 'put'}],
+                        value='call',
+                        inline=True,
+                        class_name="btn-group",
+                        input_class_name="btn-check",
+                        label_class_name="btn btn-outline-secondary btn-sm",
+                        label_checked_class_name="active"
+                    )
+                ], className="d-inline-block")
+                
+            ], width=12)
+        ], className="mb-3 border-bottom border-secondary pb-3"),
 
         dbc.Card([dbc.CardBody([
             dbc.Row([
@@ -244,7 +249,6 @@ def update_date_dropdown(mode):
 )
 def update_signal_dropdown(date_str, mode):
     if not date_str: return [], None
-    # THE SCOUT: Returns options list AND the 'value' of the best performer
     options, best_val = scout_day_performance(date_str, mode)
     return options, best_val
 
@@ -270,6 +274,10 @@ def update_chart(entry_ts, mode):
         fig.add_annotation(text="MARKET DATA UNAVAILABLE", showarrow=False, font=dict(size=20, color="red"))
         return fig
 
+    peak_pnl_pct = opt_df['pnl_pct'].max()
+    peak_pnl_dol = opt_df['pnl_dollars_raw'].max()
+    peak_idx = opt_df['pnl_pct'].idxmax()
+
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.3, 0.25, 0.25, 0.2], 
                         specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
                         subplot_titles=("CONTEXT: SPX vs /ES", f"STRATEGY: {ticker}", "VIX FRACTAL FLOW", "VIX RSI"))
@@ -284,12 +292,16 @@ def update_chart(entry_ts, mode):
     fig.add_trace(go.Bar(x=opt_df['datetime_local'], y=opt_df['pnl_pct'], name="P&L %", marker_color=colors), row=2, col=1, secondary_y=False)
     fig.add_trace(go.Scatter(x=opt_df['datetime_local'], y=opt_df['open'], name="Option Price", line=dict(color='white', width=1.5)), row=2, col=1, secondary_y=True)
     
-    # Max Gain
-    if not opt_df.empty:
-        max_gain = opt_df['pnl_pct'].max()
-        max_idx = opt_df['pnl_pct'].idxmax()
-        if max_gain > 0:
-            fig.add_annotation(x=opt_df.loc[max_idx, 'datetime_local'], y=max_gain, text=f"PEAK +{max_gain:.1f}%", showarrow=True, arrowhead=1, row=2, col=1, secondary_y=False)
+    if peak_pnl_pct > 0:
+        fig.add_annotation(
+            x=opt_df.loc[peak_idx, 'datetime_local'], 
+            y=peak_pnl_pct, 
+            text=f"PEAK +{peak_pnl_pct:.1f}% (${peak_pnl_dol:+.2f})", 
+            showarrow=True, 
+            arrowhead=1, 
+            row=2, col=1, 
+            secondary_y=False
+        )
 
     # 3. MACD
     fig.add_trace(go.Bar(x=vix_df.index, y=vix_df['hist'], name="Macro (1h)", marker_color='rgba(255, 255, 255, 0.2)'), row=3, col=1)
@@ -303,7 +315,6 @@ def update_chart(entry_ts, mode):
     entry_dt = datetime.fromtimestamp(entry_ts / 1000, tz=pytz.utc).astimezone(config.TZ_LOCAL)
     fig.add_vline(x=entry_dt, line_width=1, line_dash="dash", line_color="yellow")
     
-    # FIX 2: Moved legend to bottom (horizontal) and increased bottom margin
     fig.update_layout(
         template="plotly_dark", 
         paper_bgcolor='rgba(0,0,0,0)', 
