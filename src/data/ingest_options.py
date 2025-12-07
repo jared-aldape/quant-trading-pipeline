@@ -26,11 +26,13 @@ log = get_logger("OptionIngest")
 POLYGON_KEY = config.POLYGON_API_KEY
 BASE_URL = "https://api.polygon.io/v2/aggs/ticker"
 
-# SAFETY & LIMITS
-SLEEP_SECONDS = 20 # Free Tier throttling
+# SMART CONFIG
+# We start fast. We slow down only if forced.
+BURST_DELAY = 0.25       # Quarter second between requests (Optimistic)
+COOLDOWN_DELAY = 65      # If 429 hit, wait 1 minute + buffer
 MAX_RETRIES = 3
-MIN_BAR_THRESHOLD = 30 
-STRIKE_RANGE = 2   # ATM +/- 2 strikes
+MIN_BAR_THRESHOLD = 30   # If DB has >30 bars, skip download
+STRIKE_RANGE = 2         # ATM +/- 2 strikes
 
 # ==============================================================================
 # 3. HELPER FUNCTIONS
@@ -78,7 +80,7 @@ def construct_ticker_cluster(date_obj, xsp_price, trade_type='call'):
             types_to_fetch = ['C'] # Default
             
         # Generate Cluster (Strikes x Types)
-        for offset in range(-STRIKE_RANGE, STRIKE_RANGE + 1): # FIX: Corrected typo STRike_RANGE -> STRIKE_RANGE
+        for offset in range(-STRIKE_RANGE, STRIKE_RANGE + 1):
             strike = atm_strike + offset
             strike_str = f"{strike * 1000:08d}"
             
@@ -92,6 +94,10 @@ def construct_ticker_cluster(date_obj, xsp_price, trade_type='call'):
     return tickers
 
 def fetch_polygon_aggs(ticker, date_str):
+    """
+    Fetches data using the Optimistic Burst Protocol.
+    Returns: (DataFrame, Status_String)
+    """
     url = f"{BASE_URL}/{ticker}/range/1/minute/{date_str}/{date_str}"
     params = {
         "adjusted": "true",
@@ -104,16 +110,7 @@ def fetch_polygon_aggs(ticker, date_str):
         try:
             resp = config.GLOBAL_SESSION.get(url, params=params, timeout=15)
             
-            if resp.status_code == 403:
-                log.warning(f"⛔ 403 Forbidden for {ticker}. (Data unavailable/Date range?)")
-                return pd.DataFrame()
-
-            if resp.status_code == 429:
-                wait_time = 65 
-                log.warning(f"⚠️ Rate Limit Hit on {ticker}! Pausing for {wait_time}s...")
-                time.sleep(wait_time)
-                continue 
-
+            # --- SCENARIO A: SUCCESS ---
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("status") == "OK" and data.get("resultsCount", 0) > 0:
@@ -125,28 +122,40 @@ def fetch_polygon_aggs(ticker, date_str):
                     
                     df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms')
                     df['ticker'] = ticker
-                    return df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']]
+                    # Normalize columns
+                    return df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']], "OK"
                 else:
-                    return pd.DataFrame()
+                    return pd.DataFrame(), "EMPTY"
 
+            # --- SCENARIO B: RATE LIMIT (The Wall) ---
+            if resp.status_code == 429:
+                log.warning(f"🛑 RATE LIMIT HIT on {ticker}. Engaging Cool Down ({COOLDOWN_DELAY}s)...")
+                time.sleep(COOLDOWN_DELAY) 
+                continue # Retry immediately loop
+
+            # --- SCENARIO C: PERMANENT ERROR ---
+            if resp.status_code == 403:
+                # log.warning(f"⛔ 403 Forbidden for {ticker}.")
+                return pd.DataFrame(), "FORBIDDEN"
+
+            # --- SCENARIO D: SERVER ERROR ---
             log.warning(f"⚠️ API Error {resp.status_code} for {ticker}. Retrying...")
             time.sleep(5)
 
         except requests.exceptions.RequestException as e:
-            wait = (attempt + 1) * 10
+            wait = (attempt + 1) * 5
             log.error(f"❌ Network Error for {ticker}: {e}. Retrying in {wait}s...")
             time.sleep(wait)
         
-    return pd.DataFrame()
+    return pd.DataFrame(), "FAILED"
 
 # ==============================================================================
 # 4. PIPELINE RUNNER
 # ==============================================================================
 def run_fetch_pipeline():
-    log.info("🚀 Starting Option Data Ingestion (Cluster Mode)...")
-    log.info(f"⏳ Throttling: 1 request every {SLEEP_SECONDS} seconds")
+    log.info("🚀 Starting Option Data Ingestion (Optimistic Burst Mode)...")
     
-    # 1. READ MANIFEST (Need a connection to READ, which we close immediately)
+    # 1. READ MANIFEST
     try:
         with duckdb.connect(str(config.DB_FILE), read_only=True) as con_read:
             query = f"""
@@ -161,7 +170,7 @@ def run_fetch_pipeline():
 
     if manifest_df.empty: return
 
-    # 2. BUILD QUEUE & AUDIT (Audit must also be read-only/closed)
+    # 2. BUILD QUEUE
     unique_tasks = {}
     today = datetime.now().date()
     
@@ -170,18 +179,16 @@ def run_fetch_pipeline():
         if target_date >= today: continue 
         
         cluster = construct_ticker_cluster(target_date, row['xsp_price'], row['trade_type'])
-        
         for ticker in cluster:
             unique_tasks[ticker] = target_date
             
-    # AUDIT: Determine which contracts are missing in the new table
+    # 3. AUDIT (Skip what we already have)
     log.info("🔍 Auditing existing data...")
     try:
         with duckdb.connect(str(config.DB_FILE), read_only=True) as con_audit:
              audit_df = con_audit.execute(f"SELECT ticker, COUNT(*) as cnt FROM {config.TBL_OPTIONS} GROUP BY ticker").df()
              audit_map = dict(zip(audit_df['ticker'], audit_df['cnt']))
-    except Exception as e:
-        log.warning(f"Audit failed (Likely empty new table). Proceeding to full download. Error: {e}")
+    except:
         audit_map = {}
 
     final_queue = {}
@@ -193,29 +200,31 @@ def run_fetch_pipeline():
         else:
             final_queue[ticker] = target_date
 
-    log.info(f"📋 Manifest Signals: {len(manifest_df)} | Total Contracts: {len(unique_tasks)}")
-    log.info(f"⬇️  Queue: {len(final_queue)} (Skipped {skipped_count} healthy contracts)")
+    log.info(f"📋 Manifest: {len(manifest_df)} signals | Queue: {len(final_queue)} contracts (Skipped {skipped_count})")
 
-    # 3. DOWNLOAD & INSERT (Acquire Lock ONLY for Insertion)
+    # 4. DOWNLOAD & INSERT (Burst Mode)
     processed = 0
     total = len(final_queue)
+    start_time = time.time()
     
     for i, (ticker, target_date) in enumerate(final_queue.items()):
         date_str = target_date.strftime('%Y-%m-%d')
-        print(f"[{i+1}/{total}] ⬇️ Downloading {ticker}...", end='\r')
         
-        df = fetch_polygon_aggs(ticker, date_str)
+        # Calculate speed for display
+        elapsed = time.time() - start_time
+        speed = (processed / elapsed) if elapsed > 0 else 0
+        print(f"[{i+1}/{total}] ⚡ {speed:.1f} req/s | Fetching {ticker}...", end='\r')
+        
+        df, status = fetch_polygon_aggs(ticker, date_str)
         
         if not df.empty:
-            # PARSE METADATA (Expiration, Type, Strike)
             exp, typ, strk = parse_ticker_metadata(ticker)
-            
             df['expiration'] = exp
             df['type'] = typ
             df['strike'] = strk
             
-            # INSERT: Acquire Write Lock (briefly)
             try:
+                # Brief Write Lock
                 with duckdb.connect(str(config.DB_FILE)) as con_write:
                     con_write.register('df', df)
                     con_write.execute(f"""
@@ -224,15 +233,13 @@ def run_fetch_pipeline():
                         SELECT datetime_utc, ticker, expiration, strike, type, open, high, low, close, volume
                         FROM df
                     """)
-                log.info(f"✅ Saved {ticker} ({len(df)} bars)")
                 processed += 1
             except Exception as e:
-                log.error(f"Database insertion failed for {ticker}: {e}")
-        else:
-            log.warning(f"⚠️ No data for {ticker} (Skipping)")
+                log.error(f"DB Write Error: {e}")
 
-        # Release lock during long wait period
-        time.sleep(SLEEP_SECONDS)
+        # OPTIMISTIC DELAY
+        # If we didn't hit 429, we only sleep a tiny bit to be polite.
+        time.sleep(BURST_DELAY)
 
     log.info(f"\n🎉 Job Complete. Downloaded {processed} contracts.")
 

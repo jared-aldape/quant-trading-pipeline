@@ -96,3 +96,15 @@ def run_daily_update():
 
 if __name__ == "__main__":
     run_daily_update()
+    # ... inside run_daily_update() ...
+
+    # ---------------------------------------------------------
+    # STEP 7: BLACK BOX RECORDING (The Safety Net)
+    # ---------------------------------------------------------
+    try:
+        log.info("--- [7/7] Running Black Box Recorder ---")
+        # Dynamic import to handle the ops folder being a sibling
+        import ops.backup_vault as backup_vault
+        backup_vault.run_backup_procedure()
+    except Exception as e:
+        log.error(f"❌ Step 7 Failed: {e}")

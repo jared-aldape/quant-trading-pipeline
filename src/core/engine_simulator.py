@@ -88,6 +88,28 @@ def get_vix_metrics():
     except:
         return 15.0, 50.0
 
+# ==============================================================================
+# PRIORITY 2: GHOST FILL ALGORITHM (VIX-Weighted Slippage)
+# ==============================================================================
+def get_ghost_slippage(vix_val, order_type="MARKET"):
+    """
+    Calculates realistic slippage based on VIX regime.
+    """
+    # 1. Base Volatility Penalty
+    if vix_val < 20: 
+        slippage = 0.01  # Calm Seas
+    elif vix_val < 30: 
+        slippage = 0.03  # Choppy Waters
+    else: 
+        slippage = 0.05  # Hurricane Warning
+
+    # 2. Spread Penalty for Market Orders
+    # We assume Market Orders pay half the spread (approx $0.01-0.02 on XSP)
+    if order_type == "MARKET":
+        slippage += 0.01
+
+    return slippage
+
 def get_live_chart_data(ticker="SPY", interval="5m", period="1d"):
     """Fetches chart data. Returns STALE cache if API fails."""
     global _DATA_CACHE
@@ -123,7 +145,6 @@ def black_scholes(S, K, T, r, sigma, option_type="call"):
     if S is None or S <= 0: return 0.0
 
     # 1. EXPIRATION ENFORCEMENT (The Hard Deck)
-    # If time is 0 or negative, value is STRICTLY Intrinsic.
     if T <= 0: 
         return max(0.0, S - K) if option_type == "call" else max(0.0, K - S)
 
@@ -208,12 +229,15 @@ def get_portfolio_stats():
     }
 
 def preview_entry(qty, limit_price=None, fee_model="RH_GOLD"):
-    """Estimates cost without executing trade."""
+    """Estimates cost using Ghost Fill Logic."""
     try:
         qty = int(qty)
         if qty < 1: return None
         
-        if limit_price and float(limit_price) > 0:
+        # Determine Order Type
+        order_type = "LIMIT" if (limit_price and float(limit_price) > 0) else "MARKET"
+
+        if order_type == "LIMIT":
             est_fill = float(limit_price)
             is_estimated = False
             price_source = "LIMIT"
@@ -224,7 +248,12 @@ def preview_entry(qty, limit_price=None, fee_model="RH_GOLD"):
             strike = round(price)
             T = get_time_to_close()
             raw = black_scholes(price, strike, T, r, sigma, "call")
-            est_fill = raw + 0.01 
+            
+            # GHOST FILL INTEGRATION
+            vix_val = sigma * 100  # Approximation or use get_vix_metrics
+            ghost_slip = get_ghost_slippage(vix_val, "MARKET")
+            
+            est_fill = raw + ghost_slip 
             is_estimated = True
             price_source = f"MKT (~${est_fill:.2f})"
 
@@ -247,7 +276,7 @@ def preview_entry(qty, limit_price=None, fee_model="RH_GOLD"):
 
 def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
     """
-    Executes entry and LOGS to history immediately.
+    Executes entry with Ghost Fill penalties.
     """
     state = load_session()
     price = get_live_price("SPY", use_cache=False)
@@ -258,8 +287,14 @@ def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
     strike = round(price) 
     T = get_time_to_close()
     
+    # 1. BASE PRICE
     raw_premium = black_scholes(price, strike, T, r, sigma, trade_type.lower())
-    entry_fill = raw_premium + 0.01 # Slippage
+    
+    # 2. GHOST FILL PENALTY
+    vix_close, vix_rsi = get_vix_metrics()
+    slippage = get_ghost_slippage(vix_close, "MARKET") # Assume Market Execution for Live Sim
+    entry_fill = raw_premium + slippage
+    
     contract_cost = entry_fill * 100
     
     if size_mode == "QTY": num_contracts = int(size_val)
@@ -276,9 +311,8 @@ def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
     
     trade_id = str(uuid.uuid4())
     entry_time = datetime.now(config.TZ_LOCAL).strftime("%Y-%m-%d %H:%M:%S")
-    vix_close, vix_rsi = get_vix_metrics()
 
-    # 1. CREATE POSITION (Live Tracking)
+    # 3. CREATE POSITION (Live Tracking)
     new_position = {
         "trade_id": trade_id, 
         "ticker": f"XSP {int(strike)} {trade_type}",
@@ -298,7 +332,7 @@ def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
     }
     state['positions'].append(new_position)
     
-    # 2. LOG ENTRY (The Ledger Fix)
+    # 4. LOG ENTRY
     log_entry = {
         "trade_id": trade_id,
         "ticker": f"XSP {int(strike)} {trade_type}",
@@ -307,15 +341,15 @@ def execute_entry(trade_type, size_val, size_mode="AMT", fee_model="RH_GOLD"):
         "entry_time": entry_time,
         "price": entry_fill,
         "qty": num_contracts,
-        "pnl": 0.0, # No PnL on entry
+        "pnl": 0.0,
         "reason": "MANUAL",
-        "fees": total_fee
+        "fees": total_fee,
+        "slippage_paid": slippage # <-- NEW LOG FIELD
     }
-    # Add to TOP of list for visibility
     state['trades'].insert(0, log_entry)
     
     save_session(state)
-    return f"Executed: {num_contracts}x {trade_type} @ ${entry_fill:.2f} (ID: {trade_id[:4]})"
+    return f"Executed: {num_contracts}x {trade_type} @ ${entry_fill:.2f} (Slip: {slippage:.2f})"
 
 def execute_exit(trade_id, exit_qty=None, reason="MANUAL", fee_model="RH_GOLD"):
     state = load_session()
@@ -331,11 +365,17 @@ def execute_exit(trade_id, exit_qty=None, reason="MANUAL", fee_model="RH_GOLD"):
     T = get_time_to_close()
     
     raw_premium = black_scholes(price, target_trade['strike'], T, r, sigma, target_trade['type'].lower())
-    # If expired, value is exactly intrinsic. Else apply slippage.
+    
+    # 1. GHOST FILL EXIT PENALTY
+    vix_close, _ = get_vix_metrics()
+    slippage = get_ghost_slippage(vix_close, "MARKET")
+    
+    # If expired, value is exactly intrinsic. Else apply slippage penalty to sell.
     if T <= 0:
         exit_fill = raw_premium
     else:
-        exit_fill = max(0.01, raw_premium - 0.01)
+        # You sell at the Bid, so we subtract slippage
+        exit_fill = max(0.01, raw_premium - slippage)
     
     current_qty = target_trade['contracts']
     sell_qty = current_qty if (exit_qty is None or exit_qty >= current_qty) else int(exit_qty)
@@ -363,7 +403,8 @@ def execute_exit(trade_id, exit_qty=None, reason="MANUAL", fee_model="RH_GOLD"):
         "qty": sell_qty,
         "pnl": pnl,
         "reason": reason,
-        "fees": total_exit_fees
+        "fees": total_exit_fees,
+        "slippage_paid": slippage
     }
     state['trades'].insert(0, log_entry)
     
