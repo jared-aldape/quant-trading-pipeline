@@ -23,3 +23,4 @@ data/*.duckdb
 data/*.duckdb.wal
 data/*.tmp
 data/backups/
+data/quant_strategy.duckdb
