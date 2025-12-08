@@ -17,3 +17,4 @@ quant-key.pem
 *.pem
 
 # --- Keep these! ---
+data/quant_strategy.duckdb
