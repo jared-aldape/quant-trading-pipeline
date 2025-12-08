@@ -17,10 +17,3 @@ quant-key.pem
 *.pem
 
 # --- Keep these! ---
-
-# Quant OS Data
-data/*.duckdb
-data/*.duckdb.wal
-data/*.tmp
-data/backups/
-data/quant_strategy.duckdb

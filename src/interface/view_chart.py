@@ -68,12 +68,10 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             gain_str, gain_val = "N/A", -100.0
             
             if not prices.empty:
-                # --- FIX: NAIVE UTC ALIGNMENT ---
-                # Convert signal TS to UTC, then STRIP timezone to match DuckDB Naive format
+                # Precision Entry Matching
                 signal_ts_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc).replace(tzinfo=None)
                 
                 try:
-                    # Find closest timestamp index
                     idx = prices['datetime_utc'].sub(signal_ts_dt).abs().idxmin()
                     entry_px = prices.loc[idx, 'open']
                     
@@ -128,10 +126,9 @@ def fetch_trade_performance(entry_ts_ms, trade_type, xsp_price):
 
         if df.empty: return None, ticker
 
-        # --- FIX: NAIVE UTC ALIGNMENT ---
+        # Naive UTC Alignment
         entry_dt_utc = datetime.fromtimestamp(entry_ts_ms / 1000, tz=pytz.utc).replace(tzinfo=None)
         
-        # Find index of closest time
         try:
             idx = df['datetime_utc'].sub(entry_dt_utc).abs().idxmin()
             entry_price = df.loc[idx, 'open']
@@ -189,7 +186,7 @@ def fetch_indicators(entry_ts_ms):
     except Exception: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 # ==============================================================================
-# 2. LAYOUT
+# 2. LAYOUT (VISUAL FIX APPLIED)
 # ==============================================================================
 def render():
     return dbc.Container([
@@ -198,7 +195,7 @@ def render():
                 html.H2("CHART ANALYSIS (Tactical Forensics)", className="display-6 fw-bold text-white"),
                 html.P("Visual validation of the Hedged Protocol.", className="text-muted lead mb-2"),
                 
-                # TOGGLE
+                # TOGGLE - CLEAN LOOK (No Green/Red Dots)
                 html.Div([
                     html.Span("PROTOCOL: ", className="fw-bold text-warning small me-2 align-middle"),
                     dbc.RadioItems(
@@ -213,7 +210,7 @@ def render():
                     )
                 ], className="d-inline-block")
                 
-            ], width=12)
+            ], width=12) # FULL WIDTH
         ], className="mb-3 border-bottom border-secondary pb-3"),
 
         dbc.Card([dbc.CardBody([
