@@ -79,7 +79,7 @@ app.layout = html.Div([
                 
                 html.Small("ANALYSIS (PAST)", className="text-muted mt-2 mb-1 fw-bold"),
                 dbc.NavLink("Data Generator", href="/backtest", active="exact"),
-                dbc.NavLink("Forensics Chart", href="/chart", active="exact"),
+                dbc.NavLink("Chart Analysis", href="/chart", active="exact"),
                 dbc.NavLink("Replay Analysis", href="/replay", active="exact"),  # RENAMED
                 dbc.NavLink("Statistics Lab", href="/stats", active="exact"),
                 
@@ -87,7 +87,7 @@ app.layout = html.Div([
                 dbc.NavLink("Capital Growth", href="/growth", active="exact"), # REMOVED PREDICTIVE HUD
                 
                 html.Hr(className="my-2"),
-                dbc.NavLink("System Health", href="/health", active="exact"),
+                dbc.NavLink("System Information", href="/health", active="exact"),
             ], vertical=True, pills=True),
         ]),
         id="offcanvas",

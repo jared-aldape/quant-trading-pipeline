@@ -9,7 +9,9 @@ from datetime import datetime, time, timedelta
 import pytz
 from src.utils import config
 
-# ... (Data logic remains same until scout_day_performance) ...
+# ==============================================================================
+# 1. SCOUT INTELLIGENCE (Navigation Logic)
+# ==============================================================================
 def fetch_unique_dates(trade_type_filter='call'):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
@@ -61,31 +63,17 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             end_str = config.TZ_NY.localize(datetime.combine(day_date, time(16, 0))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
             
             try:
-                pq = f"SELECT datetime_utc, open FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}' ORDER BY datetime_utc ASC"
+                pq = f"SELECT open FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}'"
                 prices = con.execute(pq).df()
                 gain_str = "N/A"
-                
                 if not prices.empty:
-                    # FIX: Precision Entry Matching
-                    signal_ts_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc)
-                    idx = prices['datetime_utc'].sub(signal_ts_dt).abs().idxmin()
-                    entry_px = prices.loc[idx, 'open']
-                    
-                    prices_after_entry = prices.loc[idx:]
-                    if not prices_after_entry.empty:
-                        max_px = prices_after_entry['open'].max()
-                    else:
-                        max_px = entry_px
-                    
-                    if entry_px > 0.05:
-                        gain_val = ((max_px - entry_px) / entry_px) * 100
-                        gain_str = f"+{gain_val:.1f}%"
-                        # CRITICAL: Logic to identify best signal
-                        if gain_val > max_gain_overall:
-                            max_gain_overall = gain_val
-                            best_ts = ts
-                    else:
-                        gain_str = "Noise"
+                    entry_px = prices.iloc[0]['open']
+                    max_px = prices['open'].max()
+                    gain_val = ((max_px - entry_px) / entry_px) * 100
+                    gain_str = f"+{gain_val:.1f}%"
+                    if gain_val > max_gain_overall:
+                        max_gain_overall = gain_val
+                        best_ts = ts
             except:
                 gain_str = "--"
 
@@ -97,14 +85,12 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             options_list.append({'label': label, 'value': ts})
 
         con.close()
-        
-        # FALLBACK: If no best found (e.g. all noise), default to first signal
-        if best_ts is None and options_list:
-            best_ts = options_list[0]['value']
-            
         return options_list, best_ts
     except: return [], None
 
+# ==============================================================================
+# 2. BATTLEFIELD DATA (Chart Data)
+# ==============================================================================
 def fetch_replay_data(entry_ts_ms):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
@@ -126,8 +112,11 @@ def fetch_replay_data(entry_ts_ms):
         idx_df = con.execute(f"SELECT datetime_utc, ticker, open, high, low, close FROM {config.TBL_INDICES} WHERE ticker IN ('SPX', 'VIX') AND datetime_utc >= '{s_str}' AND datetime_utc <= '{e_str}' ORDER BY datetime_utc ASC").df()
         con.close()
 
-        if not opt_df.empty:
-            opt_df['dt'] = opt_df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
+        # FIX: Explicit None return if empty to prevent KeyError in consumer
+        if opt_df.empty:
+            return None, None, None, ticker
+
+        opt_df['dt'] = opt_df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
         
         if not idx_df.empty:
             idx_df['dt'] = idx_df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
@@ -147,38 +136,35 @@ def fetch_replay_data(entry_ts_ms):
             vix['rsi'] = 100 - (100 / (1 + rs))
             return spx, vix, opt_df, ticker
             
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ticker
+        return pd.DataFrame(), pd.DataFrame(), opt_df, ticker
 
     except Exception:
         return None, None, None, None
 
 # ==============================================================================
-# 3. LAYOUT (OPTIMIZED HEADER)
+# 3. LAYOUT (OPTIMIZED)
 # ==============================================================================
 def render():
     return dbc.Container([
         dbc.Row([
             dbc.Col([
-                html.H2("REPLAY ANALYSIS", className="display-6 fw-bold text-white"),
-                html.P("Historical simulation", className="text-muted lead mb-2"),
-                
-                # TOGGLE - LEFT ALIGNED
-                html.Div([
-                    html.Span("PROTOCOL: ", className="fw-bold text-warning small me-2 align-middle"),
-                    dbc.RadioItems(
-                        id='replay-mode-select-v2',
-                        options=[{'label': 'CALLS', 'value': 'call'}, {'label': 'PUTS', 'value': 'put'}],
-                        value='call',
-                        inline=True,
-                        class_name="btn-group",
-                        input_class_name="btn-check",
-                        label_class_name="btn btn-outline-secondary btn-sm",
-                        label_checked_class_name="active"
-                    )
-                ], className="d-inline-block")
-                
-            ], width=12)
-        ], className="mb-3 border-bottom border-secondary pb-3"),
+                html.H2("REPLAY ANALYSIS (The Gym)", className="display-6 fw-bold text-white"),
+                html.P("Historical simulation with Fog of War.", className="text-muted lead")
+            ], width=8),
+            dbc.Col([
+                html.Label("PROTOCOL SELECTOR", className="fw-bold text-warning small"),
+                dbc.RadioItems(
+                    id='replay-mode-select-v2',
+                    options=[{'label': '🟢 BULLISH (Calls)', 'value': 'call'}, {'label': '🔴 BEARISH (Puts)', 'value': 'put'}],
+                    value='call',
+                    inline=True,
+                    class_name="btn-group",
+                    input_class_name="btn-check",
+                    label_class_name="btn btn-outline-secondary",
+                    label_checked_class_name="active"
+                )
+            ], width=4, className="text-end pt-2")
+        ], className="mb-3"),
 
         dbc.Card([
             dbc.CardBody([
@@ -228,7 +214,7 @@ def render():
     ], fluid=True)
 
 # ==============================================================================
-# 4. CALLBACKS (Auto-Load Logic)
+# 4. CALLBACKS
 # ==============================================================================
 
 @callback(
@@ -245,7 +231,6 @@ def update_dates(mode):
 )
 def update_signals(date_str, mode):
     if not date_str: return [], None
-    # THE FIX: This function now guarantees a 'best' value return
     options, best = scout_day_performance(date_str, mode)
     return options, best
 
@@ -278,7 +263,16 @@ def update_replay_unified(entry_ts, minutes, reveal):
     if not entry_ts: return go.Figure(), "--:--", ""
 
     spx, vix, opt, ticker = fetch_replay_data(entry_ts)
-    if spx is None or opt is None: return go.Figure(), "No Data", "N/A"
+    
+    # FIX: Handle Missing Data Gracefully
+    if opt is None or opt.empty: 
+        fig = go.Figure()
+        fig.update_layout(
+            template="plotly_dark", 
+            title=dict(text="⚠️ OPTION DATA MISSING<br>Run ingest_options.py", x=0.5, y=0.5, font=dict(color="red", size=20)),
+            xaxis={'visible': False}, yaxis={'visible': False}
+        )
+        return fig, "No Data", "N/A"
 
     entry_dt = datetime.fromtimestamp(entry_ts/1000, tz=pytz.utc).astimezone(config.TZ_NY)
     market_open = config.TZ_NY.localize(datetime.combine(entry_dt.date(), time(9, 30)))
@@ -286,8 +280,9 @@ def update_replay_unified(entry_ts, minutes, reveal):
     current_time_ny = market_open + timedelta(minutes=minutes)
     current_time_local = current_time_ny.astimezone(config.TZ_LOCAL)
     
-    spx_slice = spx[spx.index <= current_time_local]
-    vix_slice = vix[vix.index <= current_time_local]
+    # Fog of War Slicing
+    spx_slice = spx[spx.index <= current_time_local] if spx is not None else pd.DataFrame()
+    vix_slice = vix[vix.index <= current_time_local] if vix is not None else pd.DataFrame()
     opt_slice = opt[opt['dt'] <= current_time_local]
 
     stats_msg = "WAITING FOR ENTRY..."

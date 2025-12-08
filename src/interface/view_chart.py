@@ -60,18 +60,18 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             ticker = f"O:XSP{date_fmt}{opt_code}{strike:08d}"
             
             day_date = entry_dt.date()
-            start_str = entry_dt.strftime('%Y-%m-%d %H:%M:%S')
-            end_str = config.TZ_NY.localize(datetime.combine(day_date, time(16, 0))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
+            # Relaxed bounds to ensure we catch data near the edges
+            start_str = entry_dt.strftime('%Y-%m-%d 09:00:00')
+            end_str = entry_dt.strftime('%Y-%m-%d 16:30:00')
             
             pq = f"SELECT datetime_utc, open FROM {config.TBL_OPTIONS} WHERE ticker='{ticker}' AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}' ORDER BY datetime_utc ASC"
             prices = con.execute(pq).df()
             gain_str, gain_val = "N/A", -100.0
             
             if not prices.empty:
-                # Precision Entry Matching
                 signal_ts_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc).replace(tzinfo=None)
-                
                 try:
+                    # Find closest bar to entry time
                     idx = prices['datetime_utc'].sub(signal_ts_dt).abs().idxmin()
                     entry_px = prices.loc[idx, 'open']
                     
@@ -85,7 +85,7 @@ def scout_day_performance(date_str, trade_type_filter='call'):
                         gain_val = ((max_px - entry_px) / entry_px) * 100
                         gain_str = f"+{gain_val:.1f}%"
                     else:
-                        gain_str = "Noise"
+                        gain_str = "Noise (<$0.05)"
                         gain_val = 0
                 except:
                     gain_str = "Err"
@@ -135,9 +135,7 @@ def fetch_trade_performance(entry_ts_ms, trade_type, xsp_price):
         except:
             entry_price = df.iloc[0]['open']
 
-        # Raw Dollar Calc
         df['pnl_dollars_raw'] = (df['open'] - entry_price) * 100
-        
         entry_price_safe = entry_price if entry_price > 0.05 else 9999.9 
         df['pnl_pct'] = ((df['open'] - entry_price) / entry_price_safe) * 100
         
@@ -158,35 +156,41 @@ def fetch_indicators(entry_ts_ms):
         except: df_fut = pd.DataFrame()
         con.close()
         
-        if df_idx.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-        df_idx['datetime_local'] = df_idx['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
-        vix = df_idx[df_idx['ticker'] == 'VIX'].copy().set_index('datetime_local')
-        spx = df_idx[df_idx['ticker'] == 'SPX'].copy().set_index('datetime_local')
-        
+        # FIX: Handle partial returns (e.g., if VIX exists but SPX is missing)
+        spx = pd.DataFrame()
+        vix = pd.DataFrame()
         es = pd.DataFrame()
+        
+        if not df_idx.empty:
+            df_idx['datetime_local'] = df_idx['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
+            if 'SPX' in df_idx['ticker'].values:
+                spx = df_idx[df_idx['ticker'] == 'SPX'].copy().set_index('datetime_local')
+            if 'VIX' in df_idx['ticker'].values:
+                vix = df_idx[df_idx['ticker'] == 'VIX'].copy().set_index('datetime_local')
+                
+                # Calculate Indicators only if VIX data exists
+                vix['ema12'] = vix['close'].ewm(span=12).mean()
+                vix['ema26'] = vix['close'].ewm(span=26).mean()
+                vix['macd'] = vix['ema12'] - vix['ema26']
+                vix['signal'] = vix['macd'].ewm(span=9).mean()
+                vix['hist'] = vix['macd'] - vix['signal']
+                
+                delta = vix['close'].diff()
+                up = delta.clip(lower=0)
+                down = -1 * delta.clip(upper=0)
+                rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
+                vix['rsi'] = 100 - (100 / (1 + rs))
+
         if not df_fut.empty:
             df_fut['datetime_local'] = df_fut['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert(config.TZ_LOCAL)
             df_fut['scaled_close'] = df_fut['close']
             es = df_fut.set_index('datetime_local')
 
-        vix['ema12'] = vix['close'].ewm(span=12).mean()
-        vix['ema26'] = vix['close'].ewm(span=26).mean()
-        vix['macd'] = vix['ema12'] - vix['ema26']
-        vix['signal'] = vix['macd'].ewm(span=9).mean()
-        vix['hist'] = vix['macd'] - vix['signal']
-        
-        delta = vix['close'].diff()
-        up = delta.clip(lower=0)
-        down = -1 * delta.clip(upper=0)
-        rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
-        vix['rsi'] = 100 - (100 / (1 + rs))
-
         return spx, vix, es
     except Exception: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 # ==============================================================================
-# 2. LAYOUT (VISUAL FIX APPLIED)
+# 2. LAYOUT
 # ==============================================================================
 def render():
     return dbc.Container([
@@ -195,7 +199,6 @@ def render():
                 html.H2("CHART ANALYSIS (Tactical Forensics)", className="display-6 fw-bold text-white"),
                 html.P("Visual validation of the Hedged Protocol.", className="text-muted lead mb-2"),
                 
-                # TOGGLE - CLEAN LOOK (No Green/Red Dots)
                 html.Div([
                     html.Span("PROTOCOL: ", className="fw-bold text-warning small me-2 align-middle"),
                     dbc.RadioItems(
@@ -210,7 +213,7 @@ def render():
                     )
                 ], className="d-inline-block")
                 
-            ], width=12) # FULL WIDTH
+            ], width=12)
         ], className="mb-3 border-bottom border-secondary pb-3"),
 
         dbc.Card([dbc.CardBody([
@@ -255,63 +258,80 @@ def update_signal_dropdown(date_str, mode):
     [State('chart-mode-select', 'value')]
 )
 def update_chart(entry_ts, mode):
-    if not entry_ts: return go.Figure()
+    # Initialize empty black chart
+    empty_fig = go.Figure()
+    empty_fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+    if not entry_ts: return empty_fig
 
+    # Fetch basic signal info
     con = duckdb.connect(str(config.DB_FILE), read_only=True)
     res = con.execute(f"SELECT xsp_price, trade_type FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc={entry_ts}").fetchone()
     con.close()
-    if not res: return go.Figure()
+    if not res: return empty_fig
     
     xsp_est, trade_type = res[0], res[1]
+    
+    # FETCH ALL DATASETS INDEPENDENTLY
     opt_df, ticker = fetch_trade_performance(entry_ts, trade_type, xsp_est)
     spx_df, vix_df, es_df = fetch_indicators(entry_ts)
 
-    if opt_df is None or spx_df.empty:
-        fig = go.Figure()
-        fig.add_annotation(text="MARKET DATA UNAVAILABLE", showarrow=False, font=dict(size=20, color="red"))
-        return fig
-
-    peak_pnl_pct = opt_df['pnl_pct'].max()
-    peak_pnl_dol = opt_df['pnl_dollars_raw'].max()
-    peak_idx = opt_df['pnl_pct'].idxmax()
-
+    # CONSTRUCT SUBPLOTS (Even if some data is missing)
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.3, 0.25, 0.25, 0.2], 
                         specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
                         subplot_titles=("CONTEXT: SPX vs /ES", f"STRATEGY: {ticker}", "VIX FRACTAL FLOW", "VIX RSI"))
 
+    has_data = False
+
     # 1. SPX + ES
-    fig.add_trace(go.Candlestick(x=spx_df.index, open=spx_df['open'], high=spx_df['high'], low=spx_df['low'], close=spx_df['close'], name="SPX"), row=1, col=1)
+    if not spx_df.empty:
+        fig.add_trace(go.Candlestick(x=spx_df.index, open=spx_df['open'], high=spx_df['high'], low=spx_df['low'], close=spx_df['close'], name="SPX"), row=1, col=1)
+        has_data = True
+    else:
+        fig.add_annotation(text="SPX DATA MISSING", showarrow=False, font=dict(color="gray"), row=1, col=1)
+
     if not es_df.empty:
         fig.add_trace(go.Scatter(x=es_df.index, y=es_df['scaled_close'], name="/ES Futures", line=dict(color='#00d2ff', width=1, dash='dot')), row=1, col=1)
 
-    # 2. P&L + PRICE
-    colors = ['rgba(0, 188, 140, 0.3)' if v >= 0 else 'rgba(231, 76, 60, 0.3)' for v in opt_df['pnl_pct']]
-    fig.add_trace(go.Bar(x=opt_df['datetime_local'], y=opt_df['pnl_pct'], name="P&L %", marker_color=colors), row=2, col=1, secondary_y=False)
-    fig.add_trace(go.Scatter(x=opt_df['datetime_local'], y=opt_df['open'], name="Option Price", line=dict(color='white', width=1.5)), row=2, col=1, secondary_y=True)
-    
-    if peak_pnl_pct > 0:
-        fig.add_annotation(
-            x=opt_df.loc[peak_idx, 'datetime_local'], 
-            y=peak_pnl_pct, 
-            text=f"PEAK +{peak_pnl_pct:.1f}% (${peak_pnl_dol:+.2f})", 
-            showarrow=True, 
-            arrowhead=1, 
-            row=2, col=1, 
-            secondary_y=False
-        )
+    # 2. P&L + PRICE (CRITICAL)
+    if opt_df is not None and not opt_df.empty:
+        has_data = True
+        colors = ['rgba(0, 188, 140, 0.3)' if v >= 0 else 'rgba(231, 76, 60, 0.3)' for v in opt_df['pnl_pct']]
+        fig.add_trace(go.Bar(x=opt_df['datetime_local'], y=opt_df['pnl_pct'], name="P&L %", marker_color=colors), row=2, col=1, secondary_y=False)
+        fig.add_trace(go.Scatter(x=opt_df['datetime_local'], y=opt_df['open'], name="Option Price", line=dict(color='white', width=1.5)), row=2, col=1, secondary_y=True)
+        
+        peak_pnl_pct = opt_df['pnl_pct'].max()
+        peak_pnl_dol = opt_df['pnl_dollars_raw'].max()
+        peak_idx = opt_df['pnl_pct'].idxmax()
+        
+        if peak_pnl_pct > 0:
+            fig.add_annotation(
+                x=opt_df.loc[peak_idx, 'datetime_local'], 
+                y=peak_pnl_pct, 
+                text=f"PEAK +{peak_pnl_pct:.1f}% (${peak_pnl_dol:+.2f})", 
+                showarrow=True, arrowhead=1, row=2, col=1, secondary_y=False
+            )
+    else:
+        fig.add_annotation(text="OPTIONS DATA MISSING (Run Ingest)", showarrow=False, font=dict(color="red", size=16), row=2, col=1)
 
-    # 3. MACD
-    fig.add_trace(go.Bar(x=vix_df.index, y=vix_df['hist'], name="Macro (1h)", marker_color='rgba(255, 255, 255, 0.2)'), row=3, col=1)
-    fig.add_trace(go.Scatter(x=vix_df.index, y=vix_df['macd'], name="Micro (5m)", line=dict(color='#f1c40f', width=1)), row=3, col=1)
+    # 3. MACD (VIX)
+    if not vix_df.empty:
+        fig.add_trace(go.Bar(x=vix_df.index, y=vix_df['hist'], name="Macro (1h)", marker_color='rgba(255, 255, 255, 0.2)'), row=3, col=1)
+        fig.add_trace(go.Scatter(x=vix_df.index, y=vix_df['macd'], name="Micro (5m)", line=dict(color='#f1c40f', width=1)), row=3, col=1)
+        # 4. RSI
+        fig.add_trace(go.Scatter(x=vix_df.index, y=vix_df['rsi'], name="RSI", line=dict(color='#a855f7', width=1.5)), row=4, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="#e74c3c", row=4, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="#00bc8c", row=4, col=1)
+        has_data = True
 
-    # 4. RSI
-    fig.add_trace(go.Scatter(x=vix_df.index, y=vix_df['rsi'], name="RSI", line=dict(color='#a855f7', width=1.5)), row=4, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="#e74c3c", row=4, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="#00bc8c", row=4, col=1)
-
+    # Global entry line (if we have at least one timeframe to plot it on)
     entry_dt = datetime.fromtimestamp(entry_ts / 1000, tz=pytz.utc).astimezone(config.TZ_LOCAL)
-    fig.add_vline(x=entry_dt, line_width=1, line_dash="dash", line_color="yellow")
     
+    # Universal fallback if absolutely nothing was found
+    if not has_data:
+        empty_fig.add_annotation(text="MARKET DATA UNAVAILABLE (CHECK DB)", showarrow=False, font=dict(size=20, color="red"))
+        return empty_fig
+        
+    # Standard Layout
     fig.update_layout(
         template="plotly_dark", 
         paper_bgcolor='rgba(0,0,0,0)', 
@@ -319,14 +339,11 @@ def update_chart(entry_ts, mode):
         margin=dict(l=50, r=50, t=30, b=100), 
         showlegend=True, 
         height=900,
-        legend=dict(
-            orientation="h",
-            yanchor="top",
-            y=-0.05,
-            xanchor="center",
-            x=0.5
-        )
+        legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5)
     )
     
-    fig.update_xaxes(rangeslider_visible=False, rangebreaks=[dict(bounds=["16:00", "09:30"], pattern="hour"), dict(bounds=["sat", "mon"])])
+    # Add vertical line for entry on all subplots
+    fig.add_vline(x=entry_dt, line_width=1, line_dash="dash", line_color="yellow")
+    
+    fig.update_xaxes(rangeslider_visible=False, rangebreaks=[dict(bounds=["16:30", "09:00"], pattern="hour"), dict(bounds=["sat", "mon"])])
     return fig
