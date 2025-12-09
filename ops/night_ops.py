@@ -40,7 +40,7 @@ log.addHandler(fh)
 # ==============================================================================
 # 3. MISSION PARAMETERS
 # ==============================================================================
-BACKFILL_DAYS = 365       # 1 Year Lookback
+BACKFILL_DAYS = 10       # 1 Year Lookback
 THROTTLE_SPEED = 20.0     # ⚠️ SET TO 0.5 IF PAYING POLYGON. KEEP 20.0 IF FREE TIER.
 
 def system_check():

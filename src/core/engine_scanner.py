@@ -9,13 +9,12 @@ import pytz
 # ==============================================================================
 # 0. ENVIRONMENT PATCH (WINDOWS COMPATIBILITY)
 # ==============================================================================
-# CRITICAL: Force UTF-8 Encoding to allow "Vibe Code" Emojis (📡, ✅) on Windows
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
         sys.stderr.reconfigure(encoding='utf-8')
-    except Exception as e:
-        print(f"⚠️ Warning: Could not force UTF-8 encoding. Emojis may fail. {e}")
+    except Exception:
+        pass
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
@@ -37,7 +36,7 @@ OPEN_TIME_ET = time(9, 30)
 CLOSE_TIME_ET = time(16, 0)
 
 # ==============================================================================
-# 3. HELPER FUNCTIONS (Data & Persistence)
+# 3. HELPER FUNCTIONS
 # ==============================================================================
 def fetch_intraday_data(ticker):
     """Fetches intraday data from the Vault (DuckDB)."""
@@ -56,23 +55,16 @@ def fetch_intraday_data(ticker):
     finally:
         con.close()
 
-    if df.empty:
-        return df
+    if df.empty: return df
 
-    # Timezone Handling (UTC -> ET for RTH Logic)
     df['datetime_utc'] = pd.to_datetime(df['datetime_utc']).dt.tz_localize(pytz.utc)
     df['datetime_et'] = df['datetime_utc'].dt.tz_convert(config.TZ_NY)
-    df = df.set_index('datetime_utc') # Index must be UTC for calculations
+    df = df.set_index('datetime_utc') 
     return df
 
 def save_manifest(signals):
-    """Writes the generated signals to the Trade Manifest table."""
     con = duckdb.connect(str(config.DB_FILE))
-    
-    # 1. Reset Table
     con.execute(f"DROP TABLE IF EXISTS {config.TBL_MANIFEST}")
-    
-    # 2. Recreate Schema (Updated for v3.1 Hedged Protocol)
     con.execute(f"""
         CREATE TABLE {config.TBL_MANIFEST} (
             date DATE,
@@ -84,24 +76,20 @@ def save_manifest(signals):
             allocation_pct DOUBLE
         )
     """)
-
-    # 3. Insert Data
     if signals:
         signals_df = pd.DataFrame(signals)
         con.execute(f"INSERT INTO {config.TBL_MANIFEST} SELECT * FROM signals_df")
         log.info(f"💾 Manifest Rebuilt: {len(signals_df)} Signals (Hedged Protocol).")
     else:
         log.info("💾 Manifest Rebuilt: 0 Signals found.")
-    
     con.close()
 
 # ==============================================================================
-# 4. MAIN SCANNER LOGIC (FRACTAL FLOW)
+# 4. MAIN SCANNER LOGIC
 # ==============================================================================
 def scan_and_generate_manifest():
-    log.info("📡 Scanning for VIX Fractal Flow (Hedged Protocol)...")
+    log.info("📡 Scanning for VIX Fractal Flow (Smart Scale Logic)...")
     
-    # 1. Fetch & Prep Data
     spx_df = fetch_intraday_data('SPX')
     vix_df = fetch_intraday_data('VIX')
     
@@ -109,58 +97,51 @@ def scan_and_generate_manifest():
         log.error("❌ Missing SPX or VIX data. Aborting scan.")
         return
 
-    # 2. Calculate Indicators
-    # We use the centralized strat_fractal logic
+    # Indicators
     vix_1h_df = strat_fractal.calculate_macd(vix_df.resample('1h').last().dropna())
     vix_5m_df = strat_fractal.calculate_macd(vix_df.resample('5min').last().dropna())
-    
-    # NEW: Calculate RSI for the Gatekeeper Law
     vix_5m_df = strat_fractal.calculate_rsi(vix_5m_df, window=14)
     
-    # 3. Scan Loop
     signals = []
     days = spx_df['datetime_et'].dt.date.unique()
     last_signal_time = None
 
-    print(f"\n{'DATE':<12} | {'TYPE':<8} | {'STATUS':<15} | {'NOTES'}")
+    print(f"\n{'DATE':<12} | {'TYPE':<8} | {'STATUS':<15} | {'TARGET'}")
     print("-" * 70)
 
     for date in days:
-        # Define RTH Window
         day_open = config.TZ_NY.localize(datetime.combine(date, OPEN_TIME_ET))
         day_close = config.TZ_NY.localize(datetime.combine(date, CLOSE_TIME_ET))
         hard_deck = day_open + timedelta(minutes=15)
         
-        # Get bars for the day
         daily_bars = vix_df[(vix_df['datetime_et'] >= day_open) & (vix_df['datetime_et'] <= day_close)]
         
         for ts_current in daily_bars.index:
-            # Check Hard Deck
             if ts_current < hard_deck: continue
-            
-            # Check Cooldown
-            if last_signal_time and (ts_current - last_signal_time).total_seconds()/60 < COOLDOWN_MINUTES:
-                continue
+            if last_signal_time and (ts_current - last_signal_time).total_seconds()/60 < COOLDOWN_MINUTES: continue
 
-            # Get RSI (Align to 5m)
             ts_5m = ts_current.floor('5min')
             if ts_5m not in vix_5m_df.index: continue
             current_rsi = vix_5m_df.loc[ts_5m, 'rsi']
 
-            # Check Signal (Fractal + RSI Gatekeeper)
             result = strat_fractal.check_fractal_flow(vix_1h_df, vix_5m_df, ts_current, current_rsi)
             
             if result['signal_type']:
-                # Lookup SPX Price
                 try:
-                    spx_price = spx_df['close'].asof(ts_current)
-                    xsp_est = spx_price / 10.0 # Scaling Law
+                    raw_price = spx_df['close'].asof(ts_current)
+                    
+                    # --- 🧠 SMART SCALE FIX ---
+                    # If price > 2000, it is real SPX (6000) -> Divide by 10 to get XSP (600)
+                    # If price < 2000, it is SPY Proxy (600) -> Use as is for XSP (600)
+                    if raw_price > 2000:
+                        xsp_est = raw_price / 10.0
+                    else:
+                        xsp_est = raw_price
+                    # ---------------------------
+
                 except: continue
 
                 if xsp_est > 0:
-                    # LOGIC CHANGE: Dynamic Signal Detection
-                    # We write the specific DETECTED signal (Call or Put)
-                    
                     sig_type_str = f"VIX_FRACTAL_{'LONG' if result['signal_type']=='call' else 'SHORT'}"
                     
                     signals.append({
@@ -168,17 +149,15 @@ def scan_and_generate_manifest():
                         'entry_timestamp_utc': int(ts_current.timestamp() * 1000),
                         'signal_type': sig_type_str,
                         'xsp_price': xsp_est,
-                        'trade_type': result['signal_type'], # 'call' or 'put'
+                        'trade_type': result['signal_type'],
                         'meta_data': result['reason'],
-                        'allocation_pct': 1.0 # 100% allocation to the detected signal
+                        'allocation_pct': 1.0 
                     })
                     
                     last_signal_time = ts_current
-                    print(f"{str(date):<12} | {result['signal_type'].upper():<8} | {'✅ TRIGGERED':<15} | {result['reason']}")
+                    print(f"{str(date):<12} | {result['signal_type'].upper():<8} | {'✅ TRIGGERED':<15} | Strike: {int(xsp_est)}")
 
     print("-" * 70)
-
-    # 4. Persistence
     save_manifest(signals)
 
 if __name__ == '__main__':
