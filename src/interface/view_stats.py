@@ -1,348 +1,180 @@
 import dash
-from dash import dcc, html, callback, Input, Output
+from dash import dcc, html, callback, Input, Output, dash_table, no_update
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
+import plotly.express as px
 import pandas as pd
 import duckdb
-from datetime import datetime, timedelta
+import calendar
+from datetime import date, datetime
 from src.utils import config
+from src.utils.date_profiles import DATE_PROFILES 
 
-# ==============================================================================
-# 1. FORENSICS ENGINE (Direct DB Access)
-# ==============================================================================
-def fetch_simulation_runs():
-    """Fetches unique backtest runs and date ranges for the dropdown."""
-    if not config.DB_FILE.exists(): return []
-    
-    # Standard Time Filters
-    options = [
-        {'label': '🔴 LIVE COMBAT LOG (The Ledger)', 'value': 'LIVE_LEDGER'},
-        {'label': '⚠️ FULL HISTORY (All Trades)', 'value': 'ALL'},
-        {'label': '📅 Year to Date (YTD)', 'value': 'YTD'},
-        {'label': '📅 Quarter to Date (QTD)', 'value': 'QTD'},
-        {'label': '📅 Month to Date (MTD)', 'value': 'MTD'},
-        {'label': '📅 Week to Date (WTD)', 'value': 'WTD'},
-        {'label': '⏪ Last 30 Days', 'value': 'L30D'},
-        {'label': '⏪ Last 7 Days', 'value': 'L7D'},
-    ]
+# --- THEME CONSTANTS ---
+THEME = {
+    'BG_CARD': '#283878',
+    'BORDER': '2px solid #b5b8b9',
+    'TEXT_MAIN': '#ffffff',
+    'TEXT_GOLD': '#fde722',
+    'TEXT_ACCENT': '#00d2ff',
+    'SUCCESS': '#00ff41',
+    'DANGER': '#ff5555',
+    'FONT': 'VT323, monospace'
+}
+STYLE_CARD = {'backgroundColor': THEME['BG_CARD'], 'border': THEME['BORDER'], 'borderRadius': '6px', 'boxShadow': '0 0 15px rgba(0,0,0,0.5)', 'marginBottom': '20px'}
+STYLE_HEADER = {'backgroundColor': 'rgba(0,0,0,0.3)', 'borderBottom': '1px solid #fff', 'color': THEME['TEXT_GOLD'], 'fontWeight': 'bold', 'fontFamily': THEME['FONT'], 'fontSize': '1.2rem', 'letterSpacing': '1px'}
 
-    try:
-        con = duckdb.connect(str(config.DB_FILE), read_only=True)
-        # Check if table exists
-        tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
-        if config.TBL_SIM_LOG not in tables:
-            con.close()
-            return options
-
-        # Dynamic Months from Data
+# ... [DATA ENGINE FUNCTIONS - Preserved] ...
+def fetch_dropdown_options():
+    options = [{'label': '🔴 LIVE COMBAT LOG (Raw Ledger)', 'value': 'LIVE_LEDGER'}]
+    options.append({'label': '--- PROFILES ---', 'value': 'SEP_1', 'disabled': True})
+    for k in DATE_PROFILES.keys(): options.append({'label': k, 'value': k})
+    if config.DB_FILE.exists():
         try:
-            # Extract distinct YYYY-MM from entry_time
-            query = f"""
-                SELECT DISTINCT strftime(CAST(entry_time AS TIMESTAMP), '%Y-%m') as month_str 
-                FROM {config.TBL_SIM_LOG} 
-                WHERE entry_time IS NOT NULL
-                ORDER BY month_str DESC
-            """
-            months = con.execute(query).fetchall()
-            
-            if months:
-                options.append({'label': '--- MONTHLY ARCHIVES ---', 'value': 'DISABLED', 'disabled': True})
-                for m in months:
-                    m_str = m[0] # "2025-11"
-                    # Convert to "November 2025"
-                    dt_obj = datetime.strptime(m_str, '%Y-%m')
-                    pretty_lbl = dt_obj.strftime('%B %Y')
-                    options.append({'label': f"📂 {pretty_lbl}", 'value': f"MONTH_{m_str}"})
-        except Exception as e:
-            print(f"Error fetching months: {e}")
+            con = duckdb.connect(str(config.DB_FILE), read_only=True)
+            tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+            if config.TBL_SIM_LOG in tables:
+                months = con.execute(f"SELECT DISTINCT strftime(CAST(entry_time AS TIMESTAMP), '%Y-%m') FROM {config.TBL_SIM_LOG} ORDER BY 1 DESC").fetchall()
+                if months:
+                    options.append({'label': '--- MONTHLY ARCHIVES ---', 'value': 'SEP_2', 'disabled': True})
+                    for m in months: options.append({'label': f'📅 Archive: {m[0]}', 'value': m[0]})
+            con.close()
+        except: pass
+    return options
 
-        con.close()
-        return options
-    except: return options
-
-def fetch_run_metrics(run_id="ALL"):
-    """Fetches trade log from DuckDB and filters by run_id (Date Range)."""
-    if not config.DB_FILE.exists(): return pd.DataFrame()
+def fetch_data(query_type, start=None, end=None):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
-        
-        # --- CASE: LIVE LEDGER ---
-        if run_id == 'LIVE_LEDGER':
-            query = f"""
-                SELECT 
-                    entry_time, 
-                    exit_time, 
-                    ticker, 
-                    asset_type as type, 
-                    net_pnl as pnl, 
-                    return_pct, 
-                    qty,
-                    entry_price, 
-                    exit_price 
-                FROM {config.TBL_LIVE_LOG}
-                ORDER BY entry_time ASC
-            """
-            try:
-                df = con.execute(query).df()
-            except Exception: # Table might not exist yet
-                df = pd.DataFrame()
-            con.close()
-            
-            if not df.empty:
-                df['entry_time'] = pd.to_datetime(df['entry_time'])
-                df['exit_time'] = pd.to_datetime(df['exit_time'])
-                df['duration_mins'] = (df['exit_time'] - df['entry_time']).dt.total_seconds() / 60
-                df['hour'] = df['entry_time'].dt.hour
-                df['trade_seq'] = df.index + 1
-            return df
-
-        # --- CASE: BACKTEST LOGS ---
-        # Handle table check
         tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
-        if config.TBL_SIM_LOG not in tables:
-            con.close()
-            return pd.DataFrame()
-
-        # Query
-        query = f"SELECT * FROM {config.TBL_SIM_LOG}"
-        df = con.execute(query).df()
+        if config.TBL_SIM_LOG not in tables: con.close(); return pd.DataFrame()
+        if query_type == 'LEDGER': q = f"SELECT * FROM {config.TBL_SIM_LOG} ORDER BY entry_time DESC LIMIT 2000"
+        else: q = f"SELECT * FROM {config.TBL_SIM_LOG} WHERE entry_time >= '{start}' AND entry_time <= '{end}' ORDER BY entry_time ASC"
+        df = con.execute(q).df()
         con.close()
-        
-        if df.empty: return pd.DataFrame()
-        
-        # --- DATA NORMALIZATION ---
-        if 'pnl' not in df.columns and 'net_pnl' in df.columns: df['pnl'] = df['net_pnl']
-        if 'return_pct' not in df.columns: df['return_pct'] = 0.0
-        
-        # Datetime Conversion
-        if 'entry_time' in df.columns:
-            df['entry_time'] = pd.to_datetime(df['entry_time'])
-        if 'exit_time' in df.columns:
-            df['exit_time'] = pd.to_datetime(df['exit_time'])
-            
-        if 'duration_mins' not in df.columns and 'entry_time' in df.columns and 'exit_time' in df.columns:
-             df['duration_mins'] = (df['exit_time'] - df['entry_time']).dt.total_seconds() / 60
-
-        if 'entry_time' in df.columns:
-            df['hour'] = df['entry_time'].dt.hour
-
-        # --- FILTER LOGIC (For Backtests) ---
-        if run_id and run_id != 'ALL' and 'entry_time' in df.columns:
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            if run_id == 'YTD':
-                start_date = today.replace(month=1, day=1)
-                df = df[df['entry_time'] >= start_date]
-                
-            elif run_id == 'QTD':
-                curr_month = today.month
-                quarter_start_month = 3 * ((curr_month - 1) // 3) + 1
-                start_date = today.replace(month=quarter_start_month, day=1)
-                df = df[df['entry_time'] >= start_date]
-                
-            elif run_id == 'MTD':
-                start_date = today.replace(day=1)
-                df = df[df['entry_time'] >= start_date]
-                
-            elif run_id == 'WTD':
-                start_date = today - timedelta(days=today.weekday())
-                df = df[df['entry_time'] >= start_date]
-                
-            elif run_id == 'L7D':
-                start_date = today - timedelta(days=7)
-                df = df[df['entry_time'] >= start_date]
-                
-            elif run_id == 'L30D':
-                start_date = today - timedelta(days=30)
-                df = df[df['entry_time'] >= start_date]
-                
-            elif run_id.startswith('MONTH_'):
-                parts = run_id.split('_')[1]
-                target_y, target_m = map(int, parts.split('-'))
-                df = df[(df['entry_time'].dt.year == target_y) & (df['entry_time'].dt.month == target_m)]
-
-        # Sort and sequence
-        df = df.sort_values('entry_time').reset_index(drop=True)
-        df['trade_seq'] = df.index + 1
-        
         return df
-    except Exception as e:
-        print(f"Stats DB Error: {e}")
-        return pd.DataFrame()
+    except: return pd.DataFrame()
+
+def style_chart(fig):
+    fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(l=40, r=20, t=30, b=40), font=dict(family="monospace", color="#fff"))
+    return fig
+
+# --- VIEW GENERATORS ---
+def generate_ledger_view(df):
+    if df.empty: return html.Div("NO DATA ACQUIRED", className="text-center text-muted p-5 display-6", style={'fontFamily': 'monospace'})
+    return dbc.Card([
+        dbc.CardHeader("RAW TRANSACTION LEDGER", style={'backgroundColor': '#d63031', 'color': '#fff', 'fontWeight': 'bold', 'fontFamily': 'monospace'}),
+        dbc.CardBody(
+            dash_table.DataTable(
+                data=df.to_dict('records'),
+                columns=[{"name": i, "id": i} for i in ['entry_time','ticker','net_pnl','return_pct','reason']],
+                style_header={'backgroundColor': '#000', 'color': THEME['TEXT_GOLD'], 'fontWeight': 'bold', 'border': '1px solid #333'},
+                style_cell={'backgroundColor': '#111', 'color': '#fff', 'border': '1px solid #333', 'fontFamily': 'monospace'},
+                style_data_conditional=[
+                    {'if': {'filter_query': '{net_pnl} > 0', 'column_id': 'net_pnl'}, 'color': THEME['SUCCESS'], 'fontWeight': 'bold'},
+                    {'if': {'filter_query': '{net_pnl} < 0', 'column_id': 'net_pnl'}, 'color': THEME['DANGER'], 'fontWeight': 'bold'},
+                ],
+                page_size=20, sort_action="native"
+            )
+        )
+    ], style=STYLE_CARD)
+
+def generate_dashboard_view(df):
+    if df.empty: return html.Div("NO DATA FOUND", className="text-center text-muted p-5 display-6", style={'fontFamily': 'monospace'})
+    
+    # Metrics
+    net_pnl = df['net_pnl'].sum()
+    wins = df[df['net_pnl'] > 0]; losses = df[df['net_pnl'] <= 0]
+    win_rate = (len(wins)/len(df)*100) if len(df)>0 else 0
+    pf = (wins['net_pnl'].sum()/abs(losses['net_pnl'].sum())) if not losses.empty else 0
+    df['cum_pnl'] = df['net_pnl'].cumsum(); max_dd = (df['cum_pnl'] - df['cum_pnl'].cummax()).min()
+    
+    metrics = dbc.Row([
+        dbc.Col(dbc.Card([dbc.CardBody([html.H6("NET P&L", style={'color': THEME['TEXT_GOLD']}), html.H3(f"${net_pnl:,.0f}", style={'color': THEME['SUCCESS'] if net_pnl>0 else THEME['DANGER']})])], style=STYLE_CARD), width=3),
+        dbc.Col(dbc.Card([dbc.CardBody([html.H6("WIN RATE", style={'color': THEME['TEXT_GOLD']}), html.H3(f"{win_rate:.1f}%", style={'color': THEME['TEXT_ACCENT']})])], style=STYLE_CARD), width=3),
+        dbc.Col(dbc.Card([dbc.CardBody([html.H6("PROFIT FACTOR", style={'color': THEME['TEXT_GOLD']}), html.H3(f"{pf:.2f}", style={'color': '#fff'})])], style=STYLE_CARD), width=3),
+        dbc.Col(dbc.Card([dbc.CardBody([html.H6("MAX DRAWDOWN", style={'color': THEME['TEXT_GOLD']}), html.H3(f"${max_dd:,.0f}", style={'color': THEME['DANGER']})])], style=STYLE_CARD), width=3),
+    ], className="mb-3")
+
+    # Standard Charts
+    fig_eq = px.line(df, x='entry_time', y='cum_pnl', title="EQUITY CURVE"); fig_eq.update_traces(line_color=THEME['SUCCESS'], fill='tozeroy'); fig_eq = style_chart(fig_eq)
+    fig_pie = go.Figure(data=[go.Pie(labels=['Win','Loss'], values=[len(wins), len(losses)], hole=.5, marker=dict(colors=[THEME['SUCCESS'], THEME['DANGER']]))]); fig_pie.update_layout(title="WIN RATIO"); fig_pie = style_chart(fig_pie)
+    
+    row_charts = dbc.Row([
+        dbc.Col(dbc.Card([dbc.CardBody(dcc.Graph(figure=fig_eq, style={'height':'300px'}))], style=STYLE_CARD), width=8),
+        dbc.Col(dbc.Card([dbc.CardBody(dcc.Graph(figure=fig_pie, style={'height':'300px'}))], style=STYLE_CARD), width=4),
+    ])
+
+    # Forensic Charts
+    df['hour'] = df['entry_time'].dt.hour
+    hourly = df.groupby('hour').agg({'net_pnl':'sum','ticker':'count'}).rename(columns={'ticker':'count'})
+    fig_hourly = go.Figure(); fig_hourly.add_trace(go.Bar(x=hourly.index, y=hourly['count'], name="Vol", marker_color='rgba(52,152,219,0.4)', yaxis='y2')); fig_hourly.add_trace(go.Scatter(x=hourly.index, y=hourly['net_pnl'], name="PnL", line=dict(color='#f1c40f'))); fig_hourly.update_layout(title="HOURLY PERFORMANCE", yaxis2=dict(overlaying='y', side='right', showgrid=False)); fig_hourly = style_chart(fig_hourly)
+
+    fig_weekly = px.bar(df.groupby(df['entry_time'].dt.day_name())['net_pnl'].sum().reindex(['Monday','Tuesday','Wednesday','Thursday','Friday']).reset_index(), x='entry_time', y='net_pnl', title="WEEKDAY PERFORMANCE"); fig_weekly.update_traces(marker_color=THEME['TEXT_ACCENT']); fig_weekly = style_chart(fig_weekly)
+    
+    row_forensics = dbc.Row([
+        dbc.Col(dbc.Card([dbc.CardBody(dcc.Graph(figure=fig_hourly, style={'height':'300px'}))], style=STYLE_CARD), width=6),
+        dbc.Col(dbc.Card([dbc.CardBody(dcc.Graph(figure=fig_weekly, style={'height':'300px'}))], style=STYLE_CARD), width=6)
+    ])
+
+    # Physics
+    fig_dist = px.histogram(df, x="net_pnl", nbins=30, title="P&L DISTRIBUTION"); fig_dist.update_traces(marker_color=THEME['TEXT_ACCENT']); fig_dist = style_chart(fig_dist)
+    try:
+        if 'duration_mins' in df.columns: fig_dur = px.histogram(df, x="duration_mins", nbins=20, title="TRADE DURATION"); fig_dur.update_traces(marker_color='#9b59b6'); fig_dur = style_chart(fig_dur)
+        else: fig_dur = go.Figure()
+    except: fig_dur = go.Figure()
+
+    row_physics = dbc.Row([
+        dbc.Col(dbc.Card([dbc.CardBody(dcc.Graph(figure=fig_dist, style={'height':'300px'}))], style=STYLE_CARD), width=6),
+        dbc.Col(dbc.Card([dbc.CardBody(dcc.Graph(figure=fig_dur, style={'height':'300px'}))], style=STYLE_CARD), width=6)
+    ])
+
+    # Heatmap
+    try:
+        df['year'] = df['entry_time'].dt.year; df['month'] = df['entry_time'].dt.month
+        piv = df.groupby(['year','month'])['net_pnl'].sum().reset_index().pivot(index='year', columns='month', values='net_pnl').reindex(columns=range(1,13)).fillna(0)
+        piv.columns = [calendar.month_abbr[i] for i in piv.columns]; piv.reset_index(inplace=True)
+        hm = dash_table.DataTable(data=piv.to_dict('records'), columns=[{"name": str(i), "id": str(i)} for i in piv.columns], 
+                                  style_header={'backgroundColor': '#000', 'color': THEME['TEXT_GOLD'], 'fontWeight': 'bold'}, 
+                                  style_cell={'backgroundColor': '#111', 'color': '#fff', 'border': '1px solid #333'})
+    except: hm = html.Div("No Heatmap Data")
+
+    row_heatmap = dbc.Row([dbc.Col(dbc.Card([dbc.CardHeader("MONTHLY HEATMAP", style=STYLE_HEADER), dbc.CardBody(hm)], style=STYLE_CARD), width=12)])
+
+    return html.Div([
+        metrics, row_charts, 
+        html.Hr(style={'borderColor': '#fff', 'opacity': '0.3'}), 
+        html.H4("TEMPORAL FORENSICS", style={'color': THEME['TEXT_ACCENT'], 'fontFamily': THEME['FONT']}), row_forensics,
+        html.H4("PROTOCOL PHYSICS", style={'color': THEME['TEXT_GOLD'], 'fontFamily': THEME['FONT']}), row_physics,
+        html.Br(), row_heatmap
+    ])
 
 # ==============================================================================
-# 2. LAYOUT
+# 5. CONTROLLER
 # ==============================================================================
 def render():
     return dbc.Container([
-        # HEADER
-        dbc.Row([
-            dbc.Col([
-                html.H2("STATISTICS LAB", className="display-6 fw-bold text-white"),
-                html.Small("Post-Trade Audit & Statistical Breakdown", className="text-muted"),
-                html.Hr(className="my-2", style={'borderColor': '#444'})
-            ], width=12)
-        ], className="mb-4"),
+        dbc.Row([dbc.Col([html.H2("STATISTICAL LAB", className="display-4", style={'color': THEME['TEXT_MAIN'], 'textShadow': f"0 0 10px {THEME['TEXT_ACCENT']}", 'fontFamily': THEME['FONT']}), html.P("MICRO-STRUCTURE FORENSICS", style={'color': THEME['TEXT_GOLD'], 'letterSpacing': '2px'})], width=12)], className="mb-4"),
+        dbc.Card([dbc.CardBody([dbc.Row([
+            dbc.Col([html.Label("VIEW MODE", style={'color': THEME['TEXT_ACCENT'], 'fontWeight': 'bold'}), dcc.Dropdown(id='stats-view-selector', options=fetch_dropdown_options(), value='Year to Date (YTD)', clearable=False, style={'backgroundColor': '#fff', 'color': '#000'})], width=4),
+            dbc.Col([html.Div(id='stats-picker-container', children=[html.Label("CUSTOM RANGE", style={'color': THEME['TEXT_ACCENT'], 'fontWeight': 'bold'}), dcc.DatePickerRange(id='stats-date-picker', start_date=date(2024,1,1), end_date=date.today(), style={'backgroundColor': THEME['BG_CARD'], 'border': '1px solid #555'})])], width=4),
+            dbc.Col([dbc.Button("🔄 RUN ANALYSIS", id='stats-refresh-btn', color="primary", className="mt-4 w-100 fw-bold", style={'border': '1px solid #fff'})], width=4)
+        ])], style=STYLE_CARD)], className="mb-4"),
+        dcc.Loading(id="loading-stats", type="cube", color=THEME['SUCCESS'], children=html.Div(id='stats-content-area')),
+        html.Div(id='stats-ledger-area')
+    ], fluid=True)
 
-        # CONTROL PANEL
-        dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("CASE FILE SELECTOR (DB)", className="fw-bold text-info", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody([
-                        html.Label("Select Dataset", className="text-white"),
-                        dcc.Dropdown(
-                            id='audit-run-selector',
-                            options=fetch_simulation_runs(),
-                            value='ALL', # Default to ALL
-                            placeholder="Select Data Source...",
-                            className="mb-2",
-                            style={'color': '#000'}
-                        ),
-                        dbc.Button("↻ REFRESH FROM VAULT", id='audit-refresh-btn', color="secondary", outline=True, size="sm", className="w-100")
-                    ], style={'backgroundColor': '#131722'})
-                ], className="shadow mb-4", style={'border': '1px solid #444'})
-            ], width=12, md=4),
-            
-            # SUMMARY STATS
-            dbc.Col([
-                html.Div(id='audit-stats-panel')
-            ], width=12, md=8)
-        ]),
+@callback([Output('stats-date-picker', 'start_date'), Output('stats-date-picker', 'end_date'), Output('stats-picker-container', 'style')], Input('stats-view-selector', 'value'))
+def update_inputs(selection):
+    if selection == 'LIVE_LEDGER': return no_update, no_update, {'display': 'none'}
+    style = {'display': 'block'}
+    profile = DATE_PROFILES.get(selection)
+    if profile: return profile.start_date, profile.end_date, style
+    try:
+        dt = datetime.strptime(selection, '%Y-%m')
+        return date(dt.year, dt.month, 1), date(dt.year, dt.month, calendar.monthrange(dt.year, dt.month)[1]), style
+    except: return no_update, no_update, style
 
-        # VISUALIZATION GRID
-        dbc.Row([
-            # ROW 1: DECAY & DOMINANCE
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("SIGNAL DECAY (Profit by Sequence)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody(
-                        dcc.Loading(dcc.Graph(id='chart-decay', style={'height': '300px'}), type="cube", color="#00bc8c"),
-                        style={'backgroundColor': '#000000'}
-                    )
-                ], className="shadow h-100", style={'border': '1px solid #444'})
-            ], width=12, md=8),
-
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("DOMINANCE (Call vs Put)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody(
-                        dcc.Loading(dcc.Graph(id='chart-dominance', style={'height': '300px'}), type="cube", color="#00bc8c"),
-                        style={'backgroundColor': '#000000'}
-                    )
-                ], className="shadow h-100", style={'border': '1px solid #444'})
-            ], width=12, md=4),
-        ], className="mb-4"),
-
-        # ROW 2: KILL ZONES & THETA
-        dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("KILL ZONE (Hourly Performance)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody(
-                        dcc.Loading(dcc.Graph(id='chart-killzone', style={'height': '300px'}), type="cube", color="#00bc8c"),
-                        style={'backgroundColor': '#000000'}
-                    )
-                ], className="shadow h-100", style={'border': '1px solid #444'})
-            ], width=12, md=6),
-
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("THETA RISK (Duration vs P&L)", className="fw-bold text-white", style={'backgroundColor': '#1E222D', 'borderBottom': '1px solid #444'}),
-                    dbc.CardBody(
-                        dcc.Loading(dcc.Graph(id='chart-theta', style={'height': '300px'}), type="cube", color="#00bc8c"),
-                        style={'backgroundColor': '#000000'}
-                    )
-                ], className="shadow h-100", style={'border': '1px solid #444'})
-            ], width=12, md=6),
-        ])
-
-    ], fluid=True, style={'backgroundColor': '#000', 'minHeight': '100vh', 'padding': '20px'})
-
-# ==============================================================================
-# CALLBACKS
-# ==============================================================================
-@callback(
-    [Output('audit-run-selector', 'options'),
-     Output('chart-decay', 'figure'),
-     Output('chart-dominance', 'figure'),
-     Output('chart-killzone', 'figure'),
-     Output('chart-theta', 'figure')],
-    [Input('audit-run-selector', 'value'),
-     Input('audit-refresh-btn', 'n_clicks')]
-)
-def update_forensics(run_id, n_clicks):
-    # 1. Refresh Dropdown
-    options = fetch_simulation_runs()
-    
-    # 2. Base Charts (Empty)
-    empty_fig = go.Figure().update_layout(
-        template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="white"), xaxis={'showgrid': False, 'visible': False}, yaxis={'showgrid': False, 'visible': False}
-    )
-    
-    if not run_id:
-        return options, empty_fig, empty_fig, empty_fig, empty_fig
-
-    # 3. Fetch Data
-    df = fetch_run_metrics(run_id)
-    if df.empty:
-        return options, empty_fig, empty_fig, empty_fig, empty_fig
-
-    # --- CHART 1: SIGNAL DECAY (Cumulative P&L) ---
-    df['cum_pnl'] = df['pnl'].cumsum()
-    fig_decay = go.Figure()
-    fig_decay.add_trace(go.Scatter(x=df['trade_seq'], y=df['cum_pnl'], mode='lines+markers', line=dict(color='#00bc8c', width=2), marker=dict(size=4)))
-    fig_decay.update_layout(
-        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
-        yaxis=dict(gridcolor='#333'), xaxis=dict(gridcolor='#333', title="Trade Sequence")
-    )
-
-    # --- CHART 2: DOMINANCE (Win Rate by Type) ---
-    # Case insensitive type
-    df['type'] = df['type'].str.upper()
-    win_rates = df[df['pnl'] > 0].groupby('type').size()
-    total_counts = df.groupby('type').size()
-    wr_pct = (win_rates / total_counts * 100).fillna(0)
-    
-    fig_dom = go.Figure()
-    fig_dom.add_trace(go.Bar(x=wr_pct.index, y=wr_pct.values, marker_color=['#00d2ff', '#f39c12']))
-    fig_dom.update_layout(
-        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
-        yaxis=dict(range=[0, 100], gridcolor='#333', title="Win Rate %")
-    )
-
-    # --- CHART 3: KILL ZONE (Hourly P&L) ---
-    hourly_pnl = df.groupby('hour')['pnl'].sum().reset_index()
-    colors = ['#00bc8c' if v >= 0 else '#ef5350' for v in hourly_pnl['pnl']]
-    
-    fig_kill = go.Figure()
-    fig_kill.add_trace(go.Bar(x=hourly_pnl['hour'], y=hourly_pnl['pnl'], marker_color=colors))
-    fig_kill.update_layout(
-        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
-        xaxis=dict(tickmode='linear', dtick=1, gridcolor='#333', title="Hour of Day"), yaxis=dict(gridcolor='#333')
-    )
-
-    # --- CHART 4: THETA RISK (Duration vs ROI) ---
-    fig_theta = go.Figure()
-    fig_theta.add_trace(go.Scatter(
-        x=df['duration_mins'], y=df['return_pct'], 
-        mode='markers', 
-        marker=dict(
-            size=8, 
-            color=df['return_pct'], 
-            colorscale='RdYlGn', 
-            cmid=0,
-            line=dict(width=1, color='#333')
-        )
-    ))
-    fig_theta.update_layout(
-        template="plotly_dark", title=None, margin=dict(l=40, r=40, t=20, b=30),
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color="white"),
-        xaxis=dict(title="Minutes Held", gridcolor='#333'), yaxis=dict(title="Return %", gridcolor='#333')
-    )
-
-    return options, fig_decay, fig_dom, fig_kill, fig_theta
+@callback([Output('stats-content-area', 'children'), Output('stats-ledger-area', 'children')], [Input('stats-refresh-btn', 'n_clicks'), Input('stats-view-selector', 'value'), Input('stats-date-picker', 'start_date'), Input('stats-date-picker', 'end_date')])
+def main_controller(n, view_mode, start, end):
+    if view_mode == 'LIVE_LEDGER': return generate_ledger_view(fetch_data('LEDGER')), ""
+    return generate_dashboard_view(fetch_data('STATS', start, end)), ""

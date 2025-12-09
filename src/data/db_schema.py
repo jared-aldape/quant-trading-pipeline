@@ -62,93 +62,37 @@ def initialize_database():
     # 1. MARKET INDICES (The Truth)
     # ------------------------------------------------------------------
     log.info(f"🔨 Initializing: {config.TBL_INDICES}")
-    con.execute(f"DROP TABLE IF EXISTS {config.TBL_INDICES}")
-    con.execute(f"""
-    CREATE TABLE {config.TBL_INDICES} (
-        datetime_utc TIMESTAMP NOT NULL,
-        ticker VARCHAR NOT NULL,
-        open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE,
-        PRIMARY KEY (datetime_utc, ticker)
-    )""")
+    con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (datetime_utc TIMESTAMP, ticker VARCHAR, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, PRIMARY KEY (datetime_utc, ticker))")
     
-    # Risk Free Rate (Daily)
     log.info(f"🔨 Initializing: {config.TBL_IRX}")
-    con.execute(f"DROP TABLE IF EXISTS {config.TBL_IRX}")
-    con.execute(f"""
-    CREATE TABLE {config.TBL_IRX} (
-        date DATE,
-        ticker VARCHAR,
-        rate DOUBLE,
-        PRIMARY KEY (date)
-    )""")
+    con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_IRX} (date DATE, ticker VARCHAR, rate DOUBLE, PRIMARY KEY (date))")
 
-    # Futures Archive (Sentinel Layer)
     log.info(f"🔨 Initializing: {config.TBL_FUTURES}")
-    con.execute(f"DROP TABLE IF EXISTS {config.TBL_FUTURES}")
-    con.execute(f"""
-    CREATE TABLE {config.TBL_FUTURES} (
-        datetime_utc TIMESTAMP NOT NULL,
-        ticker VARCHAR NOT NULL,
-        open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE,
-        PRIMARY KEY (datetime_utc, ticker)
-    )""")
+    con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_FUTURES} (datetime_utc TIMESTAMP, ticker VARCHAR, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, PRIMARY KEY (datetime_utc, ticker))")
 
     # ------------------------------------------------------------------
     # 2. OPTION VEHICLE (The Product)
     # ------------------------------------------------------------------
     log.info(f"🔨 Initializing: {config.TBL_OPTIONS}")
-    con.execute(f"DROP TABLE IF EXISTS {config.TBL_OPTIONS}")
-    con.execute(f"""
-    CREATE TABLE {config.TBL_OPTIONS} (
-        datetime_utc TIMESTAMP,
-        ticker VARCHAR,
-        expiration DATE,
-        strike DOUBLE,
-        type VARCHAR, -- 'C' or 'P'
-        open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE,
-        iv DOUBLE, delta DOUBLE, gamma DOUBLE, vega DOUBLE, theta DOUBLE,
-        underlying_price DOUBLE,
-        risk_free_rate DOUBLE,
-        PRIMARY KEY (datetime_utc, ticker)
-    )""")
+    con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_OPTIONS} (datetime_utc TIMESTAMP, ticker VARCHAR, expiration DATE, strike DOUBLE, type VARCHAR, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, iv DOUBLE, delta DOUBLE, gamma DOUBLE, vega DOUBLE, theta DOUBLE, underlying_price DOUBLE, risk_free_rate DOUBLE, PRIMARY KEY (datetime_utc, ticker))")
 
     # ------------------------------------------------------------------
     # 3. STRATEGY DATA (Core Engine)
     # ------------------------------------------------------------------
-    
-    # Strategy Manifest
     log.info(f"🔨 Initializing: {config.TBL_MANIFEST}")
-    con.execute(f"DROP TABLE IF EXISTS {config.TBL_MANIFEST}")
-    con.execute(f"""
-    CREATE TABLE {config.TBL_MANIFEST} (
-        entry_timestamp_utc BIGINT NOT NULL,
-        date DATE,
-        signal_type VARCHAR,
-        xsp_price DOUBLE,
-        trade_type VARCHAR,
-        meta_data VARCHAR,
-        allocation_pct DOUBLE,
-        PRIMARY KEY (entry_timestamp_utc)
-    )""")
+    con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_MANIFEST} (entry_timestamp_utc BIGINT, date DATE, signal_type VARCHAR, xsp_price DOUBLE, trade_type VARCHAR, meta_data VARCHAR, allocation_pct DOUBLE, PRIMARY KEY (entry_timestamp_utc))")
     
-    # Macro Flow State
     log.info(f"🔨 Initializing: {config.TBL_MACRO_FLOW}")
-    con.execute(f"DROP TABLE IF EXISTS {config.TBL_MACRO_FLOW}")
-    con.execute(f"""
-    CREATE TABLE {config.TBL_MACRO_FLOW} (
-        date DATE NOT NULL,
-        flow_bias VARCHAR,
-        bull_pct DOUBLE,
-        bear_pct DOUBLE,
-        PRIMARY KEY (date)
-    )""")
+    con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_MACRO_FLOW} (date DATE, flow_bias VARCHAR, bull_pct DOUBLE, bear_pct DOUBLE, PRIMARY KEY (date))")
     
-    # Simulation Log
-    log.info(f"🔨 Initializing: {config.TBL_SIM_LOG}")
+    # --- SIMULATION LOG (UPDATED) ---
+    log.info(f"🔨 Re-Initializing: {config.TBL_SIM_LOG}")
+    # We drop and recreate this specific table to ensure the schema update is applied
     con.execute(f"DROP TABLE IF EXISTS {config.TBL_SIM_LOG}")
     con.execute(f"""
     CREATE TABLE {config.TBL_SIM_LOG} (
         entry_time TIMESTAMP, 
+        exit_time TIMESTAMP,   -- <--- NEW COLUMN ADDED HERE
         ticker VARCHAR, 
         net_pnl DOUBLE, 
         return_pct DOUBLE, 

@@ -8,14 +8,6 @@ from pathlib import Path
 import pytz
 
 # ==============================================================================
-# 0. ENVIRONMENT PATCH (WINDOWS COMPATIBILITY)
-# ==============================================================================
-if sys.platform == 'win32':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-    except: pass
-
-# ==============================================================================
 # 1. PATH CONSTITUTION
 # ==============================================================================
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -23,7 +15,6 @@ sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
 from src.utils.logger import get_logger
-from src.core import engine_simulator
 
 log = get_logger("BacktestEngine")
 
@@ -31,203 +22,162 @@ log = get_logger("BacktestEngine")
 # 2. HELPER FUNCTIONS
 # ==============================================================================
 def calculate_detailed_fees(num_contracts, fee_model="RH_GOLD"):
-    """
-    Returns breakdown: (total_fee, reg_fee, contract_fee)
-    Uses engine_simulator logic for consistency.
-    """
-    return engine_simulator.calculate_detailed_fees(num_contracts, fee_model)
+    fees = config.RH_FEES
+    reg_fee = num_contracts * fees['REGULATORY_BASE']
+    contract_fee = num_contracts * fees['CONTRACT_GOLD'] if fee_model == "RH_GOLD" else 0.0
+    return reg_fee + contract_fee, reg_fee, contract_fee
 
-def fetch_manifest_data(limit_days=30):
-    """Fetches signals from the Vault."""
+def fetch_manifest_data(start_date, end_date):
     if not config.DB_FILE.exists(): return pd.DataFrame()
-    
     con = duckdb.connect(str(config.DB_FILE), read_only=True)
     try:
-        # Fetch manifest ordered by time
-        query = f"""
-            SELECT * FROM {config.TBL_MANIFEST} 
-            ORDER BY entry_timestamp_utc ASC
-        """
-        df = con.execute(query).df()
-        
-        # Filter by days
-        if not df.empty and 'date' in df.columns:
-            cutoff = pd.Timestamp.now().date() - timedelta(days=limit_days)
-            df['date'] = pd.to_datetime(df['date']).dt.date
-            df = df[df['date'] >= cutoff]
-            
-        return df
+        query = f"SELECT * FROM {config.TBL_MANIFEST} WHERE date >= '{start_date}' AND date <= '{end_date}' ORDER BY entry_timestamp_utc ASC"
+        return con.execute(query).df()
     except Exception as e:
-        log.error(f"Manifest Fetch Error: {e}")
+        log.error(f"Manifest Error: {e}")
         return pd.DataFrame()
-    finally:
-        con.close()
+    finally: con.close()
 
-def fetch_option_price(ticker, timestamp_utc, mode='open'):
-    """
-    Fetches the option price from the Vault at a specific time.
-    Uses ASOF logic (nearest prior tick).
-    """
+def fetch_option_data(ticker, target_date):
     con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    
-    # Format timestamp for SQL
-    ts_str = timestamp_utc.strftime('%Y-%m-%d %H:%M:%S')
-    
     try:
-        # ASOF Lookup: Find the last known price before or at the timestamp
+        # Fetch Intraday bars for the ticker
         query = f"""
-            SELECT {mode} 
+            SELECT datetime_utc, open, close 
             FROM {config.TBL_OPTIONS} 
             WHERE ticker = '{ticker}' 
-            AND datetime_utc <= '{ts_str}' 
-            ORDER BY datetime_utc DESC 
-            LIMIT 1
+            AND datetime_utc::DATE = '{target_date}' 
+            ORDER BY datetime_utc ASC
         """
-        res = con.execute(query).fetchone()
-        return res[0] if res else None
-    except Exception:
-        return None
-    finally:
-        con.close()
+        df = con.execute(query).df()
+        if not df.empty:
+            # Enforce UTC to match Signal Timestamps
+            if df['datetime_utc'].dt.tz is None:
+                df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(pytz.utc)
+            else:
+                df['datetime_utc'] = df['datetime_utc'].dt.tz_convert(pytz.utc)
+        return df
+    except: return pd.DataFrame()
+    finally: con.close()
 
 # ==============================================================================
-# 3. CORE BACKTEST LOOPS
+# 3. CORE ENGINE
 # ==============================================================================
-def run_backtest_session(initial_balance=1000.0, days=30, selection_mode='FIRST', hedged_mode=True):
+def run_backtest_session(initial_balance=1000, start_date=None, end_date=None, selection_mode='FIRST', strategy_mode='Fractal'):
     """
-    Executes the simulation based on Trade Manifest signals.
+    Executes the backtest with specific Strategy Mode logic.
     """
-    log.info(f"⚔️ Starting Backtest (Hedged: {hedged_mode} | Selection: {selection_mode})")
-    
-    # 1. Load Signals
-    signals = fetch_manifest_data(limit_days=days)
-    if signals.empty:
-        log.warning("⚠️ No signals found in Manifest.")
-        return pd.DataFrame()
+    # 1. Date Defaults
+    if not start_date: start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+    if not end_date: end_date = datetime.now().strftime('%Y-%m-%d')
 
-    # 2. Load Macro Flow (for Hedging)
-    flow_map = {}
-    try:
-        con = duckdb.connect(str(config.DB_FILE), read_only=True)
-        flow_df = con.execute(f"SELECT date, flow_bias FROM {config.TBL_MACRO_FLOW}").df()
-        con.close()
-        flow_df['date'] = pd.to_datetime(flow_df['date']).dt.date
-        flow_map = dict(zip(flow_df['date'], flow_df['flow_bias']))
-    except: pass
+    # 2. Load Signals
+    manifest = fetch_manifest_data(start_date, end_date)
+    if manifest.empty: return pd.DataFrame()
 
-    # 3. Simulation State
-    balance = initial_balance
     trades = []
-    
-    # Group by Date to handle daily selection logic
-    grouped = signals.groupby('date')
-    
-    for date, group in grouped:
+    balance = float(initial_balance)
+    manifest['date_str'] = pd.to_datetime(manifest['date']).dt.strftime('%Y-%m-%d')
+    grouped = manifest.groupby('date_str')
+
+    log.info(f"🚀 Running Sim: {start_date} to {end_date} | Mode: {strategy_mode}")
+
+    for date_str, daily_signals in grouped:
         daily_candidates = []
         
-        # --- A. PROCESS CANDIDATES ---
-        for _, row in group.iterrows():
-            signal_type = row['trade_type'] # 'call' or 'put'
-            macro_bias = flow_map.get(date, 'NEUTRAL')
+        for _, sig in daily_signals.iterrows():
+            ts_ms = sig['entry_timestamp_utc']
+            trade_type = sig['trade_type'].upper() # CALL or PUT
             
-            # HEDGED PROTOCOL LOGIC:
-            # If Bearish Flow, prioritize Puts. If Bullish, Calls.
-            if hedged_mode:
-                if macro_bias == 'BEAR' and signal_type == 'call': continue # Skip counter-trend
-                if macro_bias == 'BULL' and signal_type == 'put': continue
+            # --- STRATEGY FILTERING LOGIC ---
+            # 1. Pure Directional
+            if strategy_mode == 'Call' and 'PUT' in trade_type: continue
+            if strategy_mode == 'Put' and 'CALL' in trade_type: continue
             
-            # Ticker Construction (Same as Sentinel)
-            # We need to construct the ticker string to lookup prices
-            # Schema: O:XSP{YYMMDD}{C/P}{STRIKE}
-            try:
-                dt_obj = pd.to_datetime(date)
-                ticker_date = dt_obj.strftime('%y%m%d')
-                strike = int(round(row['xsp_price']))
-                char = 'C' if signal_type == 'call' else 'P'
-                strike_str = f"{strike*1000:08d}"
-                ticker = f"O:XSP{ticker_date}{char}{strike_str}"
-                
-                # Timestamp Handling (UTC for Vault)
-                entry_ts = row['entry_timestamp_utc'] # ms
-                entry_dt_utc = datetime.fromtimestamp(entry_ts/1000.0, tz=pytz.utc)
-                
-                # --- ENTRY PRICE ---
-                entry_price = fetch_option_price(ticker, entry_dt_utc, 'open')
-                if not entry_price: continue
-                
-                # --- EXIT SIMULATION ---
-                # Strategy: Hold for 60 minutes or End of Day
-                exit_dt_utc = entry_dt_utc + timedelta(minutes=60)
-                exit_price = fetch_option_price(ticker, exit_dt_utc, 'open')
-                
-                # Fallback: Close at EOD if no 60m data (e.g. late entry)
-                if not exit_price:
-                    # Try getting the last tick of the day
-                    eod_dt = entry_dt_utc.replace(hour=20, minute=59) # ~4 PM ET in UTC
-                    exit_price = fetch_option_price(ticker, eod_dt, 'close')
-                
-                if not exit_price: continue # Skip if bad data
-                
-                # --- FEES & PNL ---
-                # Position Sizing: 10% of current balance
-                alloc_amt = balance * 0.10
-                contract_cost = entry_price * 100
-                contracts = int(alloc_amt / contract_cost)
-                if contracts < 1: contracts = 1
-                
-                total_fee, _, _ = calculate_detailed_fees(contracts)
-                
-                entry_cost = (contracts * contract_cost) + total_fee
-                # APPLY SLIPPAGE: $0.01 per contract on entry and exit
-                slippage = 0.01 * 100 * contracts
-                
-                # Exit
-                gross_return = (contracts * exit_price * 100)
-                exit_fee, _, _ = calculate_detailed_fees(contracts)
-                net_pnl = gross_return - entry_cost - exit_fee - (slippage * 2) # Slippage both sides
-                
-                ret_pct = (net_pnl / entry_cost) * 100
-                
-                # Convert times to PST for "The Glass" (Reporting)
-                pst_entry = entry_dt_utc.astimezone(config.TZ_LOCAL).strftime('%H:%M')
-                pst_exit = exit_dt_utc.astimezone(config.TZ_LOCAL).strftime('%H:%M')
+            # 2. 75/25 Bias Logic
+            # "Call 75/25" means we prioritize Calls. We only take Puts if no Calls exist (or strictly secondary).
+            # For simplicity: If bias is Call, and this is a Put, we skip it IF we already have a candidate.
+            if strategy_mode == 'Call 75/25' and 'PUT' in trade_type and len(daily_candidates) > 0: continue
+            if strategy_mode == 'Put 75/25' and 'CALL' in trade_type and len(daily_candidates) > 0: continue
+            
+            # 3. Fractal / Hedged
+            # These modes accept all valid signals generated by the scanner.
+            
+            # --- DATA FETCHING ---
+            xsp_target = sig['xsp_price']
+            strike = int(xsp_target)
+            opt_type = 'C' if 'CALL' in trade_type else 'P'
+            date_fmt = pd.to_datetime(date_str).strftime('%y%m%d')
+            ticker = f"O:XSP{date_fmt}{opt_type}{strike * 1000:08d}"
+            
+            df_opt = fetch_option_data(ticker, date_str)
+            if df_opt.empty: continue # Night Ops missed this one
 
-                daily_candidates.append({
-                    'entry_timestamp': entry_ts, # <--- CRITICAL FIX: Restored for sorting
-                    'entry_time': pst_entry,
-                    'exit_time': pst_exit,
-                    'ticker': ticker,
-                    'type': signal_type.upper(),
-                    'contracts': contracts,
-                    'entry': entry_price,
-                    'exit': exit_price,
-                    'pnl': net_pnl,
-                    'return': ret_pct,
-                    'balance_impact': net_pnl
-                })
-                
-            except Exception as e:
-                log.error(f"Sim Error {date}: {e}")
-                continue
+            # --- SMART FILL (Time Alignment) ---
+            entry_time_utc = datetime.fromtimestamp(ts_ms / 1000, tz=pytz.utc)
+            fill_window = entry_time_utc + timedelta(minutes=15)
+            
+            # Find first bar after signal
+            fill_candidates = df_opt[
+                (df_opt['datetime_utc'] >= entry_time_utc) & 
+                (df_opt['datetime_utc'] <= fill_window)
+            ]
+            
+            if fill_candidates.empty: continue
+            
+            entry_row = fill_candidates.iloc[0]
+            entry_price = entry_row['open']
+            
+            # --- EXIT LOGIC (60m Fixed) ---
+            exit_target_time = entry_row['datetime_utc'] + timedelta(minutes=60)
+            exit_candidates = df_opt[df_opt['datetime_utc'] >= exit_target_time]
+            
+            if exit_candidates.empty: exit_row = df_opt.iloc[-1] # EOD Sell
+            else: exit_row = exit_candidates.iloc[0]
+            
+            exit_price = exit_row['open']
+            
+            # --- PnL CALC ---
+            cost = entry_price * 100
+            revenue = exit_price * 100
+            fees, _, _ = calculate_detailed_fees(1)
+            net_pnl = revenue - cost - fees
+            
+            daily_candidates.append({
+                'entry_time': entry_row['datetime_utc'].strftime('%H:%M:%S'),
+                'exit_time': exit_row['datetime_utc'].strftime('%H:%M:%S'),
+                'entry_timestamp': entry_row['datetime_utc'].timestamp(),
+                'type': trade_type,
+                'ticker': ticker,
+                'entry': entry_price,
+                'exit': exit_price,
+                'contracts': 1,
+                'pnl': net_pnl,
+                'return': (net_pnl / cost) * 100,
+                'balance_impact': net_pnl
+            })
 
-        # --- B. SELECT TRADES ---
+        # --- SELECTION ---
         if not daily_candidates: continue
         
-        # Sort by timestamp to find the chronological first
-        daily_candidates.sort(key=lambda x: x['entry_timestamp']) # <--- CRITICAL FIX: Sorting Logic
+        # Sort chronologically
+        daily_candidates.sort(key=lambda x: x['entry_timestamp'])
 
         selected_trades = []
-        if selection_mode == 'FIRST':
+        if selection_mode == 'FIRST': selected_trades = [daily_candidates[0]]
+        elif selection_mode == 'ALL': selected_trades = daily_candidates
+        elif selection_mode == 'BEST':
+            # Hindsight optimization
+            daily_candidates.sort(key=lambda x: x['pnl'], reverse=True)
             selected_trades = [daily_candidates[0]]
-        elif selection_mode == 'ALL':
-            selected_trades = daily_candidates
             
-        # --- C. COMMIT TRADES ---
+        # --- COMMIT ---
         for t in selected_trades:
             balance += t['balance_impact']
             trades.append({
-                'Date': date,
+                'Date': date_str,
                 'Time': t['entry_time'],
+                'Exit_Time': t['exit_time'], # Explicit for Stats
                 'Type': t['type'],
                 'Ticker': t['ticker'],
                 'Entry': f"${t['entry']:.2f}",
@@ -235,11 +185,8 @@ def run_backtest_session(initial_balance=1000.0, days=30, selection_mode='FIRST'
                 'Contracts': t['contracts'],
                 'PnL': f"${t['pnl']:.2f}",
                 'Return': f"{t['return']:.1f}%",
-                'Balance': f"${balance:.2f}"
+                'Balance': f"${balance:.2f}",
+                'PnL_Raw': t['pnl']
             })
 
     return pd.DataFrame(trades)
-
-if __name__ == "__main__":
-    df = run_backtest_session(days=5, selection_mode='FIRST')
-    print(df.to_markdown(index=False))

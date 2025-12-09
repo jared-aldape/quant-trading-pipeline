@@ -15,6 +15,9 @@ data/quant_strategy.duckdb
 /data
 quant-key.pem
 *.pem
+*.duckdb
+*.duckdb.wal
+data/quant_strategy.duckdb
 
 # --- Keep these! ---
-data/quant_strategy.duckdb
+

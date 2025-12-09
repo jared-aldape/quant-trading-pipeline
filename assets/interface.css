@@ -1,21 +1,34 @@
-/* QUANT OS v3.3 // VISUAL PROTOCOLS */
+/* ==========================================================================
+   4. VISIBILITY PROTOCOLS (Color Schema Fix)
+   ========================================================================== */
 
-/* 1. Define orbital rotation for the Scanner */
-@keyframes radar-spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+/* Fix 1: Eliminate the "Invisible Grey" (.text-muted) */
+/* Replaces dark grey with "Magitek Silver" for readability */
+.text-muted {
+    color: #cbd5e0 !important; /* Cool Silver-Blue */
+    opacity: 0.9;
 }
 
-/* 2. Apply to the Sentinel element */
-.sentinel-sweep {
-    transform-box: fill-box;
-    transform-origin: 200px 200px; /* Locks rotation to the core */
-    animation: radar-spin 4s linear infinite;
+/* Fix 2: Force Labels to be Legible */
+/* Standardizes all form labels to Theme White or Gold */
+label {
+    color: #f3f5f9 !important; /* Off-White */
+    font-weight: bold;
+    letter-spacing: 0.5px;
 }
 
-/* 3. Global Dark Mode Override (Optional Polish) */
-body {
-    background-color: #0B0C10;
-    font-family: 'Courier New', monospace;
-    color: #C5C6C7;
+/* Fix 3: Subtitles and Small Text */
+.small, small {
+    color: #a0aec0 !important; /* Lighter Steel */
+    font-family: 'Courier New', monospace; /* Tech vibe */
+}
+
+/* Fix 4: Card Headers vs Body */
+.card-header {
+    border-bottom: 1px solid #444 !important;
+}
+
+/* Optional: Make the "Value" text (H3/H4) pop more */
+h3, h4, h5 {
+    text-shadow: 0px 0px 5px rgba(0,0,0,0.8);
 }
