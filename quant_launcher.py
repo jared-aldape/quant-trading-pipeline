@@ -1,6 +1,5 @@
 import dash
-from dash import dcc, html
-from dash.dependencies import Input, Output, State
+from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 import pathlib
 import sys
@@ -10,8 +9,6 @@ import sys
 # ==============================================================================
 ROOT_DIR = pathlib.Path(__file__).parent
 sys.path.append(str(ROOT_DIR))
-
-from src.utils import config
 
 # ==============================================================================
 # 2. MODULE IMPORTS
@@ -28,71 +25,120 @@ app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.BOOTSTRAP], 
     suppress_callback_exceptions=True,
-    title="MAGITEK OS"
+    title="MAGITEK OS",
+    meta_tags=[
+        {"name": "viewport", "content": "width=device-width, initial-scale=1"}
+    ]
 )
 server = app.server
 
 # ==============================================================================
-# 4. WORLD MAP (SIDEBAR)
+# 4. NAVIGATION CONTENT (Inside the Drawer)
 # ==============================================================================
-sidebar = html.Div(
-    [
-        html.H2("MAGITEK OS", className="magitek-sidebar-header"),
-        html.Hr(style={"borderColor": "white"}),
-        
-        html.P("⚔️ BATTLE COMMAND", className="text-info small fw-bold mb-2", style={"font-family": "'VT323', monospace", "letter-spacing": "1px"}),
-        dbc.Nav(
-            [
-                dbc.NavLink("⚡ ATB SCOPE", href="/scope", active="exact", className="fw-bold text-warning"),
-                dbc.NavLink("⚔️ TRAINING GROUNDS", href="/sim", active="exact"),
-                dbc.NavLink("📜 CHRONICLES", href="/replay", active="exact"),
-            ], vertical=True, pills=True, className="mb-4"
-        ),
+nav_content = html.Div([
+    html.H2("MAGITEK OS", className="magitek-sidebar-header text-center"),
+    html.Hr(style={"borderColor": "white"}),
+    
+    html.P("⚔️ BATTLE COMMAND", className="text-info small fw-bold mb-2", style={"font-family": "'VT323', monospace", "letter-spacing": "1px"}),
+    dbc.Nav(
+        [
+            dbc.NavLink("⚡ ATB SCOPE", href="/scope", active="exact", className="fw-bold text-warning"),
+            dbc.NavLink("⚔️ TRAINING", href="/sim", active="exact"),
+            dbc.NavLink("📜 CHRONICLES", href="/replay", active="exact"),
+        ], vertical=True, pills=True, className="mb-4"
+    ),
 
-        html.P("🔮 STRATEGY", className="text-info small fw-bold mb-2", style={"font-family": "'VT323', monospace", "letter-spacing": "1px"}),
-        dbc.Nav(
-            [
-                dbc.NavLink("👁️ LIBRA SCAN", href="/chart", active="exact"),
-                dbc.NavLink("⚖️ JUDGMENT", href="/audit", active="exact"),
-                dbc.NavLink("💰 GIL LEDGER", href="/ledger", active="exact"),
-                dbc.NavLink("📊 JOB STATS", href="/stats", active="exact"),
-                dbc.NavLink("📈 LEVEL UP", href="/growth", active="exact"),
-            ], vertical=True, pills=True, className="mb-4"
-        ),
+    html.P("🔮 STRATEGY", className="text-info small fw-bold mb-2", style={"font-family": "'VT323', monospace", "letter-spacing": "1px"}),
+    dbc.Nav(
+        [
+            dbc.NavLink("👁️ LIBRA SCAN", href="/chart", active="exact"),
+            dbc.NavLink("⚖️ JUDGMENT", href="/audit", active="exact"),
+            dbc.NavLink("💰 GIL LEDGER", href="/ledger", active="exact"),
+            dbc.NavLink("📊 JOB STATS", href="/stats", active="exact"),
+            dbc.NavLink("📈 LEVEL UP", href="/growth", active="exact"),
+        ], vertical=True, pills=True, className="mb-4"
+    ),
 
-        html.P("⚙️ ENGINE ROOM", className="text-info small fw-bold mb-2", style={"font-family": "'VT323', monospace", "letter-spacing": "1px"}),
-        dbc.Nav(
-            [
-                dbc.NavLink("💎 SAVE CRYSTAL", href="/generator", active="exact", className="text-info"),
-                dbc.NavLink("🎭 MIMIC", href="/mirror", active="exact"),
-                dbc.NavLink("🩺 STATUS", href="/info", active="exact"),
-            ], vertical=True, pills=True
-        ),
-    ],
+    html.P("⚙️ ENGINE ROOM", className="text-info small fw-bold mb-2", style={"font-family": "'VT323', monospace", "letter-spacing": "1px"}),
+    dbc.Nav(
+        [
+            dbc.NavLink("💎 SAVE CRYSTAL", href="/generator", active="exact", className="text-info"),
+            dbc.NavLink("🎭 MIMIC", href="/mirror", active="exact"),
+            dbc.NavLink("🩺 STATUS", href="/info", active="exact"),
+        ], vertical=True, pills=True
+    ),
+])
+
+# ==============================================================================
+# 5. LAYOUT COMPONENTS
+# ==============================================================================
+
+# Floating Hamburger Button
+menu_button = dbc.Button(
+    "☰",
+    id="btn_open_sidebar",
+    n_clicks=0,
+    className="btn btn-dark btn-lg",
     style={
-        "position": "fixed", "top": 0, "left": 0, "bottom": 0,
-        "width": "18rem", "padding": "2rem 1rem",
-        "background-color": "#283878", 
-        "border-right": "4px solid #b5b8b9",
-        "box-shadow": "inset -2px 0 10px rgba(0,0,0,0.5)",
-        "overflow-y": "auto",
-        "z-index": 1000
-    },
+        "position": "fixed",
+        "top": "10px",
+        "left": "10px",
+        "z-index": "2000",  # Always on top
+        "border-radius": "50%",
+        "width": "50px",
+        "height": "50px",
+        "opacity": "0.8",
+        "box-shadow": "0px 0px 10px rgba(0,0,0,0.5)"
+    }
 )
 
-content = html.Div(id="page-content", style={
-    "margin-left": "20rem", 
-    "margin-right": "2rem", 
-    "padding": "2rem 1rem",
-    "background-color": "#000000",
-    "min-height": "100vh"
-})
+# The Slide-Out Drawer (Offcanvas)
+sidebar_drawer = dbc.Offcanvas(
+    nav_content,
+    id="sidebar_drawer",
+    is_open=False,
+    placement="start",  # Slides in from the left
+    style={
+        "background-color": "#283878", 
+        "color": "white",
+        "border-right": "4px solid #b5b8b9"
+    }
+)
 
-app.layout = html.Div([dcc.Location(id="url"), sidebar, content])
+# Main Content Area (Full Width)
+content = html.Div(
+    id="page-content", 
+    style={
+        "padding": "1rem", 
+        "background-color": "#000000",
+        "min-height": "100vh",
+        "padding-top": "4rem"  # Space for the floating button at the top
+    }
+)
+
+app.layout = html.Div([
+    dcc.Location(id="url"),
+    menu_button,
+    sidebar_drawer,
+    content
+])
 
 # ==============================================================================
-# 5. ROUTING LOGIC
+# 6. CALLBACKS
 # ==============================================================================
+
+# Toggle Sidebar Logic
+@app.callback(
+    Output("sidebar_drawer", "is_open"),
+    Input("btn_open_sidebar", "n_clicks"),
+    [State("sidebar_drawer", "is_open")],
+)
+def toggle_sidebar(n, is_open):
+    if n:
+        return not is_open
+    return is_open
+
+# Page Routing Logic
 @app.callback(Output("page-content", "children"), [Input("url", "pathname")])
 def render_page_content(pathname):
     if pathname == "/" or pathname == "/scope": return view_live_scope.render()
@@ -116,4 +162,4 @@ def render_page_content(pathname):
 
 if __name__ == "__main__":
     print("🚀 MAGITEK ENGINE START...")
-    app.run(debug=True, port=8050)
+    app.run(host='0.0.0.0', debug=True, port=8050)
