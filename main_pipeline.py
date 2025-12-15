@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from datetime import datetime, timedelta # Added timedelta
+from datetime import datetime, timedelta
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
@@ -17,6 +17,9 @@ import src.core.engine_scanner as engine_scanner
 import src.core.engine_backtest as engine_backtest 
 import src.data.ingest_indices as ingest_indices      
 import src.data.ingest_options_daily as ingest_options 
+# NEW: Import ML Brains
+import src.core.engine_ml_precision as engine_ml_precision
+import src.core.engine_ml as engine_ml
 
 log = get_logger("DailyPipeline")
 
@@ -25,44 +28,48 @@ def run_pipeline():
     log.info("🚀 QUANT-OS PIPELINE INITIATED")
     
     # ---------------------------------------------------------
-    # STEP 1: INGESTION
+    # STEP 1: INGESTION (The Feed)
     # ---------------------------------------------------------
     try:
-        log.info("--- [1/5] Checking Market Data Freshness ---")
+        log.info("--- [1/6] Checking Market Data Freshness ---")
         if hasattr(ingest_indices, 'run_ingest'):
             ingest_indices.run_ingest()
         ingest_options.run_daily_harvest()
     except Exception as e:
         log.error(f"❌ Step 1 Failed (Ingestion): {e}")
-        # Continue to allow scanner to run on existing data
 
     # ---------------------------------------------------------
-    # STEP 2: MACRO FLOW
-    # ---------------------------------------------------------
-    # engine_macro.update_context()
-
-    # ---------------------------------------------------------
-    # STEP 3: SCANNER
+    # STEP 2: SCANNER (The Eyes)
     # ---------------------------------------------------------
     try:
-        log.info("--- [3/5] Scanning for Fractal Signals ---")
+        log.info("--- [2/6] Scanning for Fractal Signals ---")
         engine_scanner.scan_and_generate_manifest()
     except Exception as e:
-        log.error(f"❌ Step 3 Failed (Scanner): {e}")
+        log.error(f"❌ Step 2 Failed (Scanner): {e}")
         return
 
     # ---------------------------------------------------------
-    # STEP 4: SIMULATION (FIXED ARGUMENTS)
+    # STEP 3: NEURAL TRAINING (The Brain) -- NEW
     # ---------------------------------------------------------
     try:
-        log.info("--- [4/5] Running Historical Backtest ---")
+        log.info("--- [3/6] Retraining Precision Oracle (v3) ---")
+        engine_ml_precision.train_precision_oracle()
         
-        # Calculate Defaults
+        log.info("--- [4/6] Retraining Directional Oracle (v2) ---")
+        engine_ml.train_oracle()
+    except Exception as e:
+        log.error(f"❌ Step 3/4 Failed (ML Training): {e}")
+
+    # ---------------------------------------------------------
+    # STEP 5: SIMULATION (The Test)
+    # ---------------------------------------------------------
+    try:
+        log.info("--- [5/6] Running Historical Backtest ---")
+        
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=30)
         
         if hasattr(engine_backtest, 'run_simulation'):
-            # Pass required arguments
             engine_backtest.run_simulation(
                 start_date=start_date,
                 end_date=end_date,
@@ -70,21 +77,17 @@ def run_pipeline():
                 profile='Standard'
             )
         elif hasattr(engine_backtest, 'run_backtest'):
-            # Pass required arguments
             engine_backtest.run_backtest(
                 start_date=start_date,
                 end_date=end_date,
                 initial_balance=10000,
                 profile='Standard'
             )
-        else:
-            log.warning("⚠️ engine_backtest.py found, but no entry point detected.")
-            
     except Exception as e:
-        log.error(f"❌ Step 4 Failed (Backtest): {e}")
+        log.error(f"❌ Step 5 Failed (Backtest): {e}")
 
     # ---------------------------------------------------------
-    # STEP 5: REPORTING
+    # STEP 6: REPORTING
     # ---------------------------------------------------------
     elapsed = time.time() - start_time
     log.info(f"✅ PIPELINE COMPLETE. Duration: {elapsed/60:.1f} min")
