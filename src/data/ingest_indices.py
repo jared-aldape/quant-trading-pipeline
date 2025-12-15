@@ -1,10 +1,9 @@
 import sys
 import duckdb
+import yfinance as yf
 import pandas as pd
-import requests
-import time
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
@@ -20,135 +19,120 @@ log = get_logger("IndexIngest")
 # ==============================================================================
 # 2. CONFIGURATION
 # ==============================================================================
-POLYGON_KEY = config.POLYGON_API_KEY
-BASE_URL = "https://api.polygon.io"
-
-# ⚡ CONFIG UPDATE: REMOVED SPX.
-# We only need XSP (Tradeable) and VIX (Context, if available).
 TARGETS = {
-    'VIX': 'I:VIX',
-    'XSP': 'I:XSP' 
+    'VIX': '^VIX',
+    'XSP': '^XSP' 
 }
-# Default historical start point if DB is empty
 HISTORICAL_START_DATE = datetime(2024, 1, 1).date() 
 
 # ==============================================================================
 # 3. CORE LOGIC
 # ==============================================================================
-def get_download_range(con, ticker):
-    """
-    Determines the start date for the download.
-    Start date = MAX(datetime_utc) in DB + 1 minute.
-    If DB is empty, use HISTORICAL_START_DATE.
-    """
+def get_start_date(con, ticker):
     try:
-        # Check if table exists
         tables = con.execute("SHOW TABLES").fetchall()
         if config.TBL_INDICES not in [t[0] for t in tables]:
-            return HISTORICAL_START_DATE.strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d')
+            return HISTORICAL_START_DATE
 
-        # Get max date for specific ticker
+        # Query by clean ticker (e.g., 'XSP')
+        clean_ticker = ticker.replace('^', '')
         res = con.execute(f"""
-            SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = '{ticker}'
+            SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = '{clean_ticker}'
         """).fetchone()
         
         last_date = res[0]
-        
         if last_date:
-            # Start from next day/minute? API handles overlaps well, but let's be safe.
-            # Polygon range is inclusive.
-            start_dt = pd.to_datetime(last_date).date()
-            return start_dt.strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d')
+            return pd.to_datetime(last_date).date()
         else:
-            return HISTORICAL_START_DATE.strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d')
+            return HISTORICAL_START_DATE
             
     except Exception as e:
-        log.error(f"Date Range Error: {e}")
-        return datetime.now().strftime('%Y-%m-%d'), datetime.now().strftime('%Y-%m-%d')
+        log.error(f"Date Check Error ({ticker}): {e}")
+        return HISTORICAL_START_DATE
 
-def fetch_index_data(ticker, start_date, end_date):
-    """
-    Fetches 1-minute bars from Polygon.
-    """
-    # If fetching today, might be partial.
-    url = f"{BASE_URL}/v2/aggs/ticker/{ticker}/range/1/minute/{start_date}/{end_date}"
-    params = {
-        "adjusted": "true", 
-        "sort": "asc", 
-        "limit": 50000, 
-        "apiKey": POLYGON_KEY
-    }
+def fetch_yahoo_data(y_ticker, start_date):
+    end_date = datetime.now().date() + timedelta(days=1)
+    
+    if start_date >= datetime.now().date():
+        log.info(f"   ⏳ {y_ticker} is up to date.")
+        return pd.DataFrame()
+
+    log.info(f"   ⬇️ Fetching {y_ticker} from {start_date} to {end_date}...")
     
     try:
-        resp = requests.get(url, params=params, timeout=15)
+        df = yf.download(y_ticker, start=start_date, end=end_date, interval="1m", progress=False)
         
-        if resp.status_code == 403:
-            log.warning(f"⚠️ Permission Denied for {ticker} (403). Skipping.")
-            return pd.DataFrame()
-            
-        if resp.status_code != 200:
-            log.error(f"❌ API Error {ticker}: {resp.status_code}")
-            return pd.DataFrame()
-            
-        data = resp.json()
-        if data.get('resultsCount', 0) > 0:
-            df = pd.DataFrame(data['results'])
-            # Standardize
-            df.rename(columns={'t': 'datetime_utc', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
-            df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms')
-            
-            # Map back to internal ticker name (e.g. I:XSP -> XSP)
-            friendly_name = [k for k, v in TARGETS.items() if v == ticker][0]
-            df['ticker'] = friendly_name
-            
-            return df[['datetime_utc', 'ticker', 'open', 'high', 'low', 'close', 'volume']]
-        else:
-            log.warning(f"⚠️ No NEW data found for {ticker}")
-            return pd.DataFrame()
-            
+        if df.empty: return pd.DataFrame()
+
+        df = df.reset_index()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df.rename(columns={
+            "Datetime": "datetime_utc", "Open": "open", "High": "high",
+            "Low": "low", "Close": "close", "Volume": "volume"
+        }, inplace=True)
+        
+        df['ticker'] = y_ticker.replace('^', '')
+        
+        if pd.api.types.is_datetime64_any_dtype(df['datetime_utc']):
+            if df['datetime_utc'].dt.tz is not None:
+                df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC').dt.tz_localize(None)
+
+        # CRITICAL FIX: Match the exact schema order of the existing table
+        # Structure: [datetime_utc, open, high, low, close, volume, ticker]
+        return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
+
     except Exception as e:
-        log.error(f"Fetch Error {ticker}: {e}")
+        log.error(f"   ❌ Yahoo Fetch Error {y_ticker}: {e}")
         return pd.DataFrame()
 
 def run_ingest():
-    """Main Entry Point called by Pipeline."""
-    log.info("📊 STARTING INDEX HARVEST (XSP/VIX)")
+    log.info("📊 STARTING INDEX HARVEST (Source: Yahoo Finance)")
     
     if not config.DB_FILE.exists():
         log.error("❌ No Database found.")
-    
+        return 
+
     con = duckdb.connect(str(config.DB_FILE))
     
+    # 1. Create table with correct schema (if it doesn't exist)
     con.execute(f"""
         CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (
             datetime_utc TIMESTAMP,
-            ticker VARCHAR,
             open DOUBLE,
             high DOUBLE,
             low DOUBLE,
             close DOUBLE,
             volume DOUBLE,
+            ticker VARCHAR,
             PRIMARY KEY (datetime_utc, ticker)
         )
     """)
     
-    total_rows = 0
+    total_new_rows = 0
     
-    for friendly_name, poly_ticker in TARGETS.items():
-        start_str, end_str = get_download_range(con, friendly_name)
-        log.info(f"DB check: Starting {friendly_name} harvest from latest data: {start_str}")
-        log.info(f"⬇️ Fetching {friendly_name} from {start_str} to {end_str}...")
-        
-        df = fetch_index_data(poly_ticker, start_str, end_str)
+    for friendly, y_ticker in TARGETS.items():
+        start_dt = get_start_date(con, y_ticker)
+        df = fetch_yahoo_data(y_ticker, start_dt)
         
         if not df.empty:
             count = len(df)
-            total_rows += count
+            total_new_rows += count
             con.register('temp_idx', df)
-            con.execute(f"INSERT OR IGNORE INTO {config.TBL_INDICES} SELECT * FROM temp_idx")
+            
+            # CRITICAL FIX: Explicit Column Mapping
+            con.execute(f"""
+                INSERT OR IGNORE INTO {config.TBL_INDICES} 
+                (datetime_utc, open, high, low, close, volume, ticker)
+                SELECT datetime_utc, open, high, low, close, volume, ticker 
+                FROM temp_idx
+            """)
+            con.unregister('temp_idx')
+            log.info(f"   ✅ {friendly}: Saved {count} new candles.")
             
     con.close()
-    log.info(f"🏁 Index Harvest Complete. Total Rows: {total_rows}")
+    log.info(f"🏁 Index Harvest Complete. Total New Rows: {total_new_rows}")
 
 if __name__ == "__main__":
     run_ingest()

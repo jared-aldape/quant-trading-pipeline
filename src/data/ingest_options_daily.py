@@ -3,6 +3,7 @@ import duckdb
 import pandas as pd
 import requests
 import time
+import math  # REQUIRED for Surgical Logic (floor/ceil)
 from datetime import datetime, timedelta, date
 from pathlib import Path
 
@@ -31,13 +32,18 @@ API_KEY = config.POLYGON_API_KEY
 # 2. HELPER FUNCTIONS
 # ==============================================================================
 def fetch_context_price(target_date):
-    """Fetches SPY price to determine ATM strike range."""
+    """Fetches SPY price range to define the Daily Battlefield."""
     d_str = target_date.strftime('%Y-%m-%d')
     url = f"{BASE_URL}/v2/aggs/ticker/{CONTEXT_TICKER}/range/1/day/{d_str}/{d_str}"
     params = {"adjusted": "true", "apiKey": API_KEY}
     
     try:
         resp = requests.get(url, params=params, timeout=10)
+        
+        if resp.status_code == 403:
+            log.warning(f"⚠️ Polygon 403 (Locked) for {d_str}. Skipping.")
+            return None, None
+            
         if resp.status_code != 200:
             log.error(f"❌ Context Data Failed ({CONTEXT_TICKER}): {resp.status_code}")
             return None, None
@@ -45,10 +51,10 @@ def fetch_context_price(target_date):
         data = resp.json()
         if data.get('resultsCount', 0) > 0:
             res = data['results'][0]
-            # Scale if necessary (1.0 for SPY->XSP)
+            # Return the Day's High and Low
             return res.get('h') * SCALE_FACTOR, res.get('l') * SCALE_FACTOR
         else:
-            log.error(f"❌ No {CONTEXT_TICKER} data found for {d_str}")
+            log.warning(f"⚠️ No {CONTEXT_TICKER} data found for {d_str}")
             return None, None
             
     except Exception as e:
@@ -56,17 +62,25 @@ def fetch_context_price(target_date):
         return None, None
 
 def generate_target_tickers(target_date, high, low):
-    """Generates O:XSP option tickers."""
-    center = (high + low) / 2
-    strike_min = int(center * 0.975)
-    strike_max = int(center * 1.025)
+    """
+    GEN 2 SURGICAL LOGIC (Restored M27 Standard):
+    Range = [Floor(Low) - 2] to [Ceil(High) + 2]
+    
+    This captures the entire trading range of the day, plus a 
+    2-strike safety buffer on both ends.
+    """
+    strike_min = math.floor(low) - 2
+    strike_max = math.ceil(high) + 2
+    
     fmt_date = target_date.strftime('%y%m%d')
     
     tickers = []
+    # Iterate through every integer strike in the surgical range
     for k in range(strike_min, strike_max + 1):
         strike_fmt = f"{k * 1000:08d}"
         tickers.append(f"O:{TARGET_ROOT}{fmt_date}C{strike_fmt}")
         tickers.append(f"O:{TARGET_ROOT}{fmt_date}P{strike_fmt}")
+        
     return tickers
 
 def fetch_option_bars(ticker, target_date):
@@ -83,12 +97,14 @@ def fetch_option_bars(ticker, target_date):
                 df = pd.DataFrame(data['results'])
                 
                 # Standardize Columns
-                # Polygon often returns: v, vw, o, c, h, l, t, n
                 df.rename(columns={'t': 'datetime_utc', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
+                
+                # Convert Milliseconds to Timestamp (UTC)
                 df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms')
+                
+                # Clean Ticker
                 df['ticker'] = ticker.replace("O:", "") 
                 
-                # We return ALL cols here, but we will filter in the INSERT step to be safe
                 return df
     except:
         pass
@@ -99,7 +115,7 @@ def fetch_option_bars(ticker, target_date):
 # 3. MAIN HARVEST LOOP
 # ==============================================================================
 def run_daily_harvest():
-    log.info("🚜 STARTING DAILY OPTION HARVEST (SPY-GUIDED)")
+    log.info("🚜 STARTING DAILY OPTION HARVEST (Surgical Logic | T-1)")
     
     if not config.DB_FILE.exists():
         log.error("❌ DB not found.")
@@ -107,7 +123,6 @@ def run_daily_harvest():
 
     con = duckdb.connect(str(config.DB_FILE))
     
-    # Ensure Table Exists
     con.execute(f"""
         CREATE TABLE IF NOT EXISTS {config.TBL_OPTIONS} (
             datetime_utc TIMESTAMP,
@@ -122,24 +137,25 @@ def run_daily_harvest():
     """)
     
     today = date.today()
-    lookback = 3 # Look back to ensure we cover recent missing days
+    lookback = 3 
     
     total_saved = 0
     
-    for i in range(lookback):
+    # Range starts at 1 (Yesterday) to respect Free Tier
+    for i in range(1, lookback + 1):
         target_date = today - timedelta(days=i)
+        
         if target_date.weekday() > 4: continue
         
         log.info(f"📅 Target Session: {target_date}")
         
-        # A. Get Context
+        # A. Get Range
         h, l = fetch_context_price(target_date)
-        if h is None: continue
+        if h is None: continue 
             
-        # B. Generate Tickers
+        # B. Generate Surgical List
         tickers = generate_target_tickers(target_date, h, l)
-        center_price = (h+l)/2
-        log.info(f"   Generated {len(tickers)} potential contracts centered on ${center_price:.2f}")
+        log.info(f"   🎯 Surgical Target: {len(tickers)} contracts (Range: {math.floor(l)-2} - {math.ceil(h)+2})")
         
         # C. Fetch Data
         day_dfs = []
@@ -148,27 +164,21 @@ def run_daily_harvest():
             if not df.empty:
                 day_dfs.append(df)
                 
-        # D. SAVE TO DB (EXPLICIT INSERT FIX)
+        # D. Save
         if day_dfs:
             full_df = pd.concat(day_dfs)
             count = len(full_df)
-            
-            # Register the raw dataframe (which might have 17 columns)
             con.register('temp_opts', full_df)
-            
-            # EXPLICITLY SELECT ONLY THE 7 COLUMNS WE WANT
-            # This fixes the "7 columns available but 17 specified" crash
             con.execute(f"""
                 INSERT OR IGNORE INTO {config.TBL_OPTIONS} 
                 (datetime_utc, ticker, open, high, low, close, volume)
                 SELECT datetime_utc, ticker, open, high, low, close, volume 
                 FROM temp_opts
             """)
-            
-            log.info(f"   ✅ Saved {count} rows for {target_date}")
+            log.info(f"   ✅ Saved {count} rows.")
             total_saved += count
         else:
-            log.info(f"   ⚠️ No option volume found for {target_date}")
+            log.info(f"   ⚠️ No option volume found.")
 
     con.close()
     log.info(f"🏁 Option Harvest Complete. Total Rows: {total_saved}")
