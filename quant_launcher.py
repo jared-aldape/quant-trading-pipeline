@@ -127,21 +127,36 @@ app.layout = html.Div([
 # 6. CALLBACKS
 # ==============================================================================
 
-# Toggle Sidebar Logic
+# Toggle Sidebar Logic (Handles Button Click AND Navigation)
 @app.callback(
     Output("sidebar_drawer", "is_open"),
-    Input("btn_open_sidebar", "n_clicks"),
+    [Input("btn_open_sidebar", "n_clicks"),
+     Input("url", "pathname")],  # Added URL as input
     [State("sidebar_drawer", "is_open")],
 )
-def toggle_sidebar(n, is_open):
-    if n:
+def manage_sidebar(n_clicks, pathname, is_open):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return is_open
+    
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    # If button clicked, toggle
+    if trigger_id == 'btn_open_sidebar':
         return not is_open
+    
+    # If URL changed (navigation), force close
+    if trigger_id == 'url':
+        return False
+        
     return is_open
 
 # Page Routing Logic
 @app.callback(Output("page-content", "children"), [Input("url", "pathname")])
 def render_page_content(pathname):
-    if pathname == "/" or pathname == "/scope": return view_live_scope.render()
+    # CHANGED: Default "/" now points to Status Info
+    if pathname == "/" or pathname == "/info": return view_system_info.render()
+    elif pathname == "/scope": return view_live_scope.render()
     elif pathname == "/sim": return view_options_sim.render()
     elif pathname == "/replay": return view_replay_analysis.render()
     elif pathname == "/chart": return view_chart_analysis.render()
@@ -151,7 +166,6 @@ def render_page_content(pathname):
     elif pathname == "/growth": return view_capital_growth.render()
     elif pathname == "/generator": return view_data_generator.render()
     elif pathname == "/mirror": return view_rh_mirror.render()
-    elif pathname == "/info": return view_system_info.render()
     
     return html.Div(
         dbc.Container([
