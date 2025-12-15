@@ -2,11 +2,16 @@ import sys
 import duckdb
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
+import time
+import json
+import os
+import requests
+import numpy as np
+from datetime import datetime, time as t_time, timedelta
 from pathlib import Path
 
 # ==============================================================================
-# 1. PATH CONSTITUTION
+# 1. SETUP
 # ==============================================================================
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
@@ -15,124 +20,150 @@ from src.utils import config
 from src.utils.logger import get_logger
 
 log = get_logger("IndexIngest")
+SNAPSHOT_FILE = ROOT_DIR / "data" / "live_snapshot.json"
+LOCK_FILE = ROOT_DIR / ".ingest_cooldown"
+COOLDOWN_SECONDS = 30 
+
+# ⚡ SESSION FIX: Spoof Browser
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+})
+
+# ⚡ ENCODER FIX: Handle Dates & NumPy
+class RobustEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, (datetime, pd.Timestamp)): return obj.isoformat()
+        if pd.isna(obj): return None
+        return super(RobustEncoder, self).default(obj)
 
 # ==============================================================================
-# 2. CONFIGURATION
+# 2. LOGIC
 # ==============================================================================
-TARGETS = {
-    'VIX': '^VIX',
-    'XSP': '^XSP' 
-}
-HISTORICAL_START_DATE = datetime(2024, 1, 1).date() 
+def check_cooldown():
+    now = time.time()
+    if LOCK_FILE.exists():
+        try:
+            last_run = float(LOCK_FILE.read_text().strip())
+            if now - last_run < COOLDOWN_SECONDS:
+                remaining = int(COOLDOWN_SECONDS - (now - last_run))
+                log.warning(f"⏳ Cooldown Active: Skipping API call (wait {remaining}s)")
+                return False
+        except: pass 
+    try: LOCK_FILE.write_text(str(now))
+    except: pass 
+    return True
 
-# ==============================================================================
-# 3. CORE LOGIC
-# ==============================================================================
-def get_start_date(con, ticker):
-    try:
-        tables = con.execute("SHOW TABLES").fetchall()
-        if config.TBL_INDICES not in [t[0] for t in tables]:
-            return HISTORICAL_START_DATE
-
-        # Query by clean ticker (e.g., 'XSP')
-        clean_ticker = ticker.replace('^', '')
-        res = con.execute(f"""
-            SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = '{clean_ticker}'
-        """).fetchone()
-        
-        last_date = res[0]
-        if last_date:
-            return pd.to_datetime(last_date).date()
-        else:
-            return HISTORICAL_START_DATE
-            
-    except Exception as e:
-        log.error(f"Date Check Error ({ticker}): {e}")
-        return HISTORICAL_START_DATE
-
-def fetch_yahoo_data(y_ticker, start_date):
+def fetch_yahoo_data(y_ticker):
+    """Fetches data and enforces Strict Timezone Laws."""
+    start_date = datetime.now().date() - timedelta(days=2) 
     end_date = datetime.now().date() + timedelta(days=1)
-    
-    if start_date >= datetime.now().date():
-        log.info(f"   ⏳ {y_ticker} is up to date.")
-        return pd.DataFrame()
-
-    log.info(f"   ⬇️ Fetching {y_ticker} from {start_date} to {end_date}...")
-    
     try:
-        df = yf.download(y_ticker, start=start_date, end=end_date, interval="1m", progress=False)
+        time.sleep(1.0) 
+        ticker_dat = yf.Ticker(y_ticker, session=session)
+        df = ticker_dat.history(start=start_date, end=end_date, interval="1m")
         
         if df.empty: return pd.DataFrame()
-
-        df = df.reset_index()
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        df.rename(columns={
-            "Datetime": "datetime_utc", "Open": "open", "High": "high",
-            "Low": "low", "Close": "close", "Volume": "volume"
-        }, inplace=True)
         
+        df = df.reset_index()
+        df.columns = [c.lower() for c in df.columns]
+        df.rename(columns={"datetime": "datetime_utc"}, inplace=True)
         df['ticker'] = y_ticker.replace('^', '')
         
+        # ⚡ CRITICAL TIMEZONE FIX ⚡
         if pd.api.types.is_datetime64_any_dtype(df['datetime_utc']):
-            if df['datetime_utc'].dt.tz is not None:
-                df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC').dt.tz_localize(None)
-
-        # CRITICAL FIX: Match the exact schema order of the existing table
-        # Structure: [datetime_utc, open, high, low, close, volume, ticker]
+            # 1. If Naive (No TZ), assume America/New_York (Exchange Time)
+            if df['datetime_utc'].dt.tz is None:
+                df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York')
+            
+            # 2. Convert to UTC
+            df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC').dt.tz_localize(None)
+        
         return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
-
     except Exception as e:
-        log.error(f"   ❌ Yahoo Fetch Error {y_ticker}: {e}")
+        log.error(f"❌ API Error {y_ticker}: {e}")
         return pd.DataFrame()
 
-def run_ingest():
-    log.info("📊 STARTING INDEX HARVEST (Source: Yahoo Finance)")
+def calculate_orb(df):
+    if df.empty: return None, None
+    # Calculate ORB using NY Time
+    df = df.copy()
+    # Assume UTC input -> Convert to NY
+    df['dt_ny'] = df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
     
-    if not config.DB_FILE.exists():
-        log.error("❌ No Database found.")
-        return 
+    start = t_time(9, 30)
+    end = t_time(10, 0)
+    orb_df = df[(df['dt_ny'].dt.time >= start) & (df['dt_ny'].dt.time < end)]
+    
+    if len(orb_df) > 5:
+        return orb_df['high'].max(), orb_df['low'].min()
+    return None, None
 
-    con = duckdb.connect(str(config.DB_FILE))
-    
-    # 1. Create table with correct schema (if it doesn't exist)
-    con.execute(f"""
-        CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (
-            datetime_utc TIMESTAMP,
-            open DOUBLE,
-            high DOUBLE,
-            low DOUBLE,
-            close DOUBLE,
-            volume DOUBLE,
-            ticker VARCHAR,
-            PRIMARY KEY (datetime_utc, ticker)
-        )
-    """)
-    
-    total_new_rows = 0
-    
-    for friendly, y_ticker in TARGETS.items():
-        start_dt = get_start_date(con, y_ticker)
-        df = fetch_yahoo_data(y_ticker, start_dt)
+def generate_snapshot_from_db(con):
+    try:
+        max_ts = con.execute(f"SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = 'XSP'").fetchone()[0]
+        if not max_ts: return
         
-        if not df.empty:
-            count = len(df)
-            total_new_rows += count
-            con.register('temp_idx', df)
+        target_date = pd.to_datetime(max_ts).date()
+        s_str = f"{target_date} 00:00:00"
+        
+        xsp_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker = 'XSP' AND datetime_utc >= '{s_str}' ORDER BY datetime_utc ASC").df()
+        vix_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker = 'VIX' AND datetime_utc >= '{s_str}' ORDER BY datetime_utc ASC").df()
+        
+        orb_h, orb_l = calculate_orb(xsp_df)
+        
+        snapshot = {
+            "updated": datetime.now().isoformat(),
+            "xsp": xsp_df.to_dict(orient='records'),
+            "vix": vix_df.to_dict(orient='records'),
+            "orb": {"h": orb_h, "l": orb_l}
+        }
+        
+        temp_file = SNAPSHOT_FILE.with_suffix('.tmp')
+        with open(temp_file, 'w') as f:
+            json.dump(snapshot, f, cls=RobustEncoder)
             
-            # CRITICAL FIX: Explicit Column Mapping
-            con.execute(f"""
-                INSERT OR IGNORE INTO {config.TBL_INDICES} 
-                (datetime_utc, open, high, low, close, volume, ticker)
-                SELECT datetime_utc, open, high, low, close, volume, ticker 
-                FROM temp_idx
-            """)
-            con.unregister('temp_idx')
-            log.info(f"   ✅ {friendly}: Saved {count} new candles.")
+        if Path(temp_file).exists():
+            os.replace(temp_file, SNAPSHOT_FILE)
             
-    con.close()
-    log.info(f"🏁 Index Harvest Complete. Total New Rows: {total_new_rows}")
+        log.info(f"📸 Snapshot Updated. (Rows: {len(xsp_df)})")
+
+    except Exception as e:
+        log.error(f"Snapshot Failed: {e}")
+
+def run_ingest():
+    # 1. Fetch Phase
+    if check_cooldown():
+        log.info("📊 FETCHING NEW DATA...")
+        staged = []
+        for friendly, y_ticker in {'VIX': '^VIX', 'XSP': '^XSP'}.items():
+            df = fetch_yahoo_data(y_ticker)
+            if not df.empty: staged.append((friendly, df))
+        
+        if staged and config.DB_FILE.exists():
+            try:
+                con = duckdb.connect(str(config.DB_FILE), config={'access_mode': 'READ_WRITE'})
+                con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (datetime_utc TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, ticker VARCHAR, PRIMARY KEY (datetime_utc, ticker))")
+                for friendly, df in staged:
+                    con.register('temp_idx', df)
+                    con.execute(f"INSERT OR IGNORE INTO {config.TBL_INDICES} SELECT * FROM temp_idx")
+                    con.unregister('temp_idx')
+                    log.info(f"   ✅ {friendly}: Saved {len(df)} candles.")
+                con.close()
+            except Exception as e:
+                log.error(f"DB Write Error: {e}")
+
+    # 2. Snapshot Phase (Always Run)
+    if config.DB_FILE.exists():
+        try:
+            con = duckdb.connect(str(config.DB_FILE), read_only=True)
+            generate_snapshot_from_db(con)
+            con.close()
+        except Exception as e:
+            log.error(f"DB Read Error: {e}")
 
 if __name__ == "__main__":
     run_ingest()
