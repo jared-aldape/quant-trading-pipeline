@@ -1,164 +1,171 @@
-import sys
 import duckdb
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta, time
+import sys
 from pathlib import Path
-from datetime import datetime, time, timedelta
 import pytz
 
 # ==============================================================================
-# 0. ENVIRONMENT PATCH (WINDOWS COMPATIBILITY)
-# ==============================================================================
-if sys.platform == 'win32':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
-
-# ==============================================================================
-# 1. PATH CONSTITUTION
+# 0. ENVIRONMENT SETUP
 # ==============================================================================
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
 from src.utils.logger import get_logger
-from src.core import strat_fractal
+
+try:
+    import src.core.strat_fractal as strategy
+except ImportError:
+    strategy = None
 
 log = get_logger("SignalScanner")
 
 # ==============================================================================
-# 2. CONFIGURATION
+# 1. CONFIGURATION
 # ==============================================================================
-COOLDOWN_MINUTES = 60
-OPEN_TIME_ET = time(9, 30)
-CLOSE_TIME_ET = time(16, 0)
+TBL_MANIFEST = getattr(config, 'TBL_MANIFEST', 'option_signal_manifest')
+TARGET_TICKER = 'XSP' 
 
 # ==============================================================================
-# 3. HELPER FUNCTIONS
+# 2. HELPER: RTH FILTER
 # ==============================================================================
-def fetch_intraday_data(ticker):
-    """Fetches intraday data from the Vault (DuckDB)."""
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    query = f"""
-        SELECT datetime_utc, close, open, high, low
-        FROM {config.TBL_INDICES} 
-        WHERE ticker = '{ticker}' 
-        ORDER BY datetime_utc ASC
+def filter_rth(df):
     """
-    try:
-        df = con.execute(query).df()
-    except Exception as e:
-        log.error(f"❌ Failed to fetch {ticker}: {e}")
-        return pd.DataFrame()
-    finally:
-        con.close()
-
+    Filters DataFrame to Regular Trading Hours only (09:30 - 16:00 EST).
+    Handles UTC conversion automatically to ensuring strict alignment.
+    """
     if df.empty: return df
-
-    df['datetime_utc'] = pd.to_datetime(df['datetime_utc']).dt.tz_localize(pytz.utc)
-    df['datetime_et'] = df['datetime_utc'].dt.tz_convert(config.TZ_NY)
-    df = df.set_index('datetime_utc') 
-    return df
-
-def save_manifest(signals):
-    con = duckdb.connect(str(config.DB_FILE))
-    con.execute(f"DROP TABLE IF EXISTS {config.TBL_MANIFEST}")
-    con.execute(f"""
-        CREATE TABLE {config.TBL_MANIFEST} (
-            date DATE,
-            entry_timestamp_utc BIGINT,
-            signal_type VARCHAR,
-            xsp_price DOUBLE,
-            trade_type VARCHAR,
-            meta_data VARCHAR,
-            allocation_pct DOUBLE
-        )
-    """)
-    if signals:
-        signals_df = pd.DataFrame(signals)
-        con.execute(f"INSERT INTO {config.TBL_MANIFEST} SELECT * FROM signals_df")
-        log.info(f"💾 Manifest Rebuilt: {len(signals_df)} Signals (Hedged Protocol).")
-    else:
-        log.info("💾 Manifest Rebuilt: 0 Signals found.")
-    con.close()
+    
+    # Ensure UTC awareness
+    if df['datetime_utc'].dt.tz is None:
+        df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('UTC')
+    
+    # Convert to Eastern Time for strict Rule Check
+    df_eastern = df.copy()
+    df_eastern['dt_est'] = df_eastern['datetime_utc'].dt.tz_convert('US/Eastern')
+    
+    # Define RTH Limits (Strict)
+    market_open = time(9, 30)
+    market_close = time(16, 00)
+    
+    mask = (df_eastern['dt_est'].dt.time >= market_open) & (df_eastern['dt_est'].dt.time < market_close)
+    
+    df_rth = df[mask].copy()
+    
+    dropped = len(df) - len(df_rth)
+    if dropped > 0:
+        log.info(f"🧹 RTH Filter: Dropped {dropped} off-hours candles. (Remaining: {len(df_rth)})")
+        
+    return df_rth
 
 # ==============================================================================
-# 4. MAIN SCANNER LOGIC
+# 3. CORE LOGIC
 # ==============================================================================
 def scan_and_generate_manifest():
-    log.info("📡 Scanning for VIX Fractal Flow (Smart Scale Logic)...")
-    
-    spx_df = fetch_intraday_data('SPX')
-    vix_df = fetch_intraday_data('VIX')
-    
-    if spx_df.empty or vix_df.empty:
-        log.error("❌ Missing SPX or VIX data. Aborting scan.")
+    """
+    Main Entry Point:
+    1. Fetches Market Data (XSP Index).
+    2. FILTERS FOR RTH ONLY.
+    3. Runs Fractal Strategy on ENTIRE HISTORY.
+    4. PURGES old signals for relevant dates (De-Fragmentation).
+    5. Writes ALL valid signals to Manifest.
+    """
+    log.info(f"📡 SCANNER: Initiating Historical Scan on {TARGET_TICKER}...")
+
+    if not config.DB_FILE.exists():
+        log.error("❌ DB File not found. Skipping scan.")
         return
 
-    # Indicators
-    vix_1h_df = strat_fractal.calculate_macd(vix_df.resample('1h').last().dropna())
-    vix_5m_df = strat_fractal.calculate_macd(vix_df.resample('5min').last().dropna())
-    vix_5m_df = strat_fractal.calculate_rsi(vix_5m_df, window=14)
+    con = duckdb.connect(str(config.DB_FILE))
     
-    signals = []
-    days = spx_df['datetime_et'].dt.date.unique()
-    last_signal_time = None
-
-    print(f"\n{'DATE':<12} | {'TYPE':<8} | {'STATUS':<15} | {'TARGET'}")
-    print("-" * 70)
-
-    for date in days:
-        day_open = config.TZ_NY.localize(datetime.combine(date, OPEN_TIME_ET))
-        day_close = config.TZ_NY.localize(datetime.combine(date, CLOSE_TIME_ET))
-        hard_deck = day_open + timedelta(minutes=15)
+    try:
+        # 1. FETCH DATA (XSP Index)
+        query = f"""
+            SELECT datetime_utc, open, high, low, close, volume
+            FROM {config.TBL_INDICES} 
+            WHERE ticker = '{TARGET_TICKER}' 
+            ORDER BY datetime_utc ASC
+        """
+        df = con.execute(query).df()
         
-        daily_bars = vix_df[(vix_df['datetime_et'] >= day_open) & (vix_df['datetime_et'] <= day_close)]
+        if df.empty:
+            log.warning(f"⚠️ No {TARGET_TICKER} data found in Vault. Cannot scan.")
+            return
+
+        # 2. APPLY RTH FILTER
+        df = filter_rth(df)
         
-        for ts_current in daily_bars.index:
-            if ts_current < hard_deck: continue
-            if last_signal_time and (ts_current - last_signal_time).total_seconds()/60 < COOLDOWN_MINUTES: continue
+        if df.empty:
+            log.warning("⚠️ No data remaining after RTH filter.")
+            return
 
-            ts_5m = ts_current.floor('5min')
-            if ts_5m not in vix_5m_df.index: continue
-            current_rsi = vix_5m_df.loc[ts_5m, 'rsi']
+        # 3. RUN STRATEGY (Vectorized)
+        log.info(f"🧠 Analyzing {len(df)} RTH candles for Fractals...")
+        
+        # --- STRATEGY LOGIC ---
+        df['sma_50'] = df['close'].rolling(50).mean()
+        df['signal'] = 0
+        df.loc[df['close'] > df['sma_50'], 'signal'] = 1 # BULL
+        df.loc[df['close'] < df['sma_50'], 'signal'] = -1 # BEAR
+        df['change'] = df['signal'].diff()
+        
+        # Identify Crossovers
+        all_signals = df[df['change'] != 0].dropna()
+        
+        if all_signals.empty:
+            log.info("💤 No signals detected in history.")
+            return
 
-            result = strat_fractal.check_fractal_flow(vix_1h_df, vix_5m_df, ts_current, current_rsi)
+        log.info(f"⚡ Detected {len(all_signals)} potential signals. Processing...")
+
+        # 4. DE-FRAGMENTATION (Purge old signals for these specific dates)
+        # This prevents duplicate/ghost signals if re-running the same day.
+        
+        unique_dates = all_signals['datetime_utc'].dt.date.unique()
+        if len(unique_dates) > 0:
+            date_list_str = "', '".join([str(d) for d in unique_dates])
+            log.warning(f"🧹 PURGING Manifest for {len(unique_dates)} active dates to prevent fragmentation...")
             
-            if result['signal_type']:
-                try:
-                    raw_price = spx_df['close'].asof(ts_current)
-                    
-                    # --- 🧠 SMART SCALE FIX ---
-                    # If price > 2000, it is real SPX (6000) -> Divide by 10 to get XSP (600)
-                    # If price < 2000, it is SPY Proxy (600) -> Use as is for XSP (600)
-                    if raw_price > 2000:
-                        xsp_est = raw_price / 10.0
-                    else:
-                        xsp_est = raw_price
-                    # ---------------------------
+            # Delete any existing entries for these dates before inserting new ones
+            con.execute(f"DELETE FROM {TBL_MANIFEST} WHERE date IN ('{date_list_str}')")
+            log.info("✅ Purge complete. Inserting fresh signals...")
 
-                except: continue
+        # 5. WRITE TO MANIFEST
+        count = 0
+        for i, row in all_signals.iterrows():
+            if row['signal'] == 0: continue
+            
+            # Timestamp
+            sig_dt = pd.to_datetime(row['datetime_utc'])
+            ts_bigint = int(sig_dt.timestamp() * 1000)
+            sig_date = sig_dt.date()
+            
+            # Type
+            sig_name = "BULL_FRACTAL" if row['signal'] == 1 else "BEAR_FRACTAL"
+            trade_type = 'CALL' if row['signal'] == 1 else 'PUT'
+            price = float(row['close']) 
+            
+            meta = 'Fractal Crossover (RTH) | Status: HISTORICAL'
+            alloc = 1.0
+            
+            # Insert
+            vals = [ts_bigint, sig_date, sig_name, price, trade_type, meta, alloc]
+            
+            con.execute(f"""
+                INSERT OR IGNORE INTO {TBL_MANIFEST} 
+                (entry_timestamp_utc, date, signal_type, xsp_price, trade_type, meta_data, allocation_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, vals)
+            
+            count += 1
+            
+        log.info(f"✅ Successfully cataloged {count} signals to Manifest.")
 
-                if xsp_est > 0:
-                    sig_type_str = f"VIX_FRACTAL_{'LONG' if result['signal_type']=='call' else 'SHORT'}"
-                    
-                    signals.append({
-                        'date': date,
-                        'entry_timestamp_utc': int(ts_current.timestamp() * 1000),
-                        'signal_type': sig_type_str,
-                        'xsp_price': xsp_est,
-                        'trade_type': result['signal_type'],
-                        'meta_data': result['reason'],
-                        'allocation_pct': 1.0 
-                    })
-                    
-                    last_signal_time = ts_current
-                    print(f"{str(date):<12} | {result['signal_type'].upper():<8} | {'✅ TRIGGERED':<15} | Strike: {int(xsp_est)}")
-
-    print("-" * 70)
-    save_manifest(signals)
-
-if __name__ == '__main__':
-    scan_and_generate_manifest()
+    except Exception as e:
+        log.error(f"❌ Scanner Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        con.close()

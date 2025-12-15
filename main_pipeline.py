@@ -1,110 +1,93 @@
 import sys
 import time
 from pathlib import Path
+from datetime import datetime, timedelta # Added timedelta
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
 # ==============================================================================
-# File: main_pipeline.py
-# Location: Project Root (QUANT-OS/)
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(ROOT_DIR))
 
+from src.utils import config
 from src.utils.logger import get_logger
 
-# v3.2 MODULE IMPORTS
-# Since we are at root, we import directly from 'src'
-import src.data.ingest_indices as ingest_indices
-import src.core.engine_macro_flow as engine_macro_flow 
+# IMPORT ENGINES
 import src.core.engine_scanner as engine_scanner
-import src.data.ingest_options as ingest_options
-import src.core.engine_greeks as engine_greeks
-import src.core.engine_optimizer as engine_optimizer # <--- NEW MODULE: ADAPTIVE WARFARE
+import src.core.engine_backtest as engine_backtest 
+import src.data.ingest_indices as ingest_indices      
+import src.data.ingest_options_daily as ingest_options 
 
 log = get_logger("DailyPipeline")
 
-def run_daily_update():
+def run_pipeline():
     start_time = time.time()
-    log.info("🌅 STARTING QUANT OS v3.2 PIPELINE")
+    log.info("🚀 QUANT-OS PIPELINE INITIATED")
     
     # ---------------------------------------------------------
-    # STEP 1: INGEST MARKET INDICES (The Truth)
+    # STEP 1: INGESTION
     # ---------------------------------------------------------
-    # Fetches SPX, VIX, IRX from Polygon (or Yahoo Fallback)
     try:
-        log.info("--- [1/6] Ingesting Indices (Hybrid) ---")
-        ingest_indices.run_pipeline()
+        log.info("--- [1/5] Checking Market Data Freshness ---")
+        if hasattr(ingest_indices, 'run_ingest'):
+            ingest_indices.run_ingest()
+        ingest_options.run_daily_harvest()
     except Exception as e:
-        log.error(f"❌ Step 1 Failed: {e}")
-        return
+        log.error(f"❌ Step 1 Failed (Ingestion): {e}")
+        # Continue to allow scanner to run on existing data
 
     # ---------------------------------------------------------
-    # STEP 2: CALCULATE MACRO FLOW BIAS (The Bias Filter)
+    # STEP 2: MACRO FLOW
     # ---------------------------------------------------------
-    # Calculates the 20-day rolling Bull/Bear bias to dynamically set allocation
+    # engine_macro.update_context()
+
+    # ---------------------------------------------------------
+    # STEP 3: SCANNER
+    # ---------------------------------------------------------
     try:
-        log.info("--- [2/6] Calculating Macro Flow Bias ---") 
-        engine_macro_flow.run_pipeline()
-    except Exception as e:
-        log.error(f"❌ Step 2 Failed: {e}")
-        
-    # ---------------------------------------------------------
-    # STEP 3: SCAN FOR FRACTAL SIGNALS (The Strategy)
-    # ---------------------------------------------------------
-    # Rebuilds trade_manifest based on strat_fractal.py logic
-    try:
-        log.info("--- [3/6] Scanning Signals (Fractal Flow) ---")
+        log.info("--- [3/5] Scanning for Fractal Signals ---")
         engine_scanner.scan_and_generate_manifest()
     except Exception as e:
-        log.error(f"❌ Step 3 Failed: {e}")
+        log.error(f"❌ Step 3 Failed (Scanner): {e}")
         return
 
     # ---------------------------------------------------------
-    # STEP 4: FETCH OPTION DATA (The Vehicle)
+    # STEP 4: SIMULATION (FIXED ARGUMENTS)
     # ---------------------------------------------------------
-    # Downloads 1-minute aggregates for identified signal dates
     try:
-        log.info("--- [4/6] Fetching Option Contracts ---")
-        ingest_options.run_fetch_pipeline()
+        log.info("--- [4/5] Running Historical Backtest ---")
+        
+        # Calculate Defaults
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=30)
+        
+        if hasattr(engine_backtest, 'run_simulation'):
+            # Pass required arguments
+            engine_backtest.run_simulation(
+                start_date=start_date,
+                end_date=end_date,
+                initial_balance=10000,
+                profile='Standard'
+            )
+        elif hasattr(engine_backtest, 'run_backtest'):
+            # Pass required arguments
+            engine_backtest.run_backtest(
+                start_date=start_date,
+                end_date=end_date,
+                initial_balance=10000,
+                profile='Standard'
+            )
+        else:
+            log.warning("⚠️ engine_backtest.py found, but no entry point detected.")
+            
     except Exception as e:
-        log.error(f"❌ Step 4 Failed: {e}")
-        return
+        log.error(f"❌ Step 4 Failed (Backtest): {e}")
 
     # ---------------------------------------------------------
-    # STEP 5: CALCULATE GREEKS (The Math)
+    # STEP 5: REPORTING
     # ---------------------------------------------------------
-    # Calculates IV, Delta, Gamma for the Analysis Dashboard
-    try:
-        log.info("--- [5/6] Calculating Greeks ---")
-        engine_greeks.run_greek_calculation()
-    except Exception as e:
-        log.error(f"❌ Step 5 Failed: {e}")
-        return
-
-    # ---------------------------------------------------------
-    # STEP 6: RUN EVOLUTIONARY OPTIMIZER (Adaptive Warfare)
-    # ---------------------------------------------------------
-    # Checks VIX Regime -> Updates strat_params.json
-    try:
-        log.info("--- [6/6] Running Strategy Evolution ---")
-        engine_optimizer.run_optimization_cycle()
-    except Exception as e:
-        log.error(f"❌ Step 6 Failed: {e}")
-
     elapsed = time.time() - start_time
-    log.info(f"✅ PIPELINE COMPLETE. Runtime: {elapsed:.2f} seconds.")
+    log.info(f"✅ PIPELINE COMPLETE. Duration: {elapsed/60:.1f} min")
 
 if __name__ == "__main__":
-    run_daily_update()
-    # ... inside run_daily_update() ...
-
-    # ---------------------------------------------------------
-    # STEP 7: BLACK BOX RECORDING (The Safety Net)
-    # ---------------------------------------------------------
-    try:
-        log.info("--- [7/7] Running Black Box Recorder ---")
-        # Dynamic import to handle the ops folder being a sibling
-        import ops.backup_vault as backup_vault
-        backup_vault.run_backup_procedure()
-    except Exception as e:
-        log.error(f"❌ Step 7 Failed: {e}")
+    run_pipeline()

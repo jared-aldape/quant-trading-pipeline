@@ -3,105 +3,87 @@ import duckdb
 import pandas as pd
 import numpy as np
 import json
-import itertools
 from pathlib import Path
-from datetime import datetime, timedelta
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
 # ==============================================================================
-ROOT_DIR = Path(__file__).resolve().parents[2]
+CURRENT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = CURRENT_DIR.parent.parent
 sys.path.append(str(ROOT_DIR))
 
-from src.utils import config
-from src.utils.logger import get_logger
-from src.core import strat_fractal
+try:
+    from src.utils import config
+    from src.utils.logger import get_logger
+except ImportError:
+    print("❌ CRITICAL: Could not import 'src.utils'.")
+    sys.exit(1)
 
 log = get_logger("Optimizer")
-PARAMS_FILE = config.DATA_DIR / "strat_params.json"
 
 # ==============================================================================
-# 2. OPTIMIZATION LOGIC
+# 2. ADAPTIVE LOGIC (The Brain)
 # ==============================================================================
-def run_optimization_cycle(lookback_days=30):
+def run_optimization_cycle():
     """
-    Analyzes VIX Regime to adapt Strategy Parameters.
+    Analyzes the Trade Manifest and recommends parameter adjustments.
+    DOES NOT DELETE DATA.
     """
-    log.info(f"🧬 Starting Evolutionary Optimization (Lookback: {lookback_days}d)...")
-    
-    if not config.DB_FILE.exists(): return
-    
-    # 1. Fetch VIX Data
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+    log.info("⚔️ STARTING ADAPTIVE WARFARE CYCLE (Evolutionary Optimizer)")
     
     try:
-        vix = con.execute(f"""
-            SELECT datetime_utc, close 
-            FROM {config.TBL_INDICES} 
-            WHERE ticker='VIX' 
-            AND datetime_utc >= '{start_date}' 
-            ORDER BY datetime_utc ASC
-        """).df()
-    except Exception as e:
-        log.error(f"Data Fetch Error: {e}")
-        return
-    finally:
+        con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        
+        # 1. SAFETY CHECK: Ensure Manifest Exists
+        table_check = con.execute(f"SELECT count(*) FROM information_schema.tables WHERE table_name = '{config.TBL_MANIFEST}'").fetchone()[0]
+        if table_check == 0:
+            log.warning(f"⚠️ Manifest table '{config.TBL_MANIFEST}' not found. Skipping optimization.")
+            con.close()
+            return
+
+        # 2. FETCH RECENT PERFORMANCE
+        # We look at the last 20 trades to determine current "Regime"
+        query = f"""
+            SELECT trade_type, date, entry_timestamp_utc
+            FROM {config.TBL_MANIFEST}
+            ORDER BY entry_timestamp_utc DESC
+            LIMIT 20
+        """
+        recent_trades = con.execute(query).df()
+        
+        # 3. ANALYZE REGIME
+        if recent_trades.empty:
+            log.info("ℹ️ No recent trades to analyze. Keeping default parameters.")
+            con.close()
+            return
+
+        total_count = len(recent_trades)
+        call_count = len(recent_trades[recent_trades['trade_type'].str.lower() == 'call'])
+        put_count = len(recent_trades[recent_trades['trade_type'].str.lower() == 'put'])
+        
+        # Calculate Bias Strength
+        # If > 70% of signals are ONE side, we are in a strong trend.
+        bias_strength = max(call_count, put_count) / total_count if total_count > 0 else 0
+        
+        log.info(f"📊 OPTIMIZER REPORT (Last {total_count} trades):")
+        log.info(f"   Calls: {call_count} | Puts: {put_count}")
+        log.info(f"   Trend Bias: {bias_strength:.1%} ")
+
+        # 4. EVOLUTIONARY LOGIC (Recommend Updates)
+        # This is where we would update strat_params.json
+        if bias_strength > 0.75:
+            log.info("🚀 REGIME DETECTED: Momentum Trend. Recommending 'AGGRESSIVE' Mode.")
+            # Code to update JSON config would go here
+        elif bias_strength < 0.55:
+            log.info("⚖️ REGIME DETECTED: Choppy/Neutral. Recommending 'DEFENSIVE' Mode.")
+        else:
+            log.info("✅ REGIME DETECTED: Balanced. Maintaining Standard Protocols.")
+
         con.close()
-    
-    if vix.empty: 
-        log.warning("⚠️ No VIX data found for optimization.")
-        return
-
-    # 2. Analyze VIX Regime
-    current_vix = vix['close'].iloc[-1]
-    avg_vix = vix['close'].mean()
-    
-    log.info(f"📊 Market Regime Analysis: Current VIX: {current_vix:.2f} | 30d Avg: {avg_vix:.2f}")
-
-    # 3. Define Adaptive Parameters
-    # Baseline Defaults
-    new_params = {
-        "macro_bearish_threshold": -0.05,
-        "macro_bullish_threshold": 0.05,
-        "rsi_call_limit": 70,
-        "rsi_put_limit": 30
-    }
-    
-    regime = "NORMAL"
-
-    # --- HEURISTIC ADAPTATION LOGIC ---
-    if current_vix > 22:
-        # FEAR REGIME (High Volatility)
-        # Market moves fast. Calls are risky (catching knives). Puts are expensive but pay off.
-        regime = "HIGH_VOL (FEAR)"
-        new_params['rsi_call_limit'] = 60   # Stricter: Only buy calls if DEEPLY oversold
-        new_params['rsi_put_limit'] = 40    # Looser: Momentum Puts work well here
-        new_params['macro_bearish_threshold'] = -0.08 # Require stronger trend for Calls
+        log.info("✅ Optimization Cycle Complete.")
         
-    elif current_vix < 12:
-        # COMPLACENCY REGIME (Low Volatility)
-        # Grind up. Puts are dangerous (Theta burn). Calls are safer.
-        regime = "LOW_VOL (GRIND)"
-        new_params['rsi_call_limit'] = 75   # Looser: Buy calls even if slightly overbought (momentum)
-        new_params['rsi_put_limit'] = 20    # Stricter: Only buy puts if extreme spike
-        new_params['macro_bullish_threshold'] = 0.08 # Require massive spike for Puts
-        
-    else:
-        # NORMAL REGIME
-        regime = "NORMAL"
-        # Keep defaults
-
-    log.info(f"🌊 Regime Detected: {regime}")
-    log.info(f"🧬 Adapting DNA: {new_params}")
-
-    # 4. Commit to Gene Pool
-    try:
-        with open(PARAMS_FILE, 'w') as f:
-            json.dump(new_params, f, indent=4)
-        log.info("✅ Strategy Parameters Updated.")
     except Exception as e:
-        log.error(f"❌ Failed to save params: {e}")
+        log.error(f"❌ OPTIMIZER FAILURE: {e}")
 
 if __name__ == "__main__":
     run_optimization_cycle()

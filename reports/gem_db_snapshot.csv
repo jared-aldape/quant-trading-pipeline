@@ -1,0 +1,101 @@
+Table_Name,Column_Name,Data_Type,Sample_Value_Row1,Is_Nullable
+active_rh_log,source_id,VARCHAR,1765483971-1,NO
+active_rh_log,entry_time_utc,TIMESTAMP,2025-12-11 15:06:00,YES
+active_rh_log,action,VARCHAR,SELL,YES
+active_rh_log,root,VARCHAR,XSP,YES
+active_rh_log,strike,DOUBLE,686.0,YES
+active_rh_log,option_right,VARCHAR,C,YES
+active_rh_log,expiry_date,DATE,2025-12-11 00:00:00,YES
+active_rh_log,quantity,DOUBLE,2.0,YES
+active_rh_log,fill_price,DOUBLE,0.89,YES
+active_rh_log,net_pnl,DOUBLE,178.0,YES
+active_rh_log,fees,DOUBLE,0.04,YES
+active_rh_log,status,VARCHAR,FILLED,YES
+active_rh_log,opra_code,VARCHAR,O:XSP251211C00686000,YES
+active_simulation_log,entry_time,TIMESTAMP,2025-12-09 11:56:00,YES
+active_simulation_log,ticker,VARCHAR,Type,YES
+active_simulation_log,net_pnl,DOUBLE,174.0,YES
+active_simulation_log,return_pct,DOUBLE,0.0,YES
+active_simulation_log,reason,VARCHAR,HTML_IMPORT_FILLED,YES
+active_simulation_log,entry_price,DOUBLE,0.87,YES
+active_simulation_log,exit_price,DOUBLE,0.0,YES
+active_simulation_log,action,VARCHAR,SELL,YES
+active_simulation_log,quantity,DOUBLE,2.0,YES
+active_simulation_log,source_id,VARCHAR,HTML_0_292479926279427323,YES
+active_simulation_log,status,VARCHAR,FILLED,YES
+active_simulation_log_backup,entry_time,TIMESTAMP,2025-12-11 15:06:00,YES
+active_simulation_log_backup,source_id,VARCHAR,1765483971-1,YES
+active_simulation_log_backup,ticker,VARCHAR,Sell XSP 686 Call 12/11,YES
+active_simulation_log_backup,action,VARCHAR,SELL,YES
+active_simulation_log_backup,quantity,DOUBLE,2.0,YES
+active_simulation_log_backup,price,DOUBLE,0.89,YES
+active_simulation_log_backup,net_cashflow,DOUBLE,178.0,YES
+active_simulation_log_backup,status,VARCHAR,Filled,YES
+active_simulation_log_backup,reason,VARCHAR,USER_IMPORT_SCRAPE,YES
+futures_1m,datetime_utc,TIMESTAMP,2025-09-30 07:00:00,NO
+futures_1m,ticker,VARCHAR,ES,NO
+futures_1m,open,DOUBLE,6705.75,YES
+futures_1m,high,DOUBLE,6707.25,YES
+futures_1m,low,DOUBLE,6704.75,YES
+futures_1m,close,DOUBLE,6705.0,YES
+futures_1m,volume,DOUBLE,1354.0,YES
+indices_1m,datetime_utc,TIMESTAMP,2023-01-19 16:30:00,NO
+indices_1m,open,DOUBLE,3890.580078125,YES
+indices_1m,high,DOUBLE,3902.8798828125,YES
+indices_1m,low,DOUBLE,3885.5400390625,YES
+indices_1m,close,DOUBLE,3896.22998046875,YES
+indices_1m,volume,DOUBLE,245179812.0,YES
+indices_1m,ticker,VARCHAR,SPX,NO
+live_trade_ledger,trans_id,VARCHAR,e792ec21-7ffd-45dc-abf4-be914e9f9331,NO
+live_trade_ledger,timestamp,TIMESTAMP,2025-12-10 04:58:49,YES
+live_trade_ledger,ticker,VARCHAR,XSP 687 CALL,YES
+live_trade_ledger,action,VARCHAR,SELL,YES
+live_trade_ledger,qty,DOUBLE,1.0,YES
+live_trade_ledger,price,DOUBLE,1.6582202719646193,YES
+live_trade_ledger,fees,DOUBLE,0.39,YES
+live_trade_ledger,amount,DOUBLE,165.43202719646195,YES
+live_trade_ledger,balance_snapshot,DOUBLE,1630.9154827697748,YES
+live_trade_ledger,strategy_tag,VARCHAR,MANUAL,YES
+live_trade_ledger,notes,VARCHAR,,YES
+macro_events,date,DATE,2024-10-21 00:00:00,NO
+macro_events,event_type,VARCHAR,EARNINGS_TSLA_ANTICIPATION,YES
+macro_events,impact_score,INTEGER,3,YES
+macro_flow_state,date,DATE,2025-01-17 00:00:00,NO
+macro_flow_state,flow_bias,VARCHAR,BEAR,YES
+macro_flow_state,bull_pct,DOUBLE,45.0,YES
+macro_flow_state,bear_pct,DOUBLE,55.0,YES
+options_1m,datetime_utc,TIMESTAMP,2025-12-02 14:40:00,NO
+options_1m,ticker,VARCHAR,O:XSP251202P00679000,NO
+options_1m,expiration,DATE,2025-12-02 00:00:00,YES
+options_1m,strike,DOUBLE,679.0,YES
+options_1m,type,VARCHAR,P,YES
+options_1m,open,DOUBLE,0.23,YES
+options_1m,high,DOUBLE,0.26,YES
+options_1m,low,DOUBLE,0.23,YES
+options_1m,close,DOUBLE,0.26,YES
+options_1m,volume,DOUBLE,9.0,YES
+options_1m,iv,DOUBLE,NULL,YES
+options_1m,delta,DOUBLE,-0.015446638267730961,YES
+options_1m,gamma,DOUBLE,0.02305791743610871,YES
+options_1m,vega,DOUBLE,0.003270715151486594,YES
+options_1m,theta,DOUBLE,-0.5876670213037893,YES
+options_1m,underlying_price,DOUBLE,NULL,YES
+options_1m,risk_free_rate,DOUBLE,NULL,YES
+risk_free_rate_daily,date,DATE,2025-12-04 00:00:00,NO
+risk_free_rate_daily,ticker,VARCHAR,NULL,YES
+risk_free_rate_daily,rate,DOUBLE,3.611999988555908,YES
+signal_history_log,timestamp_utc,TIMESTAMP,2025-10-13 12:05:00,NO
+signal_history_log,ticker,VARCHAR,XSP,NO
+signal_history_log,signal_type,VARCHAR,VIX_FRACTAL_SHORT,YES
+signal_history_log,vix_value,DOUBLE,20.5,YES
+signal_history_log,rsi_value,DOUBLE,77.15349900995405,YES
+signal_history_log,market_regime,VARCHAR,TRENDING,YES
+signal_history_log,flow_bias,VARCHAR,NEUTRAL,YES
+signal_history_log,meta_data,VARCHAR,"VIX_COOLING (1H:-0.12, 5m:-0.01)",YES
+trade_manifest,entry_timestamp_utc,BIGINT,1760546100000,NO
+trade_manifest,date,DATE,2025-10-15 00:00:00,YES
+trade_manifest,signal_type,VARCHAR,BULL_FRACTAL,YES
+trade_manifest,xsp_price,DOUBLE,666.539990234375,YES
+trade_manifest,trade_type,VARCHAR,call,YES
+trade_manifest,meta_data,VARCHAR,"VIX_COOLING (1H:-0.03, 5m:-0.00)",YES
+trade_manifest,allocation_pct,DOUBLE,1.0,YES

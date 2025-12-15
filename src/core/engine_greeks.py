@@ -6,6 +6,7 @@ from scipy.stats import norm
 from pathlib import Path
 from datetime import datetime
 import warnings
+import re # Added for regex parsing
 
 # Suppress divide by zero warnings in BS model
 warnings.filterwarnings("ignore")
@@ -40,143 +41,154 @@ def calculate_greeks_vectorized(df):
     sigma = df['iv'].values
     
     # Pre-calculate d1 and d2
-    # Avoid divide by zero for 0DTE (T < 0.0001)
-    T = np.maximum(T, 0.00001) 
+    # Prevent division by zero if T is 0 (expiration)
+    T = np.maximum(T, 1e-9)
+    sigma = np.maximum(sigma, 1e-9)
     
-    sqrt_T = np.sqrt(T)
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
-    d2 = d1 - sigma * sqrt_T
-
-    # Standard Normal PDF/CDF
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    
     pdf_d1 = norm.pdf(d1)
     cdf_d1 = norm.cdf(d1)
     cdf_d2 = norm.cdf(d2)
-    cdf_neg_d1 = norm.cdf(-d1)
-    cdf_neg_d2 = norm.cdf(-d2)
-
-    # CALLS
-    call_mask = (df['type'] == 'C')
     
-    # PUTS
-    put_mask = (df['type'] == 'P')
-
-    # --- DELTA ---
+    # Initialize Arrays
     delta = np.zeros(len(df))
-    delta[call_mask] = cdf_d1[call_mask]
-    delta[put_mask] = cdf_d1[put_mask] - 1.0
-    
-    # --- GAMMA (Same for Call/Put) ---
-    gamma = pdf_d1 / (S * sigma * sqrt_T)
-    
-    # --- VEGA (Same for Call/Put) ---
-    # Vega is usually expressed per 1% change in vol, so / 100
-    vega = (S * pdf_d1 * sqrt_T) / 100.0
-    
-    # --- THETA ---
+    gamma = np.zeros(len(df))
+    vega  = np.zeros(len(df))
     theta = np.zeros(len(df))
-    term1 = -(S * pdf_d1 * sigma) / (2 * sqrt_T)
     
-    # Call Theta
-    theta[call_mask] = term1[call_mask] - (r[call_mask] * K[call_mask] * np.exp(-r[call_mask] * T[call_mask]) * cdf_d2[call_mask])
-    # Put Theta
-    theta[put_mask] = term1[put_mask] + (r[put_mask] * K[put_mask] * np.exp(-r[put_mask] * T[put_mask]) * cdf_neg_d2[put_mask])
-    
-    # Annualized to Daily
-    theta = theta / 365.0
+    # --- CALLS ---
+    call_mask = (df['type'] == 'C').values
+    if np.any(call_mask):
+        delta[call_mask] = cdf_d1[call_mask]
+        theta[call_mask] = (- (S[call_mask] * pdf_d1[call_mask] * sigma[call_mask]) / (2 * np.sqrt(T[call_mask])) 
+                            - r[call_mask] * K[call_mask] * np.exp(-r[call_mask] * T[call_mask]) * norm.cdf(d2[call_mask]))
 
+    # --- PUTS ---
+    put_mask = (df['type'] == 'P').values
+    if np.any(put_mask):
+        delta[put_mask] = cdf_d1[put_mask] - 1
+        theta[put_mask] = (- (S[put_mask] * pdf_d1[put_mask] * sigma[put_mask]) / (2 * np.sqrt(T[put_mask])) 
+                           + r[put_mask] * K[put_mask] * np.exp(-r[put_mask] * T[put_mask]) * norm.cdf(-d2[put_mask]))
+
+    # --- SHARED ---
+    gamma = pdf_d1 / (S * sigma * np.sqrt(T))
+    vega = S * pdf_d1 * np.sqrt(T) / 100  # Divide by 100 for standard % change interpretation
+    
     # Assign back
     df['delta'] = delta
     df['gamma'] = gamma
     df['vega'] = vega
-    df['theta'] = theta
+    df['theta'] = theta / 365 # Annualized theta to daily decay estimate
     
     return df
 
 # ==============================================================================
-# 3. AGGREGATION ENGINE (Gamma Gravity)
+# 3. WORKFLOW LOGIC
 # ==============================================================================
-def calculate_net_gamma_exposure(con):
+def calculate_and_fill_greeks():
     """
-    Calculates Volume-Weighted Gamma (VWG) to identify Sticky Levels.
-    Returns a DataFrame of [strike, net_gamma_pressure]
+    Scans the Option Vault for rows with missing Greeks and backfills them.
+    This is the entry point for the Daily Harvest pipeline.
     """
-    try:
-        # We use Volume as a proxy for Hedging Activity (Flow)
-        query = f"""
-        SELECT 
-            strike,
-            SUM(CASE WHEN type='C' THEN gamma * volume ELSE 0 END) as call_gamma_flow,
-            SUM(CASE WHEN type='P' THEN gamma * volume * -1 ELSE 0 END) as put_gamma_flow,
-            (SUM(CASE WHEN type='C' THEN gamma * volume ELSE 0 END) + 
-             SUM(CASE WHEN type='P' THEN gamma * volume * -1 ELSE 0 END)) as net_gamma_flow
-        FROM {config.TBL_OPTIONS}
-        WHERE datetime_utc >= (SELECT MAX(datetime_utc) - INTERVAL 1 DAY FROM {config.TBL_OPTIONS})
-        GROUP BY strike
-        ORDER BY strike ASC
-        """
-        df = con.execute(query).df()
-        return df
-    except Exception as e:
-        log.error(f"GEX Calc Failed: {e}")
-        return pd.DataFrame()
+    if not config.DB_FILE.exists():
+        log.error("❌ Database not found.")
+        return
 
-# ==============================================================================
-# 4. EXECUTION PIPELINE
-# ==============================================================================
-def run_greek_calculation():
-    log.info("🧮 Starting Greek Calculation Cycle...")
+    con = duckdb.connect(str(config.DB_FILE))
     
-    try:
-        con = duckdb.connect(str(config.DB_FILE))
-        
-        # 1. Fetch Option Data needing Greeks
-        # CRITICAL FIX: ASOF JOIN requires an Inequality (>=) to define "closest previous match"
-        query = f"""
+    # 1. Find rows needing calculation (Limit batch size for safety)
+    # Fetching 'close' as proxy for underlying price if we don't have spot index joined yet
+    # Ideally, we should join with indices_1m, but for approximation, we assume
+    # we need to fetch the underlying price separately or pass it.
+    # CRITICAL: We need Underlying Price (SPX) to calc Greeks.
+    
+    # Let's fetch pending options + join with SPX index on timestamp
+    q_fetch = f"""
         SELECT 
-            o.datetime_utc, o.ticker, o.expiration, o.strike, o.type, o.close as opt_price, o.iv,
-            i.close as underlying_price,
-            r.rate as risk_free_rate
+            o.datetime_utc, 
+            o.ticker, 
+            o.close as opt_price,
+            i.close as underlying_price
         FROM {config.TBL_OPTIONS} o
-        ASOF JOIN {config.TBL_INDICES} i 
-            ON i.ticker = 'SPX' AND o.datetime_utc >= i.datetime_utc
-        LEFT JOIN {config.TBL_IRX} r 
-            ON CAST(o.datetime_utc AS DATE) = r.date
-        WHERE o.delta IS NULL OR o.delta = 0
-        """
-        
-        df = con.execute(query).df()
-        
+        LEFT JOIN {config.TBL_INDICES} i 
+            ON o.datetime_utc = i.datetime_utc AND i.ticker = 'SPX'
+        WHERE o.delta IS NULL
+        -- AND i.close IS NOT NULL -- Only calc where we have SPX data
+        ORDER BY o.datetime_utc DESC
+        LIMIT 50000 
+    """
+    try:
+        df = con.execute(q_fetch).df()
+    except Exception as e:
+        log.warning(f"Greek Fetch Error (Table might not exist yet): {e}")
+        con.close()
+        return
+    
+    if df.empty:
+        log.info("✅ No pending Greek calculations found.")
+        con.close()
+        return
+
+    # Check for missing underlying data
+    missing_spx = df[df['underlying_price'].isna()]
+    if not missing_spx.empty:
+        log.warning(f"⚠️ {len(missing_spx)} option rows missing matching SPX index data. Greeks skipped for these.")
+        df = df.dropna(subset=['underlying_price'])
         if df.empty:
-            log.info("✅ No pending contracts for Greek calculation.")
             con.close()
             return
 
-        log.info(f"⚡ Calculating Greeks for {len(df)} records...")
+    log.info(f"🧮 Calculating Greeks for {len(df)} new rows...")
+    
+    # 2. Enrich Data (Parse Ticker for Strike/Exp)
+    # Ticker format expected: SPX231215C04500000
+    # We need to extract Date, Type, Strike
+    
+    def parse_meta(ticker):
+        # Regex for standard Polygon/OPRA format
+        # Matches: [Root][YYMMDD][C/P][Strike * 1000]
+        match = re.search(r'([A-Z]+)(\d{6})([CP])(\d{8})', ticker)
+        if match:
+            # root = match.group(1) # Unused here
+            date_str = match.group(2)
+            type_char = match.group(3)
+            strike_str = match.group(4)
+            
+            # Expiration
+            exp_date = pd.to_datetime(date_str, format='%y%m%d')
+            # Strike (divide by 1000)
+            strike = float(strike_str) / 1000.0
+            
+            return exp_date, type_char, strike
+        return None, None, None
 
-        # 2. Pre-Process
-        # Convert timezone-aware datetimes to UTC-naive if necessary for math
-        now_utc = pd.Timestamp.utcnow()
-        df['expiration'] = pd.to_datetime(df['expiration']).dt.tz_localize('UTC') if df['expiration'].dtype == 'O' else df['expiration']
-        
-        # Calculate T (Time to Expiry in Years)
-        # We use a small epsilon for 0DTE to avoid division by zero
-        seconds_to_exp = (df['expiration'] + pd.Timedelta(hours=16) - df['datetime_utc']).dt.total_seconds()
-        df['time_to_expiry'] = seconds_to_exp / (365 * 24 * 3600)
-        
-        # Fill Missing Risk Free Rate (Default 4.5%)
-        df['risk_free_rate'] = df['risk_free_rate'].fillna(4.5) / 100.0
-        
-        # Fill Missing IV (Default 20%)
-        df['iv'] = df['iv'].fillna(0.2)
-
-        # 3. Vectorized Calculation
-        df = calculate_greeks_vectorized(df)
-
-        # 4. Batch Update (Using Temp Table for Speed)
-        log.info("💾 Saving Greeks to Vault...")
-        con.execute("CREATE TEMP TABLE greek_updates AS SELECT datetime_utc, ticker, delta, gamma, vega, theta FROM df")
-        
-        update_query = f"""
+    # Apply Parsing
+    meta_data = df['ticker'].apply(parse_meta)
+    df['expiration'] = [x[0] for x in meta_data]
+    df['type'] = [x[1] for x in meta_data]
+    df['strike'] = [x[2] for x in meta_data]
+    
+    # Filter out parse failures
+    df = df.dropna(subset=['expiration'])
+    
+    # Calculate Time to Expiry (Annualized)
+    # Add 16 hours (4pm close) to exp date for accuracy? Standard is 4pm EST.
+    df['time_to_expiry'] = (df['expiration'] + pd.Timedelta(hours=16) - df['datetime_utc']).dt.total_seconds() / (365 * 24 * 3600)
+    
+    # Defaults
+    df['risk_free_rate'] = 0.045 # 4.5% static for now, or fetch from DB
+    df['iv'] = 0.20 # 20% fallback if not calculating IV implies
+    
+    # 3. Calculate
+    df_calc = calculate_greeks_vectorized(df)
+    
+    # 4. Update DB
+    # We use a temporary table to bulk update
+    con.register('greek_updates', df_calc[['datetime_utc', 'ticker', 'delta', 'gamma', 'vega', 'theta']])
+    
+    update_q = f"""
         UPDATE {config.TBL_OPTIONS}
         SET 
             delta = greek_updates.delta,
@@ -186,16 +198,7 @@ def run_greek_calculation():
         FROM greek_updates
         WHERE {config.TBL_OPTIONS}.datetime_utc = greek_updates.datetime_utc 
           AND {config.TBL_OPTIONS}.ticker = greek_updates.ticker
-        """
-        con.execute(update_query)
-        con.execute("DROP TABLE greek_updates")
-        
-        log.info(f"✅ Updated {len(df)} records.")
-        
-        con.close()
-
-    except Exception as e:
-        log.error(f"Greek Engine Failed: {e}")
-
-if __name__ == "__main__":
-    run_greek_calculation()
+    """
+    con.execute(update_q)
+    log.info(f"✅ Greeks committed to Vault.")
+    con.close()

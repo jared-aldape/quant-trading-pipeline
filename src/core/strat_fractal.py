@@ -1,92 +1,151 @@
 import pandas as pd
 import numpy as np
-import json
+import sys
 from pathlib import Path
-from src.utils import config
+
+# Path Constitution
+ROOT_DIR = Path(__file__).resolve().parents[2]
+sys.path.append(str(ROOT_DIR))
+
 from src.utils.logger import get_logger
 
 log = get_logger("FractalStrat")
-PARAMS_FILE = config.DATA_DIR / "strat_params.json"
 
-def load_params():
-    """Loads the latest evolutionary parameters."""
-    default = {
-        "macro_bearish_threshold": -0.05,
-        "macro_bullish_threshold": 0.05,
-        "rsi_call_limit": 70,
-        "rsi_put_limit": 30
-    }
-    if not PARAMS_FILE.exists(): return default
-    try:
-        with open(PARAMS_FILE, 'r') as f: return json.load(f)
-    except: return default
-
-def calculate_macd(df, close_col='close'):
-    if df is None or df.empty: return df
+def calculate_macd(df, close_col='close', fast=12, slow=26, signal=9):
+    """
+    Calculates Standard MACD (12, 26, 9).
+    """
     df = df.copy()
-    df['ema12'] = df[close_col].ewm(span=12, adjust=False).mean()
-    df['ema26'] = df[close_col].ewm(span=26, adjust=False).mean()
-    df['macd'] = df['ema12'] - df['ema26']
-    df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    
+    # 1. Fast & Slow EMAs
+    ema_fast = df[close_col].ewm(span=fast, adjust=False).mean()
+    ema_slow = df[close_col].ewm(span=slow, adjust=False).mean()
+    
+    # 2. MACD Line & Signal Line
+    df['macd'] = ema_fast - ema_slow
+    df['signal'] = df['macd'].ewm(span=signal, adjust=False).mean()
+    
+    # 3. Histogram (The Momentum)
     df['hist'] = df['macd'] - df['signal']
+    
     return df
 
-def calculate_rsi(df, window=14):
-    if df is None or df.empty: return df
+def calculate_rsi(df, close_col='close', window=14):
+    """
+    Calculates RSI (Relative Strength Index) using Wilder's Smoothing.
+    """
     df = df.copy()
-    delta = df['close'].diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=window-1, adjust=False).mean()
-    ema_down = down.ewm(com=window-1, adjust=False).mean()
-    rs = ema_up / ema_down
+    delta = df[close_col].diff()
+    
+    # Separate gains and losses
+    gain = (delta.where(delta > 0, 0))
+    loss = (-delta.where(delta < 0, 0))
+    
+    # Wilder's Smoothing (Exponential Moving Average)
+    avg_gain = gain.ewm(com=window - 1, min_periods=window).mean()
+    avg_loss = loss.ewm(com=window - 1, min_periods=window).mean()
+    
+    rs = avg_gain / avg_loss
     df['rsi'] = 100 - (100 / (1 + rs))
+    
+    # Fill NaN initialization gaps with 50 (neutral) to prevent crashes
+    df['rsi'] = df['rsi'].fillna(50.0)
+    
     return df
 
-def check_fractal_flow(vix_1h_df, vix_5m_df, timestamp, rsi_val):
+def check_fractal_flow(vix_1h_df, vix_5m_df, ts_current, rsi_val):
     """
-    Checks for signals using Dynamic Evolutionary Parameters.
+    Determines Strategy Signal based on VIX Fractal alignment.
+    
+    THEORY:
+    - VIX DOWN -> SPX UP (BULL/CALLS)
+    - VIX UP   -> SPX DOWN (BEAR/PUTS)
     """
-    # LOAD DNA
-    params = load_params()
     
-    ts_1h = timestamp.floor('1h')
-    ts_5m = timestamp.floor('5min')
+    # --- TIMEZONE NORMALIZATION FIX ---
+    # Ensure ts_current matches the timezone of vix_1h_df.index
+    target_tz = vix_1h_df.index.tz
     
-    if ts_1h not in vix_1h_df.index or ts_5m not in vix_5m_df.index:
-        return {'signal_type': None, 'reason': 'Data Gap'}
-
-    current_macro = vix_1h_df.loc[ts_1h]
-    curr_micro = vix_5m_df.loc[ts_5m]
+    if ts_current.tzinfo is not None and target_tz is None:
+        # If current is Aware but index is Naive -> Make current Naive
+        ts_current = ts_current.tz_localize(None)
+    elif ts_current.tzinfo is None and target_tz is not None:
+        # If current is Naive but index is Aware -> Make current Aware (UTC assumed)
+        ts_current = ts_current.tz_localize('UTC')
     
-    prev_ts_5m = ts_5m - pd.Timedelta(minutes=5)
-    if prev_ts_5m not in vix_5m_df.index:
-         return {'signal_type': None, 'reason': 'Initializing Micro'}
-    prev_micro = vix_5m_df.loc[prev_ts_5m]
-
-    # USE DYNAMIC THRESHOLDS
-    macro_bearish_vix = current_macro['hist'] < params['macro_bearish_threshold']
-    macro_bullish_vix = current_macro['hist'] > params['macro_bullish_threshold']
+    # 1. Align 1H Data (Macro View)
+    # We find the 1H candle that contains the current 5m timestamp
+    ts_1h_floor = ts_current.floor('1h')
     
-    cross_below = (prev_micro['macd'] >= prev_micro['signal']) and (curr_micro['macd'] < curr_micro['signal'])
-    cross_above = (prev_micro['macd'] <= prev_micro['signal']) and (curr_micro['macd'] > curr_micro['signal'])
+    if ts_1h_floor not in vix_1h_df.index:
+        # Fallback: take the last known 1H candle if exact match missing
+        # searchsorted requires compatible timezones (which we fixed above)
+        idx = vix_1h_df.index.searchsorted(ts_current)
+        
+        # Adjust index if it points beyond the end
+        if idx >= len(vix_1h_df):
+            idx = len(vix_1h_df) - 1
+            
+        if idx > 0:
+            row_1h = vix_1h_df.iloc[idx - 1]
+        else:
+            return {'signal_type': None, 'reason': 'No Macro Data'}
+    else:
+        row_1h = vix_1h_df.loc[ts_1h_floor]
 
-    rsi_safe_for_call = rsi_val < params['rsi_call_limit']
-    rsi_safe_for_put = rsi_val > params['rsi_put_limit']
+    # 2. Extract Metrics
+    vix_1h_hist = row_1h['hist']  # Macro Momentum
+    
+    # Get current 5m row
+    try:
+        # We need to look up using the same timezone logic
+        # If ts_current was modified above, it matches 1h index, 
+        # but 5m index might be different (though scanner usually aligns them).
+        # We try strict lookup first.
+        if ts_current in vix_5m_df.index:
+             row_5m = vix_5m_df.loc[ts_current]
+        else:
+            # Try naive version if exact match fails due to tz
+            ts_naive = ts_current.tz_localize(None) if ts_current.tzinfo else ts_current
+            if ts_naive in vix_5m_df.index:
+                 row_5m = vix_5m_df.loc[ts_naive]
+            else:
+                 # Last resort: nearest
+                 idx_5m = vix_5m_df.index.searchsorted(ts_current)
+                 if idx_5m >= len(vix_5m_df): idx_5m = len(vix_5m_df) - 1
+                 row_5m = vix_5m_df.iloc[idx_5m]
 
-    signal_type = None
-    reason = []
+        vix_5m_hist = row_5m['hist'] # Micro Momentum
+    except KeyError:
+        return {'signal_type': None, 'reason': 'No Micro Data'}
 
-    if macro_bearish_vix and cross_below and rsi_safe_for_call:
-        signal_type = 'call'
-        reason.append(f"VIX CRUSH (Hist {current_macro['hist']:.2f} | RSI {rsi_val:.1f})")
+    # 3. Signal Logic
+    
+    # --- SCENARIO A: VIX BREAKDOWN (SPX CALLS) ---
+    # VIX 1H is cooling off AND VIX 5m is cooling off
+    if vix_1h_hist < 0 and vix_5m_hist < 0:
+        
+        # RSI Guardrail: Don't short VIX if it's already on the floor (Mean Reversion Risk)
+        if rsi_val < 20.0:
+            return {'signal_type': None, 'reason': 'VIX_OVERSOLD_RISK'}
+            
+        return {
+            'signal_type': 'BULL_FRACTAL', # Implies SPX CALL
+            'reason': f"VIX_COOLING (1H:{vix_1h_hist:.2f}, 5m:{vix_5m_hist:.2f})"
+        }
 
-    elif macro_bullish_vix and cross_above and rsi_safe_for_put:
-        signal_type = 'put'
-        reason.append(f"VIX SPIKE (Hist {current_macro['hist']:.2f} | RSI {rsi_val:.1f})")
+    # --- SCENARIO B: VIX BREAKOUT (SPX PUTS) ---
+    # VIX 1H is heating up AND VIX 5m is heating up
+    elif vix_1h_hist > 0 and vix_5m_hist > 0:
+        
+        # RSI Guardrail: Don't long VIX if it's hitting the roof (Mean Reversion Risk)
+        if rsi_val > 80.0:
+            return {'signal_type': None, 'reason': 'VIX_OVERBOUGHT_RISK'}
+            
+        return {
+            'signal_type': 'BEAR_FRACTAL', # Implies SPX PUT
+            'reason': f"VIX_HEATING (1H:{vix_1h_hist:.2f}, 5m:{vix_5m_hist:.2f})"
+        }
 
-    return {
-        'signal_type': signal_type,
-        'timestamp': timestamp,
-        'reason': " | ".join(reason) if reason else "No Signal"
-    }
+    # --- NEUTRAL / CONFLICT ---
+    return {'signal_type': None, 'reason': 'FRACTAL_CONFLICT'}

@@ -85,13 +85,33 @@ ENABLE_DISCORD = True
 ORB_WINDOW_MINUTES = 30
 
 # ==============================================================================
-# 9. RISK PROTOCOLS (CIRCUIT BREAKER)
+# 9. RISK PROTOCOLS (THE TIERED AGGRESSION ENGINE)
 # ==============================================================================
-# If Daily PnL drops below this % (e.g., -5.0%), the system LIQUIDATES ALL.
-RISK_MAX_DAILY_LOSS_PCT = 5.0 
 
-# If VIX exceeds this level, the system enters "BUNKER MODE" (No new entries).
-RISK_MAX_VIX_LEVEL = 40.0
+def get_risk_tier(account_balance):
+    """
+    Returns the allowed risk percentage based on account size.
+    AUTO-DETECTS 'SPRINT MODE' for small accounts.
+    """
+    if account_balance < 2000:
+        # TIER 1: THE SPRINT ($164 -> $2000)
+        # Ideology: "Aggressive Velocity." 
+        # We authorize 40% risk because we need meaningful contract size.
+        return 0.40  
+
+    elif account_balance < 10000:
+        # TIER 2: THE BUILD ($2000 -> $10,000)
+        # Ideology: "Protect the Gains."
+        return 0.20  
+
+    else:
+        # TIER 3: THE VAULT ($10,000+)
+        # Ideology: "Stay Rich." The Oct 21st Shield.
+        return 0.05 
+
+# GLOBAL SAFETY NETS
+FORCED_EXIT_ON_CHOP = True     # If ADX < 20, we close immediately.
+MACRO_EVENT_MODE = False       # Set TRUE on Fed Days to tighten filters.
 
 # ==============================================================================
 # 10. SYSTEM METADATA
