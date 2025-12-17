@@ -6,6 +6,7 @@ import time
 import json
 import os
 import requests
+import random
 import numpy as np
 from datetime import datetime, time as t_time, timedelta
 from pathlib import Path
@@ -24,13 +25,14 @@ SNAPSHOT_FILE = ROOT_DIR / "data" / "live_snapshot.json"
 LOCK_FILE = ROOT_DIR / ".ingest_cooldown"
 COOLDOWN_SECONDS = 30 
 
-# ⚡ SESSION FIX: Spoof Browser
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-})
+# ⚡ STEALTH FIX: Rotate User Agents to bypass Rate Limits
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
+    "Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.162 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0"
+]
 
-# ⚡ ENCODER FIX: Handle Dates & NumPy
 class RobustEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer): return int(obj)
@@ -49,8 +51,6 @@ def check_cooldown():
         try:
             last_run = float(LOCK_FILE.read_text().strip())
             if now - last_run < COOLDOWN_SECONDS:
-                remaining = int(COOLDOWN_SECONDS - (now - last_run))
-                log.warning(f"⏳ Cooldown Active: Skipping API call (wait {remaining}s)")
                 return False
         except: pass 
     try: LOCK_FILE.write_text(str(now))
@@ -58,42 +58,52 @@ def check_cooldown():
     return True
 
 def fetch_yahoo_data(y_ticker):
-    """Fetches data and enforces Strict Timezone Laws."""
+    """Fetches data with backoff and rotation."""
     start_date = datetime.now().date() - timedelta(days=2) 
     end_date = datetime.now().date() + timedelta(days=1)
-    try:
-        time.sleep(1.0) 
-        ticker_dat = yf.Ticker(y_ticker, session=session)
-        df = ticker_dat.history(start=start_date, end=end_date, interval="1m")
-        
-        if df.empty: return pd.DataFrame()
-        
-        df = df.reset_index()
-        df.columns = [c.lower() for c in df.columns]
-        df.rename(columns={"datetime": "datetime_utc"}, inplace=True)
-        df['ticker'] = y_ticker.replace('^', '')
-        
-        # ⚡ CRITICAL TIMEZONE FIX ⚡
-        if pd.api.types.is_datetime64_any_dtype(df['datetime_utc']):
-            # 1. If Naive (No TZ), assume America/New_York (Exchange Time)
-            if df['datetime_utc'].dt.tz is None:
-                df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York')
+    
+    # ⚡ RETRY LOGIC
+    for attempt in range(3):
+        try:
+            # Randomize Headers
+            session = requests.Session()
+            session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
             
-            # 2. Convert to UTC
-            df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC').dt.tz_localize(None)
-        
-        return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
-    except Exception as e:
-        log.error(f"❌ API Error {y_ticker}: {e}")
-        return pd.DataFrame()
+            # Random Sleep to act human
+            time.sleep(random.uniform(1.0, 3.0)) 
+            
+            ticker_dat = yf.Ticker(y_ticker, session=session)
+            df = ticker_dat.history(start=start_date, end=end_date, interval="1m")
+            
+            if df.empty: 
+                log.warning(f"⚠️ Empty response for {y_ticker}")
+                return pd.DataFrame()
+            
+            df = df.reset_index()
+            df.columns = [c.lower() for c in df.columns]
+            df.rename(columns={"datetime": "datetime_utc"}, inplace=True)
+            df['ticker'] = y_ticker.replace('^', '')
+            
+            # Timezone Logic
+            if pd.api.types.is_datetime64_any_dtype(df['datetime_utc']):
+                if df['datetime_utc'].dt.tz is None:
+                    df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York')
+                df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC').dt.tz_localize(None)
+            
+            return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
+            
+        except Exception as e:
+            log.warning(f"⏳ Attempt {attempt+1} failed for {y_ticker}: {e}")
+            time.sleep(2 * (attempt + 1)) # Exponential backoff
+            
+    log.error(f"❌ Failed to fetch {y_ticker} after 3 attempts.")
+    return pd.DataFrame()
 
 def calculate_orb(df):
     if df.empty: return None, None
-    # Calculate ORB using NY Time
     df = df.copy()
-    # Assume UTC input -> Convert to NY
+    # ORB Logic (NY Time)
     df['dt_ny'] = df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
-    
     start = t_time(9, 30)
     end = t_time(10, 0)
     orb_df = df[(df['dt_ny'].dt.time >= start) & (df['dt_ny'].dt.time < end)]
@@ -104,10 +114,16 @@ def calculate_orb(df):
 
 def generate_snapshot_from_db(con):
     try:
+        # Check freshness
         max_ts = con.execute(f"SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = 'XSP'").fetchone()[0]
         if not max_ts: return
         
-        target_date = pd.to_datetime(max_ts).date()
+        # Only snapshot if data is relatively recent (within 24h)
+        last_data_time = pd.to_datetime(max_ts)
+        if (datetime.now() - last_data_time).total_seconds() > 86400 * 3: # Allow weekend gaps
+            log.warning("⚠️ Data in DB is stale (>3 days). Snapshot might be old.")
+
+        target_date = last_data_time.date()
         s_str = f"{target_date} 00:00:00"
         
         xsp_df = con.execute(f"SELECT * FROM {config.TBL_INDICES} WHERE ticker = 'XSP' AND datetime_utc >= '{s_str}' ORDER BY datetime_utc ASC").df()
@@ -129,19 +145,22 @@ def generate_snapshot_from_db(con):
         if Path(temp_file).exists():
             os.replace(temp_file, SNAPSHOT_FILE)
             
-        log.info(f"📸 Snapshot Updated. (Rows: {len(xsp_df)})")
+        log.info(f"📸 Snapshot Updated. (XSP: {len(xsp_df)} rows)")
 
     except Exception as e:
         log.error(f"Snapshot Failed: {e}")
 
 def run_ingest():
-    # 1. Fetch Phase
     if check_cooldown():
         log.info("📊 FETCHING NEW DATA...")
         staged = []
+        fetch_success = False
+        
         for friendly, y_ticker in {'VIX': '^VIX', 'XSP': '^XSP'}.items():
             df = fetch_yahoo_data(y_ticker)
-            if not df.empty: staged.append((friendly, df))
+            if not df.empty: 
+                staged.append((friendly, df))
+                fetch_success = True
         
         if staged and config.DB_FILE.exists():
             try:
@@ -152,18 +171,14 @@ def run_ingest():
                     con.execute(f"INSERT OR IGNORE INTO {config.TBL_INDICES} SELECT * FROM temp_idx")
                     con.unregister('temp_idx')
                     log.info(f"   ✅ {friendly}: Saved {len(df)} candles.")
+                
+                # Only snapshot if we actually got data or DB exists
+                generate_snapshot_from_db(con)
                 con.close()
             except Exception as e:
                 log.error(f"DB Write Error: {e}")
-
-    # 2. Snapshot Phase (Always Run)
-    if config.DB_FILE.exists():
-        try:
-            con = duckdb.connect(str(config.DB_FILE), read_only=True)
-            generate_snapshot_from_db(con)
-            con.close()
-        except Exception as e:
-            log.error(f"DB Read Error: {e}")
+        elif not fetch_success:
+             log.warning("⚠️ Fetch failed. Skipping snapshot update to prevent stale data.")
 
 if __name__ == "__main__":
     run_ingest()

@@ -121,31 +121,63 @@ def fetch_market_internals(vix_df):
 
 def get_market_status():
     now_ny = datetime.now(config.TZ_NY)
-    today_str, current_time = now_ny.strftime("%Y-%m-%d"), now_ny.time()
-    market_open, market_close = time(9, 30), time(16, 0)
+    today_str = now_ny.strftime("%Y-%m-%d")
+    current_time = now_ny.time()
     
-    # ⚡ FIX: Use the correct variable name 'EARLY_CLOSES'
-    if today_str in EARLY_CLOSES: 
-        market_close = EARLY_CLOSES[today_str]
-        
-    is_active = (market_open <= current_time < market_close) and (now_ny.weekday() < 5) and (today_str not in HOLIDAYS)
+    market_open = time(9, 30)
+    market_close = EARLY_CLOSES.get(today_str, time(16, 0))
     
-    status_text = "OPEN" if is_active else "CLOSED"
-    status_color = "#00bc8c" if is_active else "#e74c3c"
-    reason = "(LIVE)" if is_active else "(POST-MARKET)"
+    is_weekend = now_ny.weekday() >= 5
+    is_holiday = today_str in HOLIDAYS
+    is_active_hours = market_open <= current_time < market_close
+    
+    # 1. Determine Status & Color
+    status_text = "CLOSED"
+    status_color = "#e74c3c"
+    reason = ""
+    
+    if is_holiday:
+        reason = f"({HOLIDAYS[today_str]})"
+    elif is_weekend:
+        reason = "(WEEKEND)"
+    elif is_active_hours:
+        status_text = "OPEN"
+        status_color = "#00bc8c"
+        reason = "(LIVE)"
+    elif current_time < market_open:
+        reason = "(PRE-MARKET)"
+    else:
+        reason = "(POST-MARKET)"
     
     html_status = html.Span([
         html.Span(f"STATUS: {status_text}", style={'color': status_color, 'fontWeight': 'bold', 'fontFamily': "'VT323', monospace", 'fontSize': '1.1rem'}),
         html.Span(f" {reason}", className="small ms-2", style={'color': '#b5b8b9', 'fontFamily': "'VT323', monospace"})
     ])
     
-    # Calc Next Day
-    next_date = now_ny.date() + timedelta(days=1)
-    while True:
-        if next_date.weekday() < 5 and next_date.strftime("%Y-%m-%d") not in HOLIDAYS: break
-        next_date += timedelta(days=1)
+    # 2. Determine "Next Event" or "Current Session" Info
+    info_line = ""
     
-    return html_status, f"NEXT: {next_date.strftime('%A, %b %d')}"
+    if is_active_hours:
+        close_str = market_close.strftime("%H:%M")
+        info_line = f"SESSION: 09:30 - {close_str} ET"
+    else:
+        target_date = now_ny.date()
+        # If trading day and before open, next is today
+        if not is_weekend and not is_holiday and current_time < market_open:
+            date_label = "TODAY"
+        else:
+            # Look forward
+            target_date += timedelta(days=1)
+            while True:
+                d_str = target_date.strftime("%Y-%m-%d")
+                if target_date.weekday() < 5 and d_str not in HOLIDAYS:
+                    break
+                target_date += timedelta(days=1)
+            date_label = target_date.strftime("%A, %b %d")
+
+        info_line = f"NEXT: {date_label} @ 09:30 ET"
+    
+    return html_status, info_line
 
 # ==============================================================================
 # 2. LAYOUT (MAGITEK COMMAND DECK RESTORED)
@@ -203,7 +235,7 @@ def render():
         # --- ROW 3: SCOPE ---
         dbc.Row([
             dbc.Col([
-                dcc.Graph(id='live-scope-chart', style={'height': '80vh'}, config={'displayModeBar': False})
+                dcc.Graph(id='live-scope-chart', style={'height': '80vh'}, config={'displayModeBar': True})
             ], width=12)
         ], className="g-0"),
 
@@ -244,7 +276,7 @@ def update_hud(n, manual_click):
     if xsp is None or xsp.empty:
         fig = go.Figure()
         fig.add_annotation(text="WAITING FOR SIGNAL...", font=dict(color="#fde722", size=24, family="Monospace"), showarrow=False)
-        fig.update_layout(template="plotly_dark", paper_bgcolor='black', plot_bgcolor='black', xaxis_visible=False, yaxis_visible=False)
+        fig.update_layout(template="plotly_dark", paper_bgcolor='black', plot_bgcolor='rgba(0,0,0,0)', xaxis_visible=False, yaxis_visible=False)
         return fig, time_str, status_html, next_day_str, "SYNCING...", 0, "secondary", "--", [], ""
 
     # 3. Math & Logic
@@ -294,12 +326,25 @@ def update_hud(n, manual_click):
 
     # ROW 3
     if vix is not None:
-        fig.add_trace(go.Scatter(x=vix['Datetime'], y=vix['rsi'], line=dict(color='#a855f7', width=2), name="RSI"), row=3, col=1)
+        # ⚡ SPLINE RSI (Match Chronicles Style)
+        fig.add_trace(go.Scatter(x=vix['Datetime'], y=vix['rsi'], line=dict(color='#a855f7', width=2, shape='spline'), name="RSI"), row=3, col=1)
         fig.add_hline(y=70, line_dash="dot", line_color="red", row=3, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="green", row=3, col=1)
 
-    fig.update_layout(template="plotly_dark", paper_bgcolor='black', plot_bgcolor='rgba(0,0,0,0)', 
-                      margin=dict(l=40, r=40, t=30, b=40), xaxis_rangeslider_visible=False, showlegend=False,
-                      font=dict(family="'VT323', monospace", size=14, color="#f3f5f9"))
+    # ⚡ ZOOM LOCKED & DARK HOVER
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
+
+    fig.update_layout(
+        template="plotly_dark", 
+        paper_bgcolor='black', 
+        plot_bgcolor='rgba(0,0,0,0)', 
+        margin=dict(l=40, r=40, t=30, b=40), 
+        xaxis_rangeslider_visible=False, 
+        showlegend=False,
+        hovermode="x unified",
+        font=dict(family="'VT323', monospace", size=14, color="#f3f5f9"),
+        hoverlabel=dict(bgcolor="#1e1e1e", font=dict(color="#f3f5f9", family="monospace"))
+    )
 
     return fig, time_str, status_html, next_day_str, updated_str, vix_pct, therm_color, f"{curr_vix:.2f}", badges, oracle_html
