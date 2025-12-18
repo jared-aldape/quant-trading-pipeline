@@ -6,7 +6,7 @@ from scipy.stats import norm
 from pathlib import Path
 from datetime import datetime
 import warnings
-import re # Added for regex parsing
+import re 
 
 # Suppress divide by zero warnings in BS model
 warnings.filterwarnings("ignore")
@@ -14,8 +14,6 @@ warnings.filterwarnings("ignore")
 # ==============================================================================
 # 1. PATH CONSTITUTION
 # ==============================================================================
-# File: src/core/engine_greeks.py
-# Root: ../../
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
@@ -50,7 +48,6 @@ def calculate_greeks_vectorized(df):
     
     pdf_d1 = norm.pdf(d1)
     cdf_d1 = norm.cdf(d1)
-    cdf_d2 = norm.cdf(d2)
     
     # Initialize Arrays
     delta = np.zeros(len(df))
@@ -90,7 +87,7 @@ def calculate_greeks_vectorized(df):
 def calculate_and_fill_greeks():
     """
     Scans the Option Vault for rows with missing Greeks and backfills them.
-    This is the entry point for the Daily Harvest pipeline.
+    XSP-NATIVE UPDATE: Now joins on ticker='XSP' instead of 'SPX'.
     """
     if not config.DB_FILE.exists():
         log.error("❌ Database not found.")
@@ -98,13 +95,8 @@ def calculate_and_fill_greeks():
 
     con = duckdb.connect(str(config.DB_FILE))
     
-    # 1. Find rows needing calculation (Limit batch size for safety)
-    # Fetching 'close' as proxy for underlying price if we don't have spot index joined yet
-    # Ideally, we should join with indices_1m, but for approximation, we assume
-    # we need to fetch the underlying price separately or pass it.
-    # CRITICAL: We need Underlying Price (SPX) to calc Greeks.
-    
-    # Let's fetch pending options + join with SPX index on timestamp
+    # 1. Fetch Pending Options + Join XSP Underlying
+    # We join on timestamp to get the exact index price at the moment of the candle.
     q_fetch = f"""
         SELECT 
             o.datetime_utc, 
@@ -113,9 +105,8 @@ def calculate_and_fill_greeks():
             i.close as underlying_price
         FROM {config.TBL_OPTIONS} o
         LEFT JOIN {config.TBL_INDICES} i 
-            ON o.datetime_utc = i.datetime_utc AND i.ticker = 'SPX'
+            ON o.datetime_utc = i.datetime_utc AND i.ticker = 'XSP'
         WHERE o.delta IS NULL
-        -- AND i.close IS NOT NULL -- Only calc where we have SPX data
         ORDER BY o.datetime_utc DESC
         LIMIT 50000 
     """
@@ -132,33 +123,27 @@ def calculate_and_fill_greeks():
         return
 
     # Check for missing underlying data
-    missing_spx = df[df['underlying_price'].isna()]
-    if not missing_spx.empty:
-        log.warning(f"⚠️ {len(missing_spx)} option rows missing matching SPX index data. Greeks skipped for these.")
+    missing_underlying = df[df['underlying_price'].isna()]
+    if not missing_underlying.empty:
+        log.warning(f"⚠️ {len(missing_underlying)} option rows missing matching XSP index data. Greeks skipped for these.")
         df = df.dropna(subset=['underlying_price'])
         if df.empty:
             con.close()
             return
 
-    log.info(f"🧮 Calculating Greeks for {len(df)} new rows...")
+    log.info(f"🧮 Calculating Greeks (XSP-Native) for {len(df)} new rows...")
     
     # 2. Enrich Data (Parse Ticker for Strike/Exp)
-    # Ticker format expected: SPX231215C04500000
-    # We need to extract Date, Type, Strike
-    
     def parse_meta(ticker):
-        # Regex for standard Polygon/OPRA format
         # Matches: [Root][YYMMDD][C/P][Strike * 1000]
+        # Example: O:XSP251216C00585000
         match = re.search(r'([A-Z]+)(\d{6})([CP])(\d{8})', ticker)
         if match:
-            # root = match.group(1) # Unused here
             date_str = match.group(2)
             type_char = match.group(3)
             strike_str = match.group(4)
             
-            # Expiration
             exp_date = pd.to_datetime(date_str, format='%y%m%d')
-            # Strike (divide by 1000)
             strike = float(strike_str) / 1000.0
             
             return exp_date, type_char, strike
@@ -174,18 +159,16 @@ def calculate_and_fill_greeks():
     df = df.dropna(subset=['expiration'])
     
     # Calculate Time to Expiry (Annualized)
-    # Add 16 hours (4pm close) to exp date for accuracy? Standard is 4pm EST.
     df['time_to_expiry'] = (df['expiration'] + pd.Timedelta(hours=16) - df['datetime_utc']).dt.total_seconds() / (365 * 24 * 3600)
     
-    # Defaults
-    df['risk_free_rate'] = 0.045 # 4.5% static for now, or fetch from DB
-    df['iv'] = 0.20 # 20% fallback if not calculating IV implies
+    # Defaults (Can be upgraded to dynamic later)
+    df['risk_free_rate'] = 0.045 
+    df['iv'] = 0.20 
     
     # 3. Calculate
     df_calc = calculate_greeks_vectorized(df)
     
     # 4. Update DB
-    # We use a temporary table to bulk update
     con.register('greek_updates', df_calc[['datetime_utc', 'ticker', 'delta', 'gamma', 'vega', 'theta']])
     
     update_q = f"""
@@ -202,3 +185,6 @@ def calculate_and_fill_greeks():
     con.execute(update_q)
     log.info(f"✅ Greeks committed to Vault.")
     con.close()
+
+if __name__ == "__main__":
+    calculate_and_fill_greeks()

@@ -25,87 +25,69 @@ TZ_PST = pytz.timezone('US/Pacific')
 def render():
     return dbc.Container([
         
-        # --- TITLE ROW (ATB SCOPE STYLE) ---
+        # --- TITLE ROW ---
         dbc.Row([
             dbc.Col([
-                html.H2("JOB STATS COMMAND", className="magitek-h2"),
-                html.P("FORENSICS LAB | PERFORMANCE ANALYTICS | EQUITY CURVE", className="magitek-note")
+                html.H2("FINANCIAL STATISTICS", className="magitek-h2"),
+                html.P("CAPITAL ALLOCATION | CALL vs PUT BIAS | PREMIUM BURN", className="magitek-note")
             ], width=8),
             
             dbc.Col([
                 html.Div("SYSTEM STATUS: ONLINE", className="text-end text-success font-monospace fw-bold"),
-                html.Div("MODE: ANALYSIS", className="text-end text-warning font-monospace")
+                html.Div("METRIC: FINANCIAL HEALTH", className="text-end text-warning font-monospace")
             ], width=4, className="align-self-center")
         ], className="mb-4 p-3 card flex-row align-items-center", style={"border": "2px solid #b5b8b9"}),
 
-        # --- CONTROL STRIP ---
+        # --- CONTROLS ---
         dbc.Row([
             dbc.Col(dcc.Dropdown(
-                id='stats-source-dropdown',
-                options=[
-                    {'label': 'GIL LEDGER (Robinhood)', 'value': 'rh'},
-                    {'label': 'SAVE CRYSTAL', 'value': 'gen'},
-                    {'label': 'TRAINING GROUNDS', 'value': 'manual'},
-                    {'label': 'RAW SIGNAL HISTORY', 'value': 'sig'}
-                ],
-                value='rh',
-                clearable=False,
-                className="mb-3"
+                id='stats-source',
+                options=[{'label': 'GIL LEDGER (Robinhood)', 'value': 'rh'}, {'label': 'SIMULATION', 'value': 'gen'}],
+                value='rh', clearable=False, className="mb-3"
             ), width=6),
-
             dbc.Col(dcc.Dropdown(
-                id='stats-date-dropdown',
+                id='stats-profile',
                 options=[{'label': k, 'value': k} for k in DATE_PROFILES.keys()],
-                value='Year To Date',
-                clearable=False,
-                className="mb-3"
+                value='Year To Date', clearable=False, className="mb-3"
             ), width=6)
-        ], className="mb-3"),
+        ]),
 
-        # KPIs
+        # --- KPI ROW ---
         dbc.Row(id='stats-kpi-row', className="mb-4"),
 
-        # CHART ROW 1
+        # --- ROW 1: THE SPLIT (Call vs Put) ---
         dbc.Row([
             dbc.Col(dbc.Card([
-                dbc.CardHeader("PRIMARY ANALYSIS", className="card-header text-center"), 
-                dbc.CardBody(dcc.Graph(id='stats-chart-1', style={'height': '300px'}, config={'displayModeBar': False}))
-            ], className="shadow h-100"), width=8),
+                dbc.CardHeader("DIRECTIONAL BIAS (THE 75/25 SPLIT)", className="card-header text-center"), 
+                dbc.CardBody(dcc.Graph(id='stats-chart-split', style={'height': '300px'}, config={'displayModeBar': False}))
+            ], className="shadow h-100"), width=6),
             
             dbc.Col(dbc.Card([
-                dbc.CardHeader("SECONDARY ANALYSIS", className="card-header text-center"), 
-                dbc.CardBody(dcc.Graph(id='stats-chart-2', style={'height': '300px'}, config={'displayModeBar': False}))
-            ], className="shadow h-100"), width=4),
+                dbc.CardHeader("WIN RATE BY SIDE", className="card-header text-center"), 
+                dbc.CardBody(dcc.Graph(id='stats-chart-winrate', style={'height': '300px'}, config={'displayModeBar': False}))
+            ], className="shadow h-100"), width=6),
         ], className="mb-4"),
 
-        # CHART ROW 2
+        # --- ROW 2: COSTS & STRIKES ---
         dbc.Row([
             dbc.Col(dbc.Card([
-                dbc.CardHeader("ACTIVITY / DISTRIBUTION", className="card-header text-center"), 
-                dbc.CardBody(dcc.Graph(id='stats-chart-3', style={'height': '300px'}, config={'displayModeBar': False}))
+                dbc.CardHeader("PREMIUM SPENT PER WEEK (BURN RATE)", className="card-header text-center"), 
+                dbc.CardBody(dcc.Graph(id='stats-chart-burn', style={'height': '300px'}, config={'displayModeBar': False}))
             ], className="shadow"), width=6),
             
             dbc.Col(dbc.Card([
-                dbc.CardHeader("TEMPORAL / RISK", className="card-header text-center"), 
-                dbc.CardBody(dcc.Graph(id='stats-chart-4', style={'height': '300px'}, config={'displayModeBar': False}))
+                dbc.CardHeader("PROFIT BY STRIKE PRICE", className="card-header text-center"), 
+                dbc.CardBody(dcc.Graph(id='stats-chart-strike', style={'height': '300px'}, config={'displayModeBar': False}))
             ], className="shadow"), width=6),
         ], className="mb-4"),
 
-        # CHART ROW 3 (Extra)
+        # --- ROW 3: EQUITY CURVE ---
         dbc.Row([
             dbc.Col(dbc.Card([
-                dbc.CardHeader("SEASONALITY MAP", className="card-header text-center"),
-                dbc.CardBody(dcc.Graph(id='stats-chart-5', config={'displayModeBar': False}))
-            ], className="shadow"), width=12)
+                dbc.CardHeader("PORTFOLIO EQUITY CURVE", className="card-header text-center"), 
+                dbc.CardBody(dcc.Graph(id='stats-chart-equity', style={'height': '350px'}, config={'displayModeBar': False}))
+            ], className="shadow"), width=12),
         ], className="mb-4"),
-
-        # LEDGER
-        dbc.Row([
-            dbc.Col([
-                html.H4(id='stats-ledger-title', className="text-info font-monospace mt-2"), 
-                html.Div(id='stats-table-container')
-            ], width=12)
-        ])
 
     ], fluid=True)
 
@@ -114,176 +96,93 @@ def render():
 # ==============================================================================
 @callback(
     [Output('stats-kpi-row', 'children'),
-     Output('stats-chart-1', 'figure'),
-     Output('stats-chart-2', 'figure'),
-     Output('stats-chart-3', 'figure'),
-     Output('stats-chart-4', 'figure'),
-     Output('stats-chart-5', 'figure'),
-     Output('stats-ledger-title', 'children'),
-     Output('stats-table-container', 'children')],
-    [Input('stats-source-dropdown', 'value'),
-     Input('stats-date-dropdown', 'value')]
+     Output('stats-chart-split', 'figure'),
+     Output('stats-chart-winrate', 'figure'),
+     Output('stats-chart-burn', 'figure'),
+     Output('stats-chart-strike', 'figure'),
+     Output('stats-chart-equity', 'figure')],
+    [Input('stats-source', 'value'),
+     Input('stats-profile', 'value')]
 )
-def update_stats(source, date_profile):
-    df = forensics.fetch_scorecard_data(source, date_profile)
-    
+def update_stats(source, profile):
+    df = forensics.fetch_scorecard_data(source, profile)
     empty_fig = go.Figure().update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-    if df.empty:
-        return [], empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, "", html.Div("No Data", className="text-muted text-center mt-5")
+    if df.empty: return [], empty_fig, empty_fig, empty_fig, empty_fig, empty_fig
 
-    # PRE-PROCESS (Timezone)
+    # PRE-PROCESS
     df['entry_time'] = pd.to_datetime(df['entry_time'])
     if df['entry_time'].dt.tz is None: df['entry_time'] = df['entry_time'].dt.tz_localize(TZ_UTC)
     df['entry_time'] = df['entry_time'].dt.tz_convert(TZ_PST)
     
-    if 'exit_time' in df.columns:
-        df['exit_time'] = pd.to_datetime(df['exit_time'])
-        if df['exit_time'].dt.tz is None: df['exit_time'] = df['exit_time'].dt.tz_localize(TZ_UTC)
-        df['exit_time'] = df['exit_time'].dt.tz_convert(TZ_PST)
-    else:
-        df['exit_time'] = df['entry_time']
+    # Extract Type (C/P) and Strike from Ticker (e.g., "XSP 580C...")
+    def parse_ticker(t):
+        try:
+            parts = t.split()
+            # Assuming format: "XSP 580C" or similar
+            # If simplistic format from reconciler: "XSP 677P 2025-12-10"
+            for p in parts:
+                if 'C' in p and p[:-1].isdigit(): return 'CALL', int(p[:-1]) # Match "580C"
+                if 'P' in p and p[:-1].isdigit(): return 'PUT', int(p[:-1])
+                # Reconciler specific format check
+                if p.endswith('C'): return 'CALL', float(p[:-1])
+                if p.endswith('P'): return 'PUT', float(p[:-1])
+            return 'UNK', 0
+        except: return 'UNK', 0
 
+    # Logic to handle reconciler format "XSP 677C 2025-..."
+    # The reconciler builds ticker as f"{root} {strike}{otype} {expiry}"
+    # So "XSP 677.0C 2025-12-10"
+    df['Type'] = df['ticker'].apply(lambda x: 'CALL' if 'C ' in x or x.endswith('C') or 'C' in x.split()[1] else ('PUT' if 'P ' in x or x.endswith('P') or 'P' in x.split()[1] else 'UNK'))
+    # Rough strike parser
+    df['Strike'] = df['ticker'].apply(lambda x: ''.join([c for c in x.split()[1] if c.isdigit() or c=='.']) if len(x.split())>1 else '0')
+
+    # 1. KPIs
+    net_pnl = df['pnl'].sum()
+    win_rate = len(df[df['pnl']>0]) / len(df) * 100
+    pf = df[df['pnl']>0]['pnl'].sum() / abs(df[df['pnl']<0]['pnl'].sum()) if len(df[df['pnl']<0]) > 0 else 0
+    
+    kpis = [
+        dbc.Col(dbc.Card([html.H6("NET PnL"), html.H3(f"${net_pnl:,.2f}", className="text-success" if net_pnl>=0 else "text-danger")], body=True, color="dark", inverse=True)),
+        dbc.Col(dbc.Card([html.H6("WIN RATE"), html.H3(f"{win_rate:.1f}%", className="text-info")], body=True, color="dark", inverse=True)),
+        dbc.Col(dbc.Card([html.H6("PROFIT FACTOR"), html.H3(f"{pf:.2f}", className="text-warning")], body=True, color="dark", inverse=True)),
+        dbc.Col(dbc.Card([html.H6("TOTAL TRADES"), html.H3(f"{len(df)}", className="text-white")], body=True, color="dark", inverse=True)),
+    ]
+
+    # 2. SPLIT CHART (PnL by Type)
+    split_grp = df.groupby('Type')['pnl'].sum().reset_index()
+    fig_split = px.bar(split_grp, x='Type', y='pnl', color='pnl', title="Net PnL by Instrument",
+                       color_continuous_scale=['#ff5555', '#333', '#00ff41'])
+    fig_split.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_family="'VT323', monospace")
+
+    # 3. WIN RATE CHART
+    wr_grp = df.groupby('Type').apply(lambda x: len(x[x['pnl']>0])/len(x)*100).reset_index(name='WinRate')
+    fig_wr = px.bar(wr_grp, x='Type', y='WinRate', title="Win Rate % by Instrument", color='WinRate', range_y=[0, 100])
+    fig_wr.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_family="'VT323', monospace")
+
+    # 4. BURN RATE (Premium Spent per Week)
+    df['Week'] = df['entry_time'].dt.to_period('W').astype(str)
+    # Estimate cost: entry_price * quantity * 100
+    df['Cost'] = df['entry_price'] * df['quantity'] * 100
+    burn_grp = df.groupby('Week')['Cost'].sum().reset_index()
+    fig_burn = px.bar(burn_grp, x='Week', y='Cost', title="Premium Deployed (Risk On)", color_discrete_sequence=['#f39c12'])
+    fig_burn.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_family="'VT323', monospace")
+
+    # 5. STRIKE PERFORMANCE
+    # Filter out weird strikes
+    strike_df = df[df['Strike'] != '0'].copy()
+    if not strike_df.empty:
+        fig_strike = px.scatter(strike_df, x='Strike', y='pnl', color='Type', title="PnL Distribution by Strike",
+                                color_discrete_map={'CALL': '#00ff41', 'PUT': '#ff5555'})
+        fig_strike.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_family="'VT323', monospace")
+    else:
+        fig_strike = empty_fig
+
+    # 6. EQUITY CURVE
     df = df.sort_values('entry_time')
-    df['trade_seq'] = df.groupby(df['entry_time'].dt.date).cumcount() + 1
-    df = df.sort_values('entry_time', ascending=False)
+    df['Equity'] = df['pnl'].cumsum()
+    fig_eq = px.line(df, x='entry_time', y='Equity', title="Account Growth (Equity Curve)")
+    fig_eq.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig_eq.update_traces(line_color='#00bc8c', fill='tozeroy')
+    fig_eq.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font_family="'VT323', monospace")
 
-    # ==========================================================================
-    # MODE: RAW SIGNALS (SIG)
-    # ==========================================================================
-    if source == 'sig':
-        # KPIs
-        calls = len(df[df['ticker'].str.contains('CALL')])
-        puts = len(df[df['ticker'].str.contains('PUT')])
-        ratio = (calls / puts) if puts > 0 else calls
-        kpis = [
-            dbc.Col(dbc.Card([html.H6("TOTAL SIGNALS"), html.H3(f"{len(df)}", className="text-info")], body=True, color="dark", inverse=True)),
-            dbc.Col(dbc.Card([html.H6("CALLS"), html.H3(f"{calls}", className="text-success")], body=True, color="dark", inverse=True)),
-            dbc.Col(dbc.Card([html.H6("PUTS"), html.H3(f"{puts}", className="text-danger")], body=True, color="dark", inverse=True)),
-            dbc.Col(dbc.Card([html.H6("C/P RATIO"), html.H3(f"{ratio:.2f}", className="text-warning")], body=True, color="dark", inverse=True)),
-        ]
-        
-        # Charts
-        daily = df.groupby(df['entry_time'].dt.date).size()
-        fig1 = go.Figure(data=[go.Bar(x=daily.index, y=daily.values, marker_color='#00d2ff')])
-        fig1.update_layout(title="Daily Frequency", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        
-        fig2 = go.Figure(data=[go.Pie(labels=['CALL','PUT'], values=[calls,puts], hole=.4, marker=dict(colors=['#00ff41', '#ff5555']))])
-        fig2.update_layout(title="Directional Bias", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False)
-
-        hourly = df.groupby(df['entry_time'].dt.hour).size()
-        fig3 = go.Figure(data=[go.Bar(x=hourly.index, y=hourly.values, marker_color='#f39c12')])
-        fig3.update_layout(title="Hourly Activity", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-
-        df['dow'] = df['entry_time'].dt.day_name()
-        dow = df.groupby('dow').size().reindex(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'])
-        fig4 = go.Figure(data=[go.Bar(x=dow.index, y=dow.values, marker_color='#e74c3c')])
-        fig4.update_layout(title="Weekday Activity", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-
-        # Table
-        df['time_str'] = df['entry_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Styles
-        header_style = {'backgroundColor': '#283878', 'color': '#fde722', 'borderBottom': '2px solid #b5b8b9'}
-        cell_style = {'backgroundColor': '#101830', 'color': '#f3f5f9', 'border': '1px solid #444', 'textAlign': 'left', 'fontFamily': "'VT323', monospace", 'fontSize': '1.1rem'}
-
-        tbl = dash_table.DataTable(
-            data=df[['trade_seq', 'time_str', 'ticker']].to_dict('records'),
-            columns=[{'name': '#', 'id': 'trade_seq'}, {'name': 'TIME', 'id': 'time_str'}, {'name': 'TICKER', 'id': 'ticker'}],
-            style_header=header_style,
-            style_cell=cell_style,
-            page_size=10
-        )
-        return kpis, fig1, fig2, fig3, fig4, empty_fig, "SIGNAL LOG", tbl
-
-    # ==========================================================================
-    # MODE: TRADES (RH / GEN / MANUAL)
-    # ==========================================================================
-    else:
-        metrics = forensics.calculate_metrics(df)
-        kpis = [
-            dbc.Col(dbc.Card([html.H6("NET PnL"), html.H3(f"${metrics['net_pnl']:,.2f}", className="text-success" if metrics['net_pnl'] >=0 else "text-danger")], body=True, color="dark", inverse=True)),
-            dbc.Col(dbc.Card([html.H6("WIN RATE"), html.H3(f"{metrics['win_rate']:.1f}%", className="text-info")], body=True, color="dark", inverse=True)),
-            dbc.Col(dbc.Card([html.H6("PROFIT FACTOR"), html.H3(f"{metrics['pf']:.2f}", className="text-warning")], body=True, color="dark", inverse=True)),
-            dbc.Col(dbc.Card([html.H6("TRADES"), html.H3(f"{metrics['total_trades']}", className="text-white")], body=True, color="dark", inverse=True)),
-        ]
-
-        # 1. Equity
-        fig1 = go.Figure(data=[go.Scatter(x=df['entry_time'], y=df['equity_curve'], mode='lines', fill='tozeroy', line=dict(color='#00bc8c'))])
-        fig1.update_layout(title="Equity Curve", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-
-        # 2. Win/Loss Pie
-        wins = len(df[df['pnl']>0])
-        losses = len(df[df['pnl']<=0])
-        fig2 = go.Figure(data=[go.Pie(labels=['Win','Loss'], values=[wins,losses], hole=.4, marker=dict(colors=['#00ff41', '#ff5555']))])
-        fig2.update_layout(title="Win Ratio", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False)
-
-        # 3. PnL Dist
-        fig3 = go.Figure(data=[go.Histogram(x=df['pnl'], nbinsx=30, marker_color='#375a7f')])
-        fig3.update_layout(title="PnL Distribution", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-
-        # 4. Theta
-        fig4 = go.Figure(data=[go.Scatter(x=df['duration_mins'], y=df['return_pct'], mode='markers', marker=dict(size=8, color=df['return_pct'], colorscale='RdYlGn', cmid=0))])
-        fig4.update_layout(title="Theta Risk", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis_title="Mins", yaxis_title="ROI%")
-
-        # 5. Monthly Heatmap
-        df['year'] = df['entry_time'].dt.year
-        df['month'] = df['entry_time'].dt.month
-        piv = df.groupby(['year','month'])['pnl'].sum().reset_index().pivot(index='year', columns='month', values='pnl').fillna(0)
-        for m in range(1,13): 
-            if m not in piv.columns: piv[m] = 0
-        piv = piv[sorted(piv.columns)]
-        fig5 = go.Figure(data=go.Heatmap(z=piv.values, x=[calendar.month_abbr[i] for i in piv.columns], y=piv.index, colorscale='RdYlGn', zmid=0))
-        fig5.update_layout(title="Monthly Seasonality", template="plotly_dark", margin=dict(l=20,r=20,t=40,b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-
-        # DUAL-ROW LEDGER
-        df_buys = df.copy()
-        df_buys['time'] = df_buys['entry_time']
-        df_buys['action'] = 'BUY'
-        df_buys['price'] = df_buys['entry_price']
-        df_buys['pnl'] = 0
-        df_buys['return_pct'] = 0
-        df_buys['duration_mins'] = 0
-        
-        df_sells = df.copy()
-        df_sells['time'] = df_sells['exit_time']
-        df_sells['action'] = 'SELL'
-        df_sells['price'] = df_sells['exit_price']
-        
-        df_view = pd.concat([df_buys, df_sells], ignore_index=True).sort_values('time', ascending=False)
-        
-        df_view['time_str'] = df_view['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        df_view['pnl_str'] = df_view['pnl'].apply(lambda x: f"${x:,.2f}" if x != 0 else "-")
-        df_view['roi_str'] = df_view['return_pct'].apply(lambda x: f"{x:+.1f}%" if x != 0 else "-")
-        df_view['dur_str'] = df_view['duration_mins'].apply(lambda x: f"{x:.1f}m" if x > 0 else "-")
-        df_view['price_str'] = df_view['price'].apply(lambda x: f"${x:.2f}" if pd.notnull(x) else "$0.00")
-
-        # MAGITEK STYLES
-        header_style = {'backgroundColor': '#283878', 'color': '#fde722', 'borderBottom': '2px solid #b5b8b9'}
-        cell_style = {'backgroundColor': '#101830', 'color': '#f3f5f9', 'border': '1px solid #444', 'textAlign': 'left', 'fontFamily': "'VT323', monospace", 'fontSize': '1.1rem'}
-
-        dt = dash_table.DataTable(
-            data=df_view.to_dict('records'),
-            columns=[
-                {'name': '#', 'id': 'trade_seq'},
-                {'name': 'TIME (PST)', 'id': 'time_str'},
-                {'name': 'TICKER', 'id': 'ticker'},
-                {'name': 'ACTION', 'id': 'action'},
-                {'name': 'PRICE', 'id': 'price_str'},
-                {'name': 'DUR', 'id': 'dur_str'},
-                {'name': 'ROI', 'id': 'roi_str'},
-                {'name': 'PnL', 'id': 'pnl_str'}
-            ],
-            style_header=header_style,
-            style_cell=cell_style,
-            style_data_conditional=[
-                {'if': {'filter_query': '{pnl_str} contains "$"', 'column_id': 'pnl_str'}, 'color': '#00ff41'},
-                {'if': {'filter_query': '{pnl_str} contains "-"', 'column_id': 'pnl_str'}, 'color': '#ff5555'},
-                {'if': {'filter_query': '{roi_str} contains "%"', 'column_id': 'roi_str'}, 'color': '#00ff41'},
-                {'if': {'filter_query': '{roi_str} contains "-"', 'column_id': 'roi_str'}, 'color': '#ff5555'},
-                {'if': {'filter_query': '{action} = "BUY"', 'column_id': 'action'}, 'color': '#33ccff'},
-                {'if': {'filter_query': '{action} = "SELL"', 'column_id': 'action'}, 'color': '#ff9900'},
-            ],
-            page_size=15, 
-            style_table={'overflowX': 'auto'}
-        )
-        return kpis, fig1, fig2, fig3, fig4, fig5, "TRADE LEDGER (ENTRIES & EXITS)", dt
+    return kpis, fig_split, fig_wr, fig_burn, fig_strike, fig_eq

@@ -21,7 +21,7 @@ from src.utils.logger import get_logger
 log = get_logger("OraclePrecision")
 
 MODEL_PATH = config.DATA_DIR / "oracle_v3_precision.joblib"
-TBL_SIGNALS = "signal_history_log"
+TBL_SIGNALS = "option_signal_manifest"
 TBL_INDICES = getattr(config, 'TBL_INDICES', 'indices_1m')
 TBL_OPTIONS = getattr(config, 'TBL_OPTIONS', 'options_1m')
 

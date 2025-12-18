@@ -7,8 +7,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import precision_score, accuracy_score
-from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score
 
 # ==============================================================================
 # 1. PATH CONSTITUTION
@@ -19,176 +18,198 @@ sys.path.append(str(ROOT_DIR))
 from src.utils import config
 from src.utils.logger import get_logger
 
-log = get_logger("OracleML")
+log = get_logger("OraclePrecision")
 
-MODEL_PATH = config.DATA_DIR / "oracle_v2.joblib"
+MODEL_PATH = config.DATA_DIR / "oracle_v3_precision.joblib"
 TBL_SIGNALS = "signal_history_log"
 TBL_INDICES = getattr(config, 'TBL_INDICES', 'indices_1m')
+TBL_OPTIONS = getattr(config, 'TBL_OPTIONS', 'options_1m')
 
 # TARGET CONFIGURATION
-TARGET_WINDOW_MINS = 45     # Look ahead 45 minutes
-SUCCESS_THRESHOLD = 0.0015  # 0.15% Move (~10-15% Option Contract Move)
-TRUTH_TICKER = 'SPX'        # Using SPX as the dense data source
+TARGET_WINDOW_MINS = 45     
+MIN_OPTION_ROI = 0.10       # Require 10% ROI on the OPTION (Real Profit)
 
 # ==============================================================================
-# 2. DATASET CONSTRUCTION (The Memory)
+# 2. HELPER: OPRA TICKER CONSTRUCTION (XSP NATIVE)
 # ==============================================================================
-def build_training_dataset():
+def find_best_contract(con, signal_time, signal_type, underlying_price):
     """
-    Joins Signals with Index Price Action (SPX) to determine theoretical success.
-    Returns: X (Features), y (Target)
+    Finds the closest 0DTE ATM Option for the given signal.
     """
-    log.info(f"🧠 Constructing Training Dataset from Signal History vs {TRUTH_TICKER}...")
+    # 1. Determine Target Expiration (Same Day = 0DTE)
+    trade_date = signal_time.date()
+    
+    # 2. Determine Target Strike
+    # XSP Native: The price (~580) IS the strike. No division needed.
+    target_strike = round(underlying_price)
+    
+    # 3. Determine Type
+    is_call = 'LONG' in signal_type or 'BULL' in signal_type
+    opt_type = 'C' if is_call else 'P'
+    
+    # 4. Query DB for available contracts on this day/expiry
+    try:
+        start_search = signal_time.strftime('%Y-%m-%d %H:%M:%S')
+        end_search = (signal_time + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        q = f"""
+            SELECT ticker, strike, abs(strike - {target_strike}) as dist
+            FROM {TBL_OPTIONS}
+            WHERE datetime_utc >= '{start_search}' 
+            AND datetime_utc <= '{end_search}'
+            AND expiration = '{trade_date}'
+            AND type = '{opt_type}'
+            ORDER BY dist ASC, datetime_utc ASC
+            LIMIT 1
+        """
+        result = con.execute(q).fetchone()
+        
+        if result:
+            return result[0] # Return Ticker
+    except Exception:
+        return None
+        
+    return None
+
+# ==============================================================================
+# 3. DATASET CONSTRUCTION (The Reality Check)
+# ==============================================================================
+def build_precision_dataset():
+    log.info("💎 Constructing PRECISION Training Dataset (XSP Native)...")
     
     if not config.DB_FILE.exists(): return None, None
-    
     con = duckdb.connect(str(config.DB_FILE), read_only=True)
     
     # A. FETCH SIGNALS
     try:
-        tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
-        if TBL_SIGNALS not in tables:
-            log.warning(f"⚠️ {TBL_SIGNALS} not found. Run engine_scanner first.")
-            con.close()
-            return None, None
-
         df_sig = con.execute(f"SELECT * FROM {TBL_SIGNALS} ORDER BY timestamp_utc ASC").df()
+    except:
+        return None, None
         
-        # B. FETCH MARKET DATA (SPX - The Liquid Truth)
-        min_date = df_sig['timestamp_utc'].min() - timedelta(days=1)
-        max_date = df_sig['timestamp_utc'].max() + timedelta(days=1)
-        
-        # Explicitly fetching SPX data
-        df_mkt = con.execute(f"""
-            SELECT datetime_utc, close 
-            FROM {TBL_INDICES} 
-            WHERE ticker = '{TRUTH_TICKER}' 
-            AND datetime_utc >= '{min_date}' AND datetime_utc <= '{max_date}'
-            ORDER BY datetime_utc ASC
-        """).df()
-        
+    if df_sig.empty: return None, None
+
+    # B. FETCH INDEX PRICES (XSP Native)
+    min_date = df_sig['timestamp_utc'].min()
+    max_date = df_sig['timestamp_utc'].max() + timedelta(days=1)
+    
+    # CHANGED: Target 'XSP' instead of 'SPX'
+    df_idx = con.execute(f"""
+        SELECT datetime_utc, close 
+        FROM {TBL_INDICES} 
+        WHERE ticker = 'XSP' 
+        AND datetime_utc >= '{min_date}' AND datetime_utc <= '{max_date}'
+        ORDER BY datetime_utc
+    """).df()
+    
+    if df_idx.empty:
         con.close()
-    except Exception as e:
-        log.error(f"Data Fetch Error: {e}")
+        log.warning("⚠️ No XSP index data found covering the signal period.")
         return None, None
 
-    if df_sig.empty:
-        log.warning("⚠️ No signals found in history.")
-        return None, None
-        
-    if df_mkt.empty:
-        log.warning(f"⚠️ No {TRUTH_TICKER} market data found to calculate outcomes.")
-        return None, None
-
-    # C. DETERMINE OUTCOMES (The "Oracle's Truth")
-    df_mkt.sort_values('datetime_utc', inplace=True)
+    # Merge Index Price to Signals
+    df_idx.sort_values('datetime_utc', inplace=True)
     df_sig.sort_values('timestamp_utc', inplace=True)
     
-    # 1. Get Entry Price (Exact match or backward)
     df = pd.merge_asof(
-        df_sig, 
-        df_mkt.rename(columns={'close': 'entry_px'}),
-        left_on='timestamp_utc', 
-        right_on='datetime_utc', 
+        df_sig,
+        df_idx.rename(columns={'close': 'underlying_px'}),
+        left_on='timestamp_utc',
+        right_on='datetime_utc',
         direction='backward'
     )
+    df.dropna(subset=['underlying_px'], inplace=True)
+
+    # C. ITERATE AND SIMULATE OPTION TRADES
+    valid_samples = []
+    log.info(f"   Simulating Options Trades for {len(df)} signals...")
     
-    # 2. Get Exit Price (Entry Time + Window)
-    df['exit_time_target'] = df['timestamp_utc'] + timedelta(minutes=TARGET_WINDOW_MINS)
-    
-    df = pd.merge_asof(
-        df,
-        df_mkt[['datetime_utc', 'close']].rename(columns={'close': 'exit_px', 'datetime_utc': 'actual_exit_time'}),
-        left_on='exit_time_target',
-        right_on='actual_exit_time',
-        direction='backward',
-        tolerance=timedelta(minutes=10) # Allow 10m data gap for SPX
-    )
-    
-    # Drop signals where we don't have future data
-    df.dropna(subset=['entry_px', 'exit_px'], inplace=True)
-    
-    # D. CALCULATE TARGET (Did it Win?)
-    outcomes = []
     for idx, row in df.iterrows():
-        is_call = 'LONG' in row['signal_type'] or 'BULL' in row['signal_type']
-        
-        change = (row['exit_px'] - row['entry_px']) / row['entry_px']
-        
-        if is_call:
-            win = change > SUCCESS_THRESHOLD
-        else:
-            win = change < -SUCCESS_THRESHOLD
+        # 1. Find Contract
+        ticker = find_best_contract(con, row['timestamp_utc'], row['signal_type'], row['underlying_px'])
+        if not ticker: continue
             
-        outcomes.append(1 if win else 0)
+        # 2. Get Entry Price
+        entry_time_str = row['timestamp_utc'].strftime('%Y-%m-%d %H:%M:%S')
+        q_entry = f"SELECT close FROM {TBL_OPTIONS} WHERE ticker = '{ticker}' AND datetime_utc >= '{entry_time_str}' ORDER BY datetime_utc ASC LIMIT 1"
+        entry_px_res = con.execute(q_entry).fetchone()
+        if not entry_px_res: continue
+        entry_px = entry_px_res[0]
         
-    df['target'] = outcomes
+        # 3. Get Exit Price
+        exit_time = row['timestamp_utc'] + timedelta(minutes=TARGET_WINDOW_MINS)
+        exit_time_str = exit_time.strftime('%Y-%m-%d %H:%M:%S')
+        q_exit = f"SELECT close FROM {TBL_OPTIONS} WHERE ticker = '{ticker}' AND datetime_utc >= '{exit_time_str}' ORDER BY datetime_utc ASC LIMIT 1"
+        exit_px_res = con.execute(q_exit).fetchone()
+        if not exit_px_res: continue
+        exit_px = exit_px_res[0]
+        
+        # 4. Calculate ROI
+        roi = (exit_px - entry_px) / entry_px
+        
+        # 5. Build Feature Row
+        regime_map = {'TRENDING': 1, 'CHOP': 0, 'UNKNOWN': 0}
+        flow_map = {'BULL': 1, 'BEAR': -1, 'NEUTRAL': 0}
+        
+        valid_samples.append({
+            'vix_value': float(row['vix_value']),
+            'rsi_value': float(row['rsi_value']),
+            'regime_code': regime_map.get(row['market_regime'], 0),
+            'flow_code': flow_map.get(row['flow_bias'], 0),
+            'hour': row['timestamp_utc'].hour,
+            'dow': row['timestamp_utc'].weekday(),
+            'is_call': 1 if ('LONG' in row['signal_type'] or 'BULL' in row['signal_type']) else 0,
+            'target': 1 if roi > MIN_OPTION_ROI else 0
+        })
+
+    con.close()
     
-    # E. FEATURE ENGINEERING
-    regime_map = {'TRENDING': 1, 'CHOP': 0, 'UNKNOWN': 0}
-    flow_map = {'BULL': 1, 'BEAR': -1, 'NEUTRAL': 0}
+    if not valid_samples: return None, None
+        
+    df_train = pd.DataFrame(valid_samples)
+    X = df_train[['vix_value', 'rsi_value', 'regime_code', 'flow_code', 'hour', 'dow', 'is_call']]
+    y = df_train['target']
     
-    df['regime_code'] = df['market_regime'].map(regime_map).fillna(0)
-    df['flow_code'] = df['flow_bias'].map(flow_map).fillna(0)
-    df['hour'] = df['timestamp_utc'].dt.hour
-    df['dow'] = df['timestamp_utc'].dt.dayofweek
-    df['is_call'] = np.where(df['signal_type'].str.contains('LONG'), 1, 0)
-    
-    # Ensure numeric types
-    X = df[['vix_value', 'rsi_value', 'regime_code', 'flow_code', 'hour', 'dow', 'is_call']].copy()
-    X = X.apply(pd.to_numeric)
-    
-    y = df['target']
-    
-    log.info(f"📚 Dataset Compiled: {len(X)} samples. Win Rate in Data: {y.mean():.1%}")
+    log.info(f"💎 Precision Dataset: {len(X)} matches. Win Rate (Real Options): {y.mean():.1%}")
     return X, y
 
 # ==============================================================================
-# 3. MODEL TRAINING (The Education)
+# 4. TRAINING EXECUTION
 # ==============================================================================
-def train_oracle():
-    X, y = build_training_dataset()
+def train_precision_oracle():
+    X, y = build_precision_dataset()
     
-    # Threshold for training
-    if X is None or len(X) < 30:
-        log.warning(f"⚠️ Not enough data to train Oracle (Found {len(X) if X is not None else 0}, Need 30).")
+    if X is None or len(X) < 20:
+        log.warning("⚠️ Insufficient Options Data overlap.")
         return
 
-    log.info("🏋️ Training Random Forest (Oracle v2)...")
+    log.info("🚀 Training Precision Oracle (v3 - XSP Native)...")
     
-    # TimeSeries Split Validation
     tscv = TimeSeriesSplit(n_splits=3)
-    model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    model = RandomForestClassifier(n_estimators=150, max_depth=6, random_state=42)
     
     scores = []
-    fold = 1
     for train_index, test_index in tscv.split(X):
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-        
         if len(np.unique(y_train)) < 2: continue
-
         model.fit(X_train, y_train)
-        preds = model.predict(X_test)
-        acc = accuracy_score(y_test, preds)
-        
-        log.info(f"   Fold {fold}: Accuracy {acc:.2f}")
+        acc = accuracy_score(y_test, model.predict(X_test))
         scores.append(acc)
-        fold += 1
         
-    avg_score = np.mean(scores) if scores else 0.0
-    log.info(f"🏆 Oracle Certified. Average Validation Accuracy: {avg_score:.1%}")
+    avg = np.mean(scores) if scores else 0
+    log.info(f"🏆 PRECISION MODEL TRAINED. Validation Accuracy: {avg:.1%}")
     
-    # Final Training
     model.fit(X, y)
-    
     joblib.dump(model, MODEL_PATH)
     log.info(f"💾 Model Saved: {MODEL_PATH}")
 
 # ==============================================================================
-# 4. PREDICTION INTERFACE (The Glass)
+# 5. PREDICTION INTERFACE
 # ==============================================================================
 def predict_success(signal_type, vix_val, rsi_val, market_regime, flow_bias):
+    """
+    Returns: Probability of Success (0-100)
+    """
     if not MODEL_PATH.exists(): return 50.0
         
     try:
@@ -217,4 +238,4 @@ def predict_success(signal_type, vix_val, rsi_val, market_regime, flow_bias):
         return 50.0
 
 if __name__ == "__main__":
-    train_oracle()
+    train_precision_oracle()

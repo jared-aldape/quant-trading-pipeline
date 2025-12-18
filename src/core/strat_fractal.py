@@ -3,7 +3,9 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Path Constitution
+# ==============================================================================
+# 1. CONFIGURATION
+# ==============================================================================
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
@@ -11,10 +13,14 @@ from src.utils.logger import get_logger
 
 log = get_logger("FractalStrat")
 
+# ==============================================================================
+# 2. INDICATOR MATH (The Physics)
+# ==============================================================================
 def calculate_macd(df, close_col='close', fast=12, slow=26, signal=9):
     """
-    Calculates Standard MACD (12, 26, 9).
+    Calculates Standard MACD (12, 26, 9) & Histogram.
     """
+    if df.empty: return df
     df = df.copy()
     
     # 1. Fast & Slow EMAs
@@ -32,120 +38,98 @@ def calculate_macd(df, close_col='close', fast=12, slow=26, signal=9):
 
 def calculate_rsi(df, close_col='close', window=14):
     """
-    Calculates RSI (Relative Strength Index) using Wilder's Smoothing.
+    Calculates RSI (Relative Strength Index).
     """
+    if df.empty: return df
     df = df.copy()
+    
     delta = df[close_col].diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/window, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/window, adjust=False).mean()
     
-    # Separate gains and losses
-    gain = (delta.where(delta > 0, 0))
-    loss = (-delta.where(delta < 0, 0))
-    
-    # Wilder's Smoothing (Exponential Moving Average)
-    avg_gain = gain.ewm(com=window - 1, min_periods=window).mean()
-    avg_loss = loss.ewm(com=window - 1, min_periods=window).mean()
-    
-    rs = avg_gain / avg_loss
+    rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
-    
-    # Fill NaN initialization gaps with 50 (neutral) to prevent crashes
-    df['rsi'] = df['rsi'].fillna(50.0)
     
     return df
 
-def check_fractal_flow(vix_1h_df, vix_5m_df, ts_current, rsi_val):
+# ==============================================================================
+# 3. CORE STRATEGY LOGIC (The Decision)
+# ==============================================================================
+def apply_fractal_logic(vix_df, xsp_df):
     """
-    Determines Strategy Signal based on VIX Fractal alignment.
+    The Master Logic Function called by engine_scanner.py.
     
-    THEORY:
-    - VIX DOWN -> SPX UP (BULL/CALLS)
-    - VIX UP   -> SPX DOWN (BEAR/PUTS)
+    LOGIC:
+    - MACRO: VIX 1H Histogram (Trend)
+    - MICRO: VIX 5m Histogram (Entry)
+    - TRIGGER: When BOTH are Negative -> BULL FRACTAL (VIX Dying -> Stocks Fly)
+    - TRIGGER: When BOTH are Positive -> BEAR FRACTAL (VIX Spiking -> Stocks Die)
     """
+    if vix_df.empty or xsp_df.empty:
+        return pd.DataFrame()
+
+    # --- A. PREPARE MACRO (VIX 1H) ---
+    vix_1h = vix_df.set_index('datetime_utc').resample('1h').agg({'close': 'last'}).dropna().reset_index()
+    vix_1h = calculate_macd(vix_1h)
     
-    # --- TIMEZONE NORMALIZATION FIX ---
-    # Ensure ts_current matches the timezone of vix_1h_df.index
-    target_tz = vix_1h_df.index.tz
+    # --- B. PREPARE MICRO (VIX 5m) ---
+    vix_5m = vix_df.set_index('datetime_utc').resample('5m').agg({'close': 'last'}).dropna().reset_index()
+    vix_5m = calculate_macd(vix_5m)
+    vix_5m = calculate_rsi(vix_5m)
+
+    # --- C. ALIGNMENT (The Merge) ---
+    # We map VIX states to XSP candles using 'merge_asof' (Backward look)
+    # This prevents look-ahead bias. We only know the VIX state that *just happened*.
     
-    if ts_current.tzinfo is not None and target_tz is None:
-        # If current is Aware but index is Naive -> Make current Naive
-        ts_current = ts_current.tz_localize(None)
-    elif ts_current.tzinfo is None and target_tz is not None:
-        # If current is Naive but index is Aware -> Make current Aware (UTC assumed)
-        ts_current = ts_current.tz_localize('UTC')
+    df = xsp_df.sort_values('datetime_utc').copy()
+    vix_1h = vix_1h.sort_values('datetime_utc')
+    vix_5m = vix_5m.sort_values('datetime_utc')
+
+    # 1. Attach Macro State
+    df = pd.merge_asof(
+        df, 
+        vix_1h[['datetime_utc', 'hist']].rename(columns={'hist': 'macro_hist'}),
+        on='datetime_utc', 
+        direction='backward'
+    )
+
+    # 2. Attach Micro State
+    df = pd.merge_asof(
+        df, 
+        vix_5m[['datetime_utc', 'hist', 'rsi']].rename(columns={'hist': 'micro_hist', 'rsi': 'vix_rsi'}),
+        on='datetime_utc', 
+        direction='backward'
+    )
+
+    # --- D. SIGNAL GENERATION ---
+    # 1 = BULL FRACTAL (Call) | -1 = BEAR FRACTAL (Put) | 0 = NO SIGNAL
     
-    # 1. Align 1H Data (Macro View)
-    # We find the 1H candle that contains the current 5m timestamp
-    ts_1h_floor = ts_current.floor('1h')
-    
-    if ts_1h_floor not in vix_1h_df.index:
-        # Fallback: take the last known 1H candle if exact match missing
-        # searchsorted requires compatible timezones (which we fixed above)
-        idx = vix_1h_df.index.searchsorted(ts_current)
+    conditions = [
+        # SCENARIO A: VIX BREAKDOWN (Macro < 0 AND Micro < 0) -> BUY CALLS
+        # Guardrail: Don't short VIX if RSI < 30 (Oversold/Bounce Risk)
+        (df['macro_hist'] < 0) & (df['micro_hist'] < 0) & (df['vix_rsi'] > 30),
         
-        # Adjust index if it points beyond the end
-        if idx >= len(vix_1h_df):
-            idx = len(vix_1h_df) - 1
-            
-        if idx > 0:
-            row_1h = vix_1h_df.iloc[idx - 1]
-        else:
-            return {'signal_type': None, 'reason': 'No Macro Data'}
-    else:
-        row_1h = vix_1h_df.loc[ts_1h_floor]
-
-    # 2. Extract Metrics
-    vix_1h_hist = row_1h['hist']  # Macro Momentum
+        # SCENARIO B: VIX BREAKOUT (Macro > 0 AND Micro > 0) -> BUY PUTS
+        # Guardrail: Don't long VIX if RSI > 70 (Overbought/Cool-off Risk)
+        (df['macro_hist'] > 0) & (df['micro_hist'] > 0) & (df['vix_rsi'] < 70)
+    ]
     
-    # Get current 5m row
-    try:
-        # We need to look up using the same timezone logic
-        # If ts_current was modified above, it matches 1h index, 
-        # but 5m index might be different (though scanner usually aligns them).
-        # We try strict lookup first.
-        if ts_current in vix_5m_df.index:
-             row_5m = vix_5m_df.loc[ts_current]
-        else:
-            # Try naive version if exact match fails due to tz
-            ts_naive = ts_current.tz_localize(None) if ts_current.tzinfo else ts_current
-            if ts_naive in vix_5m_df.index:
-                 row_5m = vix_5m_df.loc[ts_naive]
-            else:
-                 # Last resort: nearest
-                 idx_5m = vix_5m_df.index.searchsorted(ts_current)
-                 if idx_5m >= len(vix_5m_df): idx_5m = len(vix_5m_df) - 1
-                 row_5m = vix_5m_df.iloc[idx_5m]
-
-        vix_5m_hist = row_5m['hist'] # Micro Momentum
-    except KeyError:
-        return {'signal_type': None, 'reason': 'No Micro Data'}
-
-    # 3. Signal Logic
+    choices = [1, -1] # 1=Call, -1=Put
     
-    # --- SCENARIO A: VIX BREAKDOWN (SPX CALLS) ---
-    # VIX 1H is cooling off AND VIX 5m is cooling off
-    if vix_1h_hist < 0 and vix_5m_hist < 0:
-        
-        # RSI Guardrail: Don't short VIX if it's already on the floor (Mean Reversion Risk)
-        if rsi_val < 20.0:
-            return {'signal_type': None, 'reason': 'VIX_OVERSOLD_RISK'}
-            
-        return {
-            'signal_type': 'BULL_FRACTAL', # Implies SPX CALL
-            'reason': f"VIX_COOLING (1H:{vix_1h_hist:.2f}, 5m:{vix_5m_hist:.2f})"
-        }
-
-    # --- SCENARIO B: VIX BREAKOUT (SPX PUTS) ---
-    # VIX 1H is heating up AND VIX 5m is heating up
-    elif vix_1h_hist > 0 and vix_5m_hist > 0:
-        
-        # RSI Guardrail: Don't long VIX if it's hitting the roof (Mean Reversion Risk)
-        if rsi_val > 80.0:
-            return {'signal_type': None, 'reason': 'VIX_OVERBOUGHT_RISK'}
-            
-        return {
-            'signal_type': 'BEAR_FRACTAL', # Implies SPX PUT
-            'reason': f"VIX_HEATING (1H:{vix_1h_hist:.2f}, 5m:{vix_5m_hist:.2f})"
-        }
-
-    # --- NEUTRAL / CONFLICT ---
-    return {'signal_type': None, 'reason': 'FRACTAL_CONFLICT'}
+    df['raw_signal'] = np.select(conditions, choices, default=0)
+    
+    # --- E. CHANGE DETECTION (Pivot Points Only) ---
+    # We only want the *moment* the regime flips, not every candle inside the trend.
+    df['prev_signal'] = df['raw_signal'].shift(1)
+    
+    # Filter: Current is Signal (1/-1) AND Previous was different
+    # This captures the entry point.
+    signals = df[
+        (df['raw_signal'] != 0) & 
+        (df['raw_signal'] != df['prev_signal'])
+    ].copy()
+    
+    # Formatting for Scanner
+    signals.rename(columns={'raw_signal': 'signal'}, inplace=True)
+    
+    return signals[['datetime_utc', 'close', 'signal', 'macro_hist', 'micro_hist', 'vix_rsi']]

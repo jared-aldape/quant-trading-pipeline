@@ -45,11 +45,11 @@ def render():
                         dcc.Dropdown(
                             id='gen-profile',
                             options=[
-                                {'label': '🦁 LIVE LEDGER (Robinhood)', 'value': 'LIVE_RH'},
-                                {'label': '🎮 MANUAL SIMULATOR', 'value': 'MANUAL_SIM'},
-                                {'label': '🤖 ALGO SIGNALS (ALL)', 'value': 'ALGO_SIGNALS'},
-                                {'label': '🐂 ALGO SIGNALS (CALLS ONLY)', 'value': 'ALL_CALL'},
-                                {'label': '🐻 ALGO SIGNALS (PUTS ONLY)', 'value': 'ALL_PUT'}
+                                {'label': 'GIL LEDGER (Robinhood)', 'value': 'LIVE_RH'},
+                                {'label': 'TRAINING GROUNDS', 'value': 'MANUAL_SIM'},
+                                {'label': 'OPTIMIZED SIGNALS (ALL)', 'value': 'ALGO_SIGNALS'},
+                                {'label': 'CALLS ONLY', 'value': 'ALL_CALL'},
+                                {'label': 'PUTS ONLY', 'value': 'ALL_PUT'}
                             ],
                             value='ALGO_SIGNALS',
                             clearable=False,

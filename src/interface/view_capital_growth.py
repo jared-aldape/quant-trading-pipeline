@@ -16,6 +16,7 @@ ROOT_DIR = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
 from src.core import engine_forensics as forensics
+from src.utils import config
 
 # ==============================================================================
 # 1. CORE LOGIC
@@ -26,9 +27,14 @@ def get_business_days(start_date, days_forward=252):
     rng = pd.date_range(start=start_date, periods=days_forward, freq=us_bd)
     return rng
 
-def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, history_df=None):
-    """Generates the projection DataFrame with Fail-Safe Merging."""
-    days = 252 
+def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, target_goal=None, history_df=None):
+    """
+    Generates projection with 'Stop at Goal' logic and 'Low Balance' safety.
+    """
+    # ⚡ SAFETY: Handle low/zero balance
+    if start_bal is None or start_bal <= 0: start_bal = 100.0
+    
+    days = 252 * 2 # Cap at 2 years max calculation
     daily_rate = daily_rate_pct / 100.0
     tax_rate = tax_rate_pct / 100.0
     
@@ -36,6 +42,7 @@ def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, hi
     
     data = []
     current_bal = start_bal
+    goal_reached = False
     
     # 1. Build Base Target Projection
     for i, d in enumerate(dates):
@@ -52,23 +59,28 @@ def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, hi
             'BeginBal': current_bal,
             'TargetGain': gain,
             'ProjectedBal': end_bal,
-            'TaxLiability': tax_liability,
+            'TaxLiability': max(0, tax_liability), # No negative tax
             'TakeHome': start_bal + net_profit
         }
         data.append(row)
         current_bal = end_bal 
+        
+        # ⚡ STOP AT GOAL LOGIC
+        if target_goal and end_bal >= target_goal:
+            goal_reached = True
+            break
         
     df = pd.DataFrame(data)
     df['Date'] = pd.to_datetime(df['Date'])
     
     # Pre-Initialize Columns
     df['ActualBal'] = np.nan
-    df['Variance'] = np.nan
+    df['Variance'] = 0.0
     
     # 2. Merge Actual History (If Exists)
     if history_df is not None and not history_df.empty:
         try:
-            # Normalize Dates
+            # Normalize
             history_df['Date'] = pd.to_datetime(history_df['entry_time']).dt.normalize()
             
             # Aggregate Daily PnL
@@ -89,13 +101,16 @@ def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, hi
                     df['ActualBal'] = df['ActualBal_Calc'].combine_first(df['ActualBal'])
                     df = df.drop(columns=['ActualBal_Calc'])
                 
-                # Calculate Variance
-                df['Variance'] = df['ActualBal'] - df['ProjectedBal']
+                # Forward Fill Actuals for gap days
+                df['ActualBal'] = df['ActualBal'].ffill()
+                
+                # Calculate Variance (Only where Actual exists)
+                df['Variance'] = np.where(df['ActualBal'].notnull(), df['ActualBal'] - df['ProjectedBal'], 0.0)
                 
         except Exception as e:
             print(f"Projection Merge Error: {e}")
             
-    return df
+    return df, goal_reached
 
 # ==============================================================================
 # 2. LAYOUT
@@ -103,10 +118,10 @@ def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, hi
 def render():
     return dbc.Container([
         
-        # --- TITLE ROW (ATB SCOPE STYLE) ---
+        # --- TITLE ROW ---
         dbc.Row([
             dbc.Col([
-                html.H2("LEVEL UP", className="magitek-h2"),
+                html.H2("CAPITAL LAB COMMAND", className="magitek-h2"),
                 html.P("COMPOUND GROWTH | TAX SIMULATOR | REALITY CHECK", className="magitek-note")
             ], width=8),
             
@@ -114,7 +129,7 @@ def render():
                 html.Div("SYSTEM STATUS: ONLINE", className="text-end text-success font-monospace fw-bold"),
                 html.Div("MODE: PROJECTION", className="text-end text-warning font-monospace")
             ], width=4, className="align-self-center")
-        ], className="mb-4 p-3 card flex-row align-items-center", style={"border": "2px solid #b5b8b9"}),
+        ], className="mb-4 p-3 card flex-row align-items-center", style={"border": "2px solid #b5b8b9", "backgroundColor": "#283878", "color": "#f3f5f9"}),
 
         # CONTROLS & KPIs
         dbc.Row([
@@ -127,11 +142,11 @@ def render():
                         dbc.Row([
                             dbc.Col([
                                 html.Label("START CAPITAL ($)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-start', type='number', value=2000, step=100, className="mb-2")
+                                dbc.Input(id='cap-start', type='number', value=2000, step=100, className="mb-2", style={"fontFamily": "monospace"})
                             ], width=6),
                             dbc.Col([
                                 html.Label("TARGET GOAL ($)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-goal', type='number', value=100000, step=1000, className="mb-2")
+                                dbc.Input(id='cap-goal', type='number', value=25000, step=1000, className="mb-2", style={"fontFamily": "monospace"})
                             ], width=6),
                         ], className="mb-3"),
                         
@@ -139,11 +154,11 @@ def render():
                         dbc.Row([
                             dbc.Col([
                                 html.Label("DAILY TARGET (%)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-rate', type='number', value=2.0, step=0.1, className="mb-2")
+                                dbc.Input(id='cap-rate', type='number', value=2.0, step=0.1, className="mb-2", style={"fontFamily": "monospace"})
                             ], width=6),
                             dbc.Col([
                                 html.Label("TAX RATE (%)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-tax', type='number', value=30.0, step=1.0, className="mb-2")
+                                dbc.Input(id='cap-tax', type='number', value=30.0, step=1.0, className="mb-2", style={"fontFamily": "monospace"})
                             ], width=6),
                         ], className="mb-3"),
                         
@@ -154,7 +169,8 @@ def render():
                                 dcc.DatePickerSingle(
                                     id='cap-date',
                                     date=date.today() - timedelta(days=30), 
-                                    className="d-block"
+                                    className="d-block",
+                                    style={"fontFamily": "monospace"}
                                 )
                             ], width=12),
                         ], className="mb-3"),
@@ -167,14 +183,15 @@ def render():
                             id='cap-source',
                             options=[
                                 {'label': 'NONE (Pure Sim)', 'value': 'none'},
-                                {'label': 'GIL LEDGER (Robinhood)', 'value': 'rh'},
-                                {'label': 'SAVE CRYSTAL', 'value': 'gen'},
-                                {'label': 'TRAINING GROUNDS', 'value': 'manual'},
+                                {'label': '🦁 LIVE LEDGER (Robinhood)', 'value': 'rh'},
+                                {'label': '⚡ DATA GENERATOR', 'value': 'gen'},
+                                {'label': '🎮 MANUAL SIMULATOR', 'value': 'manual'},
                                 {'label': '📡 RAW SIGNAL HISTORY', 'value': 'sig'}
                             ],
                             value='none',
                             clearable=False,
-                            className="mb-3"
+                            className="mb-3",
+                            style={"fontFamily": "monospace"}
                         ),
                         
                         # DIRECTION FILTER
@@ -193,7 +210,7 @@ def render():
 
                         dbc.Button("CALCULATE TRAJECTORY", id='cap-btn', color="primary", className="w-100 mt-4 fw-bold font-monospace")
                     ])
-                ], className="shadow h-100")
+                ], className="shadow h-100", style={"backgroundColor": "#101830", "border": "1px solid #444"})
             ], width=4),
 
             # KPI OUTPUTS
@@ -203,7 +220,7 @@ def render():
                 dbc.Card([
                     dbc.CardHeader("GROWTH TRAJECTORY", className="card-header text-center"),
                     dbc.CardBody(dcc.Graph(id='cap-growth-chart', style={'height': '380px'}, config={'displayModeBar': False}))
-                ], className="shadow h-100")
+                ], className="shadow h-100", style={"backgroundColor": "#101830", "border": "1px solid #444"})
             ], width=8)
         ], className="mb-4"),
 
@@ -234,7 +251,8 @@ def render():
      State('cap-direction', 'value')]
 )
 def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_date, source, direction):
-    if not start_bal: start_bal = 0
+    # ⚡ LOW BALANCE FIX: Ensure start_bal is valid
+    if start_bal is None or start_bal <= 0: start_bal = 100.0
     if not target_goal: target_goal = start_bal * 2
     
     # 1. Fetch History
@@ -248,26 +266,28 @@ def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_
             if direction != 'ALL':
                 history_df = history_df[history_df['ticker'].str.contains(direction, na=False)]
 
-    # 2. Calculate Projection
-    df = calculate_projection(start_bal, daily_rate, tax_rate, start_date, history_df)
+    # 2. Calculate Projection (Stop at Goal Enabled)
+    df, goal_reached = calculate_projection(start_bal, daily_rate, tax_rate, start_date, target_goal, history_df)
     
     if df.empty:
-        return [], go.Figure(), html.Div("Calculation Error")
+        return [], go.Figure(), html.Div("Calculation Error", className="text-danger")
 
     # 3. Goal Math
     days_to_goal_str = "∞"
     goal_date_str = "Never"
-    if daily_rate > 0 and target_goal > start_bal:
+    
+    # If already reached, get actual date
+    if goal_reached:
+        days_to_goal_str = f"{len(df)} Days"
+        goal_date_str = df.iloc[-1]['Date'].strftime('%b %d, %Y')
+    elif daily_rate > 0 and target_goal > start_bal:
+        # Theoretical calculation if not reached in window
         rate_dec = daily_rate / 100.0
         try:
             t_days = math.log(target_goal / start_bal) / math.log(1 + rate_dec)
             t_days_int = int(np.ceil(t_days))
-            us_bd = CustomBusinessDay(calendar=USFederalHolidayCalendar())
-            goal_dt = pd.Timestamp(start_date) + (t_days_int * us_bd)
             days_to_goal_str = f"{t_days_int} Days"
-            goal_date_str = goal_dt.strftime('%b %d, %Y')
-        except:
-            pass
+        except: pass
 
     # 4. KPIs
     end_bal = df.iloc[-1]['ProjectedBal']
@@ -275,21 +295,40 @@ def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_
     take_home = df.iloc[-1]['TakeHome']
     
     kpis = [
-        dbc.Col(dbc.Card([html.H6("PROJECTED EOY"), html.H3(f"${end_bal:,.0f}", className="text-info")], body=True, color="dark", inverse=True)),
-        dbc.Col(dbc.Card([html.H6("TIME TO GOAL"), html.H3(days_to_goal_str, className="text-success"), html.Small(goal_date_str, className="text-muted")], body=True, color="dark", inverse=True)),
-        dbc.Col(dbc.Card([html.H6("EST. TAXES"), html.H3(f"${tax_bill:,.0f}", className="text-danger")], body=True, color="dark", inverse=True)),
-        dbc.Col(dbc.Card([html.H6("NET TAKE HOME"), html.H3(f"${take_home:,.0f}", className="text-warning")], body=True, color="dark", inverse=True)),
+        dbc.Col(dbc.Card([html.H6("PROJECTED END", className="font-monospace"), html.H3(f"${end_bal:,.0f}", className="text-info font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
+        dbc.Col(dbc.Card([html.H6("GOAL REACHED", className="font-monospace"), html.H3(days_to_goal_str, className="text-success font-monospace"), html.Small(goal_date_str, className="text-muted font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
+        dbc.Col(dbc.Card([html.H6("EST. TAXES", className="font-monospace"), html.H3(f"${tax_bill:,.0f}", className="text-danger font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
+        dbc.Col(dbc.Card([html.H6("NET TAKE HOME", className="font-monospace"), html.H3(f"${take_home:,.0f}", className="text-warning font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
     ]
 
-    # 5. Chart
+    # 5. Chart (With Milestones & Drawdown Sim)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df['Date'], y=df['ProjectedBal'], mode='lines', name='Target Path', line=dict(color='#00bc8c', width=2, dash='dash')))
-    fig.add_hline(y=target_goal, line_dash="dot", line_color="#00ff41", annotation_text="GOAL", annotation_position="top right")
+    
+    # Target Path
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['ProjectedBal'], mode='lines', name='Target Path', line=dict(color='#00bc8c', width=3)))
+    
+    # Drawdown Simulation (Risk Path - 50% of Target)
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['ProjectedBal'] * 0.5, mode='lines', name='Risk Path (-50%)', line=dict(color='#e74c3c', width=1, dash='dot'), opacity=0.5))
+
+    # Actuals
     if 'ActualBal' in df.columns and not df['ActualBal'].isna().all():
-        fig.add_trace(go.Scatter(x=df['Date'], y=df['ActualBal'], mode='lines+markers', name=f'Actual ({direction})', line=dict(color='#f39c12', width=3)))
-    elif source != 'none' and (history_df is None or history_df.empty):
-         fig.add_annotation(text="No Matching Data", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(color="red", size=20))
-    fig.update_layout(title="Capital Trajectory", template="plotly_dark", margin=dict(l=40, r=40, t=40, b=40), legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"), yaxis_tickprefix="$")
+        fig.add_trace(go.Scatter(x=df['Date'], y=df['ActualBal'], mode='lines+markers', name=f'Actual ({direction})', line=dict(color='#fde722', width=3)))
+    
+    # Milestones
+    if target_goal >= 25000:
+        fig.add_hline(y=25000, line_dash="dash", line_color="cyan", annotation_text="PDT ($25k)", annotation_position="bottom right")
+    
+    fig.add_hline(y=target_goal, line_dash="solid", line_color="#00ff41", annotation_text="GOAL", annotation_position="top right")
+
+    fig.update_layout(
+        template="plotly_dark", 
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)', 
+        margin=dict(l=40, r=40, t=40, b=40), 
+        legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"), 
+        yaxis_tickprefix="$",
+        font=dict(family="'VT323', monospace", size=14, color="#f3f5f9")
+    )
 
     # 6. Table
     df_view = df.copy()
@@ -312,16 +351,8 @@ def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_
         style_header=header_style,
         style_cell=cell_style,
         style_data_conditional=[
-            # 1. Base Rules (Green for positive Money)
             {'if': {'filter_query': '{Variance} contains "$"', 'column_id': 'Variance'}, 'color': '#00ff41'}, 
-            {'if': {'filter_query': '{TargetGain} contains "$"', 'column_id': 'TargetGain'}, 'color': '#00ff41'}, 
-            {'if': {'filter_query': '{TakeHome} contains "$"', 'column_id': 'TakeHome'}, 'color': '#00ff41'}, 
-
-            # 2. OVERRIDE Rules (Red for Negatives)
             {'if': {'filter_query': '{Variance} contains "-"', 'column_id': 'Variance'}, 'color': '#ff5555'}, 
-            {'if': {'filter_query': '{TargetGain} contains "-"', 'column_id': 'TargetGain'}, 'color': '#ff5555'},
-            {'if': {'filter_query': '{TakeHome} contains "-"', 'column_id': 'TakeHome'}, 'color': '#ff5555'},
-            {'if': {'filter_query': '{ActualBal} contains "-"', 'column_id': 'ActualBal'}, 'color': '#ff5555'},
         ],
         page_size=10, style_table={'overflowX': 'auto'}
     )

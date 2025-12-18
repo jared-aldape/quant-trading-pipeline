@@ -1,0 +1,436 @@
+================================================================================
+MAGITEK MASTER SYSTEM REPORT
+GENERATED: 2025-12-17 17:12:41
+================================================================================
+
+PART 1: FILE SYSTEM STRUCTURE
+------------------------------
+.gitignore
+.ingest_cooldown
+Dockerfile
+Master Forensic Auditor.py
+assets\interface.css
+assets\magitek.css
+assets\quant_logo.svg
+data\backups\quant_strategy_20251206_212109.duckdb
+data\backups\quant_strategy_20251207_020236.duckdb
+data\backups\quant_strategy_20251208_161430.duckdb
+data\backups\quant_strategy_BACKUP_20251208_002514.duckdb
+data\backups\quant_strategy_BACKUP_20251212_003929.duckdb
+data\backups\quant_strategy_BACKUP_20251212_004135.duckdb
+data\backups\quant_strategy_BACKUP_20251212_004358.duckdb
+data\backups\quant_strategy_BACKUP_20251212_031531.duckdb
+data\debug_ytd_extract.csv
+data\full_options_dump.csv
+data\live_snapshot.json
+data\model_fractal.pkl
+data\oracle_v1.joblib
+data\oracle_v2.joblib
+data\oracle_v3_analysis.html
+data\oracle_v3_precision.joblib
+data\quant_strategy.duckdb
+data\rh-options.html
+data\rh_options_export.csv
+data\sim_session.json
+data\strat_params.json
+debug_ticker_link.py
+debug_vault.py
+docker-compose.yml
+logs\.gitkeep
+logs\gui.log
+logs\night_ops.log
+logs\pipeline.log
+logs\system.log
+main_pipeline.py
+ops\99_init_repository.py
+ops\99_mobile_setup.sh
+ops\backfill_history.py
+ops\backup_vault.py
+ops\calibrate_vix.py
+ops\check_manifest_schema.py
+ops\debug_fractal.py
+ops\deep_probe.py
+ops\diagnose_call_gap.py
+ops\diagnose_missed_trades.py
+ops\diagnostic_audit.py
+ops\export_audit.py
+ops\export_full_db.py
+ops\fix_vix_ingest.py
+ops\generate_snapshot.py
+ops\ingest_bulk_history.py
+ops\ingest_bulk_indices_polygon.py
+ops\ingest_hybrid_indices.py
+ops\ingest_vix_hybrid_upload.py
+ops\night_ops.py
+ops\repair_ledger.py
+ops\repair_options_schema.py
+ops\repair_sim_log.py
+ops\reset_signals.py
+ops\restore_vault.py
+ops\scan_full_history.py
+ops\seed_report.py
+ops\upgrade_stats_schema.py
+ops\vault_sanitizer.py
+ops\verify_integrity.py
+ops\verify_vault_integrity.py
+quant-key.pem
+quant_launcher.py
+readme.md
+reports\master_system_report.txt
+requirements.txt
+run_quant_os.bat
+src\analysis\audit_model_features.py
+src\core\engine_backtest.py
+src\core\engine_bulk_history.py
+src\core\engine_chop_guard.py
+src\core\engine_confirmation.py
+src\core\engine_expected_value.py
+src\core\engine_forecast.py
+src\core\engine_forensics.py
+src\core\engine_greeks.py
+src\core\engine_ingestion.py
+src\core\engine_macro_flow.py
+src\core\engine_macro_scanner.py
+src\core\engine_ml.py
+src\core\engine_ml_precision.py
+src\core\engine_optimizer.py
+src\core\engine_scanner.py
+src\core\engine_simulator.py
+src\core\sentinel.py
+src\core\strat_fractal.py
+src\core\train_scheduler.py
+src\data\db_schema.py
+src\data\export_spx_flow.py
+src\data\hydrate_simulator.py
+src\data\ingest_daily_update.py
+src\data\ingest_indices.py
+src\data\ingest_macro.py
+src\data\ingest_options_daily.py
+src\data\ingest_rh_html.py
+src\data\ingest_user_history.py
+src\data\inspect_ledger.py
+src\data\inspect_schema.py
+src\data\probe_options_data.py
+src\interface\view_audit.py
+src\interface\view_capital_growth.py
+src\interface\view_chart_analysis.py
+src\interface\view_data_generator.py
+src\interface\view_live_scope.py
+src\interface\view_options_sim.py
+src\interface\view_replay_analysis.py
+src\interface\view_rh_ledger.py
+src\interface\view_rh_mirror.py
+src\interface\view_statistics.py
+src\interface\view_system_info.py
+src\utils\audit_vault.py
+src\utils\clean_manifest.py
+src\utils\config.py
+src\utils\date_profiles.py
+src\utils\inspect_manifest.py
+src\utils\logger.py
+src\utils\reset_indices.py
+src\utils\reset_manifest.py
+src\utils\test_engine_direct.py
+
+PART 2: DATABASE SCHEMA & METRICS
+------------------------------
+Source: quant_strategy.duckdb
+
+[TABLE: active_rh_log]
+Rows: 830
+Columns:
+  - source_id            (VARCHAR)
+  - entry_time_utc       (TIMESTAMP)
+  - action               (VARCHAR)
+  - root                 (VARCHAR)
+  - strike               (DOUBLE)
+  - option_right         (VARCHAR)
+  - expiry_date          (DATE)
+  - quantity             (DOUBLE)
+  - fill_price           (DOUBLE)
+  - net_pnl              (DOUBLE)
+  - fees                 (DOUBLE)
+  - status               (VARCHAR)
+  - opra_code            (VARCHAR)
+
+[TABLE: active_simulation_log]
+Rows: 20
+Columns:
+  - entry_time           (TIMESTAMP)
+  - exit_time            (TIMESTAMP)
+  - ticker               (VARCHAR)
+  - entry_price          (DOUBLE)
+  - exit_price           (DOUBLE)
+  - quantity             (INTEGER)
+  - net_pnl              (DOUBLE)
+  - return_pct           (DOUBLE)
+  - reason               (VARCHAR)
+  - status               (VARCHAR)
+  - notes                (VARCHAR)
+  - meta_data            (VARCHAR)
+
+[TABLE: active_simulation_log_backup]
+Rows: 1,278
+Columns:
+  - entry_time           (TIMESTAMP)
+  - source_id            (VARCHAR)
+  - ticker               (VARCHAR)
+  - action               (VARCHAR)
+  - quantity             (DOUBLE)
+  - price                (DOUBLE)
+  - net_cashflow         (DOUBLE)
+  - status               (VARCHAR)
+  - reason               (VARCHAR)
+
+[TABLE: futures_1m]
+Rows: 13,954
+Columns:
+  - datetime_utc         (TIMESTAMP)
+  - ticker               (VARCHAR)
+  - open                 (DOUBLE)
+  - high                 (DOUBLE)
+  - low                  (DOUBLE)
+  - close                (DOUBLE)
+  - volume               (DOUBLE)
+
+[TABLE: indices_1m]
+Rows: 507,496
+Columns:
+  - datetime_utc         (TIMESTAMP)
+  - open                 (DOUBLE)
+  - high                 (DOUBLE)
+  - low                  (DOUBLE)
+  - close                (DOUBLE)
+  - volume               (DOUBLE)
+  - ticker               (VARCHAR)
+
+[TABLE: live_trade_ledger]
+Rows: 2
+Columns:
+  - trans_id             (VARCHAR)
+  - timestamp            (TIMESTAMP)
+  - ticker               (VARCHAR)
+  - action               (VARCHAR)
+  - qty                  (DOUBLE)
+  - price                (DOUBLE)
+  - fees                 (DOUBLE)
+  - amount               (DOUBLE)
+  - balance_snapshot     (DOUBLE)
+  - strategy_tag         (VARCHAR)
+  - notes                (VARCHAR)
+
+[TABLE: macro_events]
+Rows: 7
+Columns:
+  - date                 (DATE)
+  - event_type           (VARCHAR)
+  - impact_score         (INTEGER)
+
+[TABLE: macro_flow_state]
+Rows: 187
+Columns:
+  - date                 (DATE)
+  - flow_bias            (VARCHAR)
+  - bull_pct             (DOUBLE)
+  - bear_pct             (DOUBLE)
+
+[TABLE: options_1m]
+Rows: 1,071,685
+Columns:
+  - datetime_utc         (TIMESTAMP)
+  - ticker               (VARCHAR)
+  - expiration           (DATE)
+  - strike               (DOUBLE)
+  - type                 (VARCHAR)
+  - open                 (DOUBLE)
+  - high                 (DOUBLE)
+  - low                  (DOUBLE)
+  - close                (DOUBLE)
+  - volume               (DOUBLE)
+  - iv                   (DOUBLE)
+  - delta                (DOUBLE)
+  - gamma                (DOUBLE)
+  - vega                 (DOUBLE)
+  - theta                (DOUBLE)
+  - underlying_price     (DOUBLE)
+  - risk_free_rate       (DOUBLE)
+
+[TABLE: risk_free_rate_daily]
+Rows: 8
+Columns:
+  - date                 (DATE)
+  - ticker               (VARCHAR)
+  - rate                 (DOUBLE)
+
+[TABLE: signal_history_log]
+Rows: 0
+Columns:
+  - timestamp_utc        (TIMESTAMP)
+  - ticker               (VARCHAR)
+  - signal_type          (VARCHAR)
+  - vix_value            (DOUBLE)
+  - rsi_value            (DOUBLE)
+  - market_regime        (VARCHAR)
+  - flow_bias            (VARCHAR)
+  - meta_data            (VARCHAR)
+
+[TABLE: trade_manifest]
+Rows: 480
+Columns:
+  - entry_timestamp_utc  (BIGINT)
+  - date                 (DATE)
+  - signal_type          (VARCHAR)
+  - xsp_price            (DOUBLE)
+  - trade_type           (VARCHAR)
+  - meta_data            (VARCHAR)
+  - allocation_pct       (DOUBLE)
+
+PART 3: ACTIVE SIM SESSION
+------------------------------
+{
+    "balance": 1950.9310000515595,
+    "liquid_cash": 1950.9310000515595,
+    "positions": [],
+    "trades": [
+        {
+            "exit_time": "2025-12-13 01:06:34",
+            "ticker": "XSP Call 684",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 2.671265398937635,
+            "price": 2.712918166020188,
+            "pnl": 4.1652767082553055,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-13 01:06:36",
+            "ticker": "XSP Call 685",
+            "action": "SELL",
+            "qty": 8,
+            "entry_px": 2.0642099175079807,
+            "price": 2.3257237879118122,
+            "pnl": 209.21109632306525,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-14 13:28:00",
+            "ticker": "XSP Call 682",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 0.047970586322890085,
+            "price": 0.047970586322890085,
+            "pnl": 0.0,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-14 13:28:02",
+            "ticker": "XSP Put 682",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 0.28772041573381557,
+            "price": 0.28772041573381557,
+            "pnl": 0.0,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-16 07:22:16",
+            "ticker": "XSP Call 680",
+            "action": "BUY CALL",
+            "qty": 1,
+            "entry_px": 0,
+            "price": 2.4381264027782095,
+            "pnl": 0.0,
+            "reason": "OPEN"
+        },
+        {
+            "exit_time": "2025-12-16 07:22:31",
+            "ticker": "XSP Call 680",
+            "action": "BUY CALL",
+            "qty": 1,
+            "entry_px": 0,
+            "price": 2.4371965357963177,
+            "pnl": 0.0,
+            "reason": "OPEN"
+        },
+        {
+            "exit_time": "2025-12-17 10:07:25",
+            "ticker": "XSP Call 680",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 2.4381264027782095,
+            "price": 0.38390468862726834,
+            "pnl": -205.4221714150941,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-17 10:07:27",
+            "ticker": "XSP Call 680",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 2.4371965357963177,
+            "price": 0.3837933980729815,
+            "pnl": -205.34031377233362,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-17 10:07:38",
+            "ticker": "XSP Call 676",
+            "action": "BUY CALL",
+            "qty": 1,
+            "entry_px": 0,
+            "price": 1.36146178777949,
+            "pnl": 0.0,
+            "reason": "OPEN"
+        },
+        {
+            "exit_time": "2025-12-17 10:08:01",
+            "ticker": "XSP Put 676",
+            "action": "BUY PUT",
+            "qty": 1,
+            "entry_px": 0,
+            "price": 2.6934271754044516,
+            "pnl": 0.0,
+            "reason": "OPEN"
+        },
+        {
+            "exit_time": "2025-12-17 12:48:25",
+            "ticker": "XSP Call 676",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 1.36146178777949,
+            "price": 2.7293107683772178,
+            "pnl": 136.7848980597728,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-17 12:48:27",
+            "ticker": "XSP Put 676",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 2.6934271754044516,
+            "price": 2.8293493168833947,
+            "pnl": 13.59221414789431,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-17 12:59:21",
+            "ticker": "XSP 675C",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 0.01,
+            "price": 0.01,
+            "pnl": -1.0300000000000002,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-17 12:59:22",
+            "ticker": "XSP 673P",
+            "action": "SELL",
+            "qty": 1,
+            "entry_px": 0.01,
+            "price": 0.01,
+            "pnl": -1.0300000000000002,
+            "reason": "MANUAL"
+        }
+    ]
+}

@@ -9,6 +9,7 @@ from datetime import datetime, time, timedelta
 import pytz
 import pathlib
 import sys
+import time as t_time
 import numpy as np
 
 # ==============================================================================
@@ -385,7 +386,7 @@ def render():
             ], width=4)
         ], className="mb-3"),
 
-        # CHART (No Loading Spinner)
+        # CHART (ModeBar Restored)
         dbc.Row([dbc.Col([dcc.Graph(id='chart-main-display', style={'height': '900px'}, config={'displayModeBar': True})], width=12)])
     ], fluid=True)
 
@@ -471,17 +472,17 @@ def update_chart(entry_ts, ticker, stop_pct, mode):
             fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['upper_band'], line=dict(color='cyan', width=1), name="+2σ"), row=1, col=1)
             fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['lower_band'], line=dict(color='cyan', width=1), name="-2σ"), row=1, col=1)
             
-            # Ghost Lines Row 2
-            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['reg_line'], line=dict(color='yellow', width=1, dash='dot'), showlegend=False), row=2, col=1, secondary_y=False)
-            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['upper_band'], line=dict(color='cyan', width=1), showlegend=False), row=2, col=1, secondary_y=False)
-            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['lower_band'], line=dict(color='cyan', width=1), showlegend=False), row=2, col=1, secondary_y=False)
+            # ⚡ GHOST LINES ON ROW 2 - MOVED TO SECONDARY AXIS + HOVER SKIP
+            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['reg_line'], line=dict(color='yellow', width=1, dash='dot'), showlegend=False, hoverinfo='skip'), row=2, col=1, secondary_y=True)
+            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['upper_band'], line=dict(color='cyan', width=1), showlegend=False, hoverinfo='skip'), row=2, col=1, secondary_y=True)
+            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['lower_band'], line=dict(color='cyan', width=1), showlegend=False, hoverinfo='skip'), row=2, col=1, secondary_y=True)
 
         if orb_h and orb_l:
             fig.add_hline(y=orb_h, line_dash="solid", line_color="green", opacity=0.5, row=1, col=1)
             fig.add_hline(y=orb_l, line_dash="solid", line_color="red", opacity=0.5, row=1, col=1)
-            # Ghost ORB Row 2
-            fig.add_hline(y=orb_h, line_dash="solid", line_color="green", opacity=0.3, row=2, col=1)
-            fig.add_hline(y=orb_l, line_dash="solid", line_color="red", opacity=0.3, row=2, col=1)
+            # Ghost ORB Row 2 (On Secondary Axis)
+            fig.add_hline(y=orb_h, line_dash="solid", line_color="green", opacity=0.3, row=2, col=1, secondary_y=True)
+            fig.add_hline(y=orb_l, line_dash="solid", line_color="red", opacity=0.3, row=2, col=1, secondary_y=True)
 
         has_data = True
 
@@ -492,7 +493,7 @@ def update_chart(entry_ts, ticker, stop_pct, mode):
     if opt_df is not None and not opt_df.empty:
         has_data = True
         
-        # ⚡ OPTION CANDLES
+        # ⚡ OPTION CANDLES (Primary Axis - Dollars)
         fig.add_trace(go.Candlestick(
             x=opt_df['datetime_local'],
             open=opt_df['open'], high=opt_df['high'],
@@ -501,10 +502,10 @@ def update_chart(entry_ts, ticker, stop_pct, mode):
             hoverlabel=dict(bgcolor="#1e1e1e", font=dict(color="white", family="monospace"))
         ), row=2, col=1, secondary_y=False)
         
-        # Sim Line
+        # Sim Line (Primary Axis)
         fig.add_trace(go.Scatter(x=opt_df['datetime_local'], y=opt_df['sim_pnl_pct'], name="Sim Stop", line=dict(color='yellow', width=2, dash='dot')), row=2, col=1, secondary_y=False)
         
-        # Thin White Line (Matching Replay)
+        # Thin White Price Line (Secondary Axis - Index Scale)
         fig.add_trace(go.Scatter(x=opt_df['datetime_local'], y=opt_df['open'], name="Price", line=dict(color='white', width=1)), row=2, col=1, secondary_y=True)
         
         if not fills.empty:
@@ -525,11 +526,12 @@ def update_chart(entry_ts, ticker, stop_pct, mode):
         empty_fig.add_annotation(text="DATA UNAVAILABLE", showarrow=False, font=dict(size=20, color="red"))
         return empty_fig, "NO DATA", ""
         
-    # ⚡ ZOOM LOCKED
+    # ⚡ ZOOM LOCKED & STATE RESET
     fig.update_xaxes(matches='x', range=[day_start, day_end], type='date', fixedrange=True)
     fig.update_yaxes(fixedrange=True)
     
     fig.update_layout(
+        uirevision=entry_ts, # ⚡ CRITICAL FIX: Resets View State on New Signal
         template="plotly_dark", 
         paper_bgcolor='rgba(0,0,0,0)', 
         plot_bgcolor='rgba(0,0,0,0)', 

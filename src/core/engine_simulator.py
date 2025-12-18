@@ -32,203 +32,177 @@ DEFAULT_SESSION = {
 }
 
 # ⚡ CACHE: Pre-seeded with a fallback price to prevent startup crashes
-_MARKET_CACHE = {"price": 680.0, "vix": 0.15, "irx": 0.045, "last_update": 0}
+_MARKET_CACHE = {"price": 580.0, "vix": 0.15, "irx": 0.045, "last_update": 0}
 MARKET_CACHE_DURATION = 15 # Seconds to wait between Yahoo calls
 
 # ==============================================================================
 # 2. SESSION MANAGEMENT
 # ==============================================================================
 def load_session():
-    """Loads session safely. Creates one if missing."""
     if not SESSION_FILE.exists():
         save_session(DEFAULT_SESSION)
         return DEFAULT_SESSION
     try:
         with open(SESSION_FILE, 'r') as f:
             session = json.load(f)
-            # Merge defaults in case of new fields
-            for k, v in DEFAULT_SESSION.items():
-                if k not in session: session[k] = v
+            session = process_expiration(session)
             return session
-    except:
+    except Exception as e:
+        log.error(f"Session Corrupt: {e}")
         return DEFAULT_SESSION
 
 def save_session(session):
-    try:
-        with open(SESSION_FILE, 'w') as f:
-            json.dump(session, f, indent=4)
-    except Exception as e:
-        log.error(f"Session Save Error: {e}")
+    with open(SESSION_FILE, 'w') as f:
+        json.dump(session, f, indent=4)
+
+def process_expiration(session):
+    """Enforces 0DTE Logic: Expire worthless if past 16:00 ET."""
+    now_ny = datetime.now(config.TZ_NY)
+    market_close = now_ny.replace(hour=16, minute=0, second=0, microsecond=0)
+    
+    if now_ny > market_close and len(session['positions']) > 0:
+        log.info("MARKET CLOSED. EXPIRING POSITIONS.")
+        for pos in session['positions']:
+            log_entry = {
+                "exit_time": now_ny.strftime("%Y-%m-%d %H:%M:%S"),
+                "ticker": pos['ticker'],
+                "action": "EXPIRED",
+                "qty": pos['contracts'],
+                "entry_px": pos['entry_px'],
+                "price": 0.00,
+                "pnl": -(pos['cost_basis']),
+                "reason": "0DTE_CLOSE"
+            }
+            session['trades'].append(log_entry)
+        session['positions'] = []
+        session['balance'] = session['liquid_cash'] 
+        save_session(session)
+    return session
 
 def reset_session():
     save_session(DEFAULT_SESSION)
-    log.info("Session Reset")
-
-def is_rth():
-    """Checks if current time is within Regular Trading Hours (09:30 - 16:00 ET)."""
-    tz_ny = pytz.timezone('America/New_York')
-    now = datetime.now(tz_ny)
-    
-    if now.weekday() >= 5: return False
-    
-    current_time = now.time()
-    market_open = time(9, 30)
-    market_close = time(16, 0)
-    
-    return market_open <= current_time < market_close
+    return "DECK RESET. GOOD LUCK."
 
 # ==============================================================================
-# 3. MARKET DATA (FAULT TOLERANT)
+# 3. MARKET DATA ENGINE (GREEKS)
 # ==============================================================================
-def get_live_price(ticker="SPY"):
-    """
-    Fetches price with 'Cooldown on Failure' to stop log spam.
-    """
+def get_live_price():
     global _MARKET_CACHE
-    
-    # 1. Check Cache
-    if time_lib.time() - _MARKET_CACHE['last_update'] < MARKET_CACHE_DURATION:
-        return _MARKET_CACHE['price']
+    now = time_lib.time()
+    if now - _MARKET_CACHE['last_update'] < MARKET_CACHE_DURATION: return _MARKET_CACHE['price']
 
     try:
-        # 2. Attempt Fetch
-        price = yf.Ticker("SPY").fast_info.last_price
-        
-        # Sanity Check (SPY should be > 100)
-        if price < 100: 
-             spx = yf.Ticker("^GSPC").fast_info.last_price
-             price = spx / 10.0
-
-        if price and price > 0:
+        ticker = yf.Ticker("^XSP")
+        hist = ticker.history(period="1d", interval="1m")
+        if not hist.empty:
+            price = hist['Close'].iloc[-1]
             _MARKET_CACHE['price'] = price
-            _MARKET_CACHE['last_update'] = time_lib.time()
+            _MARKET_CACHE['last_update'] = now
             return price
-            
-    except Exception as e:
-        log.warning(f"Price Fetch Fail ({e}). Using Cache.")
         
-    # 3. CRITICAL: Update timestamp even on failure. 
-    # This forces the system to wait 15s before trying again, stopping the loop.
-    _MARKET_CACHE['last_update'] = time_lib.time()
+        spy = yf.Ticker("SPY").history(period="1d", interval="1m")
+        if not spy.empty:
+            price = spy['Close'].iloc[-1] * 10
+            _MARKET_CACHE['price'] = price
+            _MARKET_CACHE['last_update'] = now
+            return price
+    except Exception as e: log.error(f"Price Fetch Fail: {e}")
     return _MARKET_CACHE['price']
 
-def get_market_context():
-    global _MARKET_CACHE
+def get_market_context(): return 0.045, 0.15 # r, sigma
+
+def black_scholes(S, K, T, r, sigma, option_type="call"):
     try:
-        # Update rarely (every 60s)
-        if time_lib.time() - _MARKET_CACHE.get('ctx_update', 0) > 60:
-            vix = yf.Ticker("^VIX").fast_info.last_price
-            irx = yf.Ticker("^IRX").fast_info.last_price
-            if vix: _MARKET_CACHE['vix'] = vix / 100.0
-            if irx: _MARKET_CACHE['irx'] = irx / 100.0
-            _MARKET_CACHE['ctx_update'] = time_lib.time()
-            
-        return _MARKET_CACHE['irx'], _MARKET_CACHE['vix']
-    except:
-        return 0.045, 0.15
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        if option_type == "call": price = (S * norm.cdf(d1, 0.0, 1.0) - K * np.exp(-r * T) * norm.cdf(d2, 0.0, 1.0))
+        else: price = (K * np.exp(-r * T) * norm.cdf(-d2, 0.0, 1.0) - S * norm.cdf(-d1, 0.0, 1.0))
+        return max(0.01, price)
+    except: return 0.01
 
 def get_time_to_close():
-    ny_tz = pytz.timezone('America/New_York')
-    now = datetime.now(ny_tz)
+    now = datetime.now(config.TZ_NY)
     close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-    
-    if now >= close: return 0.00001
-    
-    minutes_left = (close - now).total_seconds() / 60.0
-    return minutes_left / (252 * 390) 
+    if now >= close: return 0.0001
+    return (close - now).total_seconds() / (365 * 24 * 3600)
 
-def black_scholes(S, K, T, r, sigma, type='Call'):
-    if T <= 0: return max(0, S - K) if type == 'Call' else max(0, K - S)
-    
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    
-    if type == 'Call' or type == 'CALL':
-        price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-    else:
-        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+# ==============================================================================
+# 4. TRADING LOGIC
+# ==============================================================================
+def generate_strikes(current_price, trade_type="CALL"):
+    center = round(current_price)
+    strikes = []
+    for k in range(center - 15, center + 16):
+        is_itm = (k < current_price) if trade_type == "CALL" else (k > current_price)
+        diff = abs(current_price - k)
         
-    return max(0.01, price)
+        # Calculate theoretical price for display
+        T = get_time_to_close()
+        r, sigma = get_market_context()
+        theo_price = black_scholes(current_price, k, T, r, sigma, trade_type.lower())
+        
+        label = f"${k} (ATM) - ${theo_price:.2f}" if diff < 0.5 else \
+                f"${k} (ITM) - ${theo_price:.2f}" if is_itm else \
+                f"${k} (OTM) - ${theo_price:.2f}"
+                
+        strikes.append({"label": label, "value": k})
+    return strikes
 
-# ==============================================================================
-# 4. EXECUTION LOGIC
-# ==============================================================================
-def preview_entry(qty, limit_px=None, offset=0):
-    price = get_live_price()
-    r, sigma = get_market_context()
-    T = get_time_to_close()
-    
-    offset = int(offset) if offset else 0
-    atm_strike = round(price) + offset
-    opt_price = black_scholes(price, atm_strike, T, r, sigma, 'Call')
-    
-    if limit_px and limit_px < opt_price: opt_price = limit_px 
-    
-    total = opt_price * 100 * qty
-    return {'total_cost': total, 'est_fill': opt_price, 'strike_desc': f"{atm_strike}"}
-
-def execute_entry(action, qty, order_type='MARKET', offset=0):
-    if not is_rth(): return "MARKET CLOSED (RTH ONLY)"
-
+def execute_trade(strike, contracts, trade_type, order_type="MARKET", limit_price=0.0):
     session = load_session()
+    now_ny = datetime.now(config.TZ_NY)
+    if now_ny.time() >= time(16, 0): return "MARKET CLOSED"
+    
     price = get_live_price()
     r, sigma = get_market_context()
     T = get_time_to_close()
     
-    offset = int(offset) if offset else 0
-    atm_strike = round(price) + offset
-    opt_type = 'Call' if action == 'CALL' else 'Put'
+    # 1. Quote Real Cost
+    cost_per_share = black_scholes(price, strike, T, r, sigma, trade_type.lower())
     
-    opt_price = black_scholes(price, atm_strike, T, r, sigma, opt_type)
-    cost = opt_price * 100 * qty
+    # 2. Limit Check
+    if order_type == "LIMIT":
+        # Buying: Limit must be >= Ask (We assume Ask ~ Last for Sim)
+        if limit_price < cost_per_share:
+            return f"LIMIT NOT MET (Ask: ${cost_per_share:.2f})"
     
-    if session['liquid_cash'] < cost: 
-        return f"INSUFFICIENT FUNDS (Need ${cost:.2f})"
+    # Fill at Market Price (simulating instant fill)
+    fill_price = cost_per_share
     
-    session['liquid_cash'] -= cost
-    entry_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cost_basis = fill_price * 100 * contracts
+    fees = (contracts * 0.03) + (contracts * 1.00)
+    total_cost = cost_basis + fees
     
+    if session['liquid_cash'] < total_cost: return "INSUFFICIENT FUNDS"
+    
+    session['liquid_cash'] -= total_cost
     new_pos = {
-        "id": f"SIM_{int(time_lib.time()*1000)}",
-        "entry_time": entry_ts,
-        "type": opt_type,
-        "strike": atm_strike,
-        "contracts": qty,
-        "entry_px": opt_price,
-        "ticker": f"XSP {opt_type} {atm_strike}",
-        "cost_basis": cost
+        "id": int(time_lib.time() * 1000),
+        "entry_time": datetime.now().strftime("%H:%M:%S"),
+        "ticker": f"XSP {strike}{trade_type[0]}",
+        "strike": strike,
+        "type": trade_type.lower(),
+        "contracts": contracts,
+        "entry_px": fill_price,
+        "cost_basis": total_cost,
+        "current_val": cost_basis
     }
-    
-    # ⚡ RECORD BUY TRANSACTION
-    buy_log = {
-        "exit_time": entry_ts,
-        "ticker": new_pos['ticker'],
-        "action": f"BUY {action}",
-        "qty": qty,
-        "entry_px": 0, 
-        "price": opt_price,
-        "pnl": 0.0,
-        "reason": "OPEN"
-    }
-    
-    session['trades'].append(buy_log)
     session['positions'].append(new_pos)
     save_session(session)
-    return f"BOUGHT {qty}x {opt_type} @ ${opt_price:.2f}"
+    return "ORDER FILLED"
 
-def execute_exit(trade_id):
-    if not is_rth(): return "MARKET CLOSED"
-    return close_position(trade_id)
-
-def close_position(trade_id):
+def close_position(pos_id):
     session = load_session()
     pos_idx = -1
+    pos = None
     for i, p in enumerate(session['positions']):
-        if p['id'] == trade_id: pos_idx = i; break
+        if p['id'] == pos_id:
+            pos_idx = i
+            pos = p
+            break
+            
+    if not pos: return "POSITION NOT FOUND"
     
-    if pos_idx == -1: return "ERR: POS NOT FOUND"
-    
-    pos = session['positions'][pos_idx]
     price = get_live_price()
     r, sigma = get_market_context()
     T = get_time_to_close()
@@ -238,7 +212,6 @@ def close_position(trade_id):
     
     session['liquid_cash'] += credit
     session['balance'] = session['liquid_cash'] 
-    
     pnl = credit - pos['cost_basis']
     
     log_entry = {
@@ -254,27 +227,34 @@ def close_position(trade_id):
     session['trades'].append(log_entry)
     session['positions'].pop(pos_idx)
     save_session(session)
-    return f"SOLD @ ${exit_px:.2f} (PnL: ${pnl:.2f})"
+    return f"SOLD @ ${exit_px:.2f}"
 
 def get_portfolio_stats():
-    # Load session even if price fails
     session = load_session()
-    
-    # Try price
     price = get_live_price()
     r, sigma = get_market_context()
     T = get_time_to_close()
     
-    mkt_val = 0.0
+    equity_val = 0.0
     for p in session['positions']:
-        curr = black_scholes(price, p['strike'], T, r, sigma, p['type'])
-        mkt_val += curr * 100 * p['contracts']
+        mark = black_scholes(price, p['strike'], T, r, sigma, p['type'])
+        val = mark * 100 * p['contracts']
+        p['current_val'] = val
+        equity_val += val
         
-    equity = session['liquid_cash'] + mkt_val
+    total_liquidity = session['liquid_cash'] + equity_val
     
     return {
-        "balance": equity,
-        "liquid": session['liquid_cash'],
-        "open_pnl": mkt_val - sum([p['cost_basis'] for p in session['positions']]),
-        "open_equity": equity
+        "balance": total_liquidity,
+        "cash": session['liquid_cash'],
+        "equity": equity_val,
+        "day_pnl": total_liquidity - 2000.0,
+        "positions": session['positions'],
+        "price": price
     }
+
+def fetch_recent_transactions():
+    session = load_session()
+    df = pd.DataFrame(session['trades'])
+    if df.empty: return []
+    return df.sort_values("exit_time", ascending=False).head(50).to_dict('records')
