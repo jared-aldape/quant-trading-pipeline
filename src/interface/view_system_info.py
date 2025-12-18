@@ -110,9 +110,20 @@ def get_system_log_tail():
 # 2. LAYOUT
 # ==============================================================================
 def render():
-    readme_path = ROOT_DIR / "README.md"
-    readme_content = readme_path.read_text(encoding='utf-8') if readme_path.exists() else "README.md not found."
+    # ⚡ ROBUST README LOADER (Case-Insensitive Check)
+    # Linux is case-sensitive, Windows is not. We check all variations.
+    possible_names = ["README.md", "readme.md", "Readme.md", "README.txt"]
+    readme_content = f"README not found in {ROOT_DIR}"
     
+    for name in possible_names:
+        temp_path = ROOT_DIR / name
+        if temp_path.exists():
+            try:
+                readme_content = temp_path.read_text(encoding='utf-8')
+                break # Stop searching once found
+            except Exception as e:
+                readme_content = f"Error reading {name}: {e}"
+
     return dbc.Container([
         
         # --- HEADER ---
