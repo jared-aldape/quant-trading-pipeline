@@ -3,6 +3,9 @@ import time
 from pathlib import Path
 from datetime import datetime, timedelta
 
+# ==============================================================================
+# 1. PATH CONSTITUTION
+# ==============================================================================
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(ROOT_DIR))
 
@@ -36,23 +39,26 @@ def run_pipeline():
     # ---------------------------------------------------------
     try:
         log.info("--- [2/5] Harvesting Option Chains ---")
-        # Soft-Fail: If Polygon 403s, we just log it and move on.
+        # Ingests T-1 data for Oracle validation
         ingest_options.run_daily_harvest()
     except Exception as e:
-        log.warning(f"⚠️ Step 2 Skipped (Option Data): {e}")
+        log.error(f"❌ Step 2 Failed (Option Harvest): {e}")
 
     # ---------------------------------------------------------
-    # STEP 3: SCANNER (The Eyes)
+    # STEP 3: SCANNING (The Signals)
     # ---------------------------------------------------------
     try:
         log.info("--- [3/5] Scanning for Fractal Signals ---")
-        engine_scanner.scan_and_generate_manifest()
+        
+        # [FIXED] Aligned with Magitek v3.4 Unified Standard
+        # Consolidates legacy 'scan_and_generate_manifest' into unified run loop
+        engine_scanner.run_scanner()
+        
     except Exception as e:
         log.error(f"❌ Step 3 Failed (Scanner): {e}")
-        return
 
     # ---------------------------------------------------------
-    # STEP 4: NEURAL TRAINING (The Brain)
+    # STEP 4: ORACLE TRAINING (The Brain)
     # ---------------------------------------------------------
     try:
         log.info("--- [4/5] Retraining AI Oracles ---")
@@ -68,7 +74,7 @@ def run_pipeline():
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=30)
         
-        # Check for function name compatibility
+        # ADAPTIVE LOGIC: Handles version shifts in backtest engine
         if hasattr(engine_backtest, 'run_simulation'):
             engine_backtest.run_simulation(
                 start_date=start_date, end_date=end_date,
@@ -80,13 +86,13 @@ def run_pipeline():
                 initial_balance=10000, profile='Standard'
             )
         else:
-            log.error("❌ Could not find 'run_simulation' or 'run_backtest' in engine_backtest.")
+            log.error("❌ Could not find execution attribute in engine_backtest.")
             
     except Exception as e:
         log.error(f"❌ Step 5 Failed (Backtest): {e}")
 
     elapsed = time.time() - start_time
-    log.info(f"✅ PIPELINE COMPLETE. Duration: {elapsed/60:.1f} min")
+    log.info(f"✅ PIPELINE COMPLETE in {elapsed:.2f}s")
 
 if __name__ == "__main__":
     run_pipeline()

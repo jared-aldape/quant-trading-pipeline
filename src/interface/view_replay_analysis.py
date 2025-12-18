@@ -24,10 +24,12 @@ from src.utils import config
 # ==============================================================================
 def to_wall_clock(series):
     if series.empty: return series
+    # Ensure UTC awareness first
     if series.dt.tz is None:
         series = series.dt.tz_localize('UTC')
     else:
         series = series.dt.tz_convert('UTC')
+    # Convert to Local (PST)
     series = series.dt.tz_convert(config.TZ_LOCAL)
     return series.dt.tz_localize(None)
 
@@ -158,7 +160,7 @@ def fetch_available_strikes_for_replay(entry_ts, trade_type):
         return [], None
 
 # ==============================================================================
-# 3. DATA LOADING (The "Tape")
+# 3. DATA LOADING (OPTIMIZED FOR AWS)
 # ==============================================================================
 def load_replay_tape(entry_ts, ticker_override=None):
     try:
@@ -175,7 +177,7 @@ def load_replay_tape(entry_ts, ticker_override=None):
         # Indices
         df_idx = con.execute(f"SELECT datetime_utc, ticker, open, high, low, close FROM {config.TBL_INDICES} WHERE ticker IN ('VIX', 'XSP') AND datetime_utc >= '{s_str}' AND datetime_utc <= '{e_str}' ORDER BY datetime_utc ASC").df()
         
-        # Futures (Fixed SQL)
+        # Futures
         tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
         tbl_fut = getattr(config, 'TBL_FUTURES', 'futures_1m')
         if tbl_fut in tables:
@@ -201,7 +203,7 @@ def load_replay_tape(entry_ts, ticker_override=None):
             
         con.close()
         
-        # Process
+        # Process XSP
         xsp = pd.DataFrame()
         if not df_idx.empty and 'XSP' in df_idx['ticker'].values:
             xsp = df_idx[df_idx['ticker'] == 'XSP'].copy()
@@ -209,7 +211,12 @@ def load_replay_tape(entry_ts, ticker_override=None):
             xsp = xsp.sort_values('datetime_local')
             xsp['sma_50'] = xsp['close'].rolling(50).mean()
             xsp = calculate_linreg(xsp)
+            # OPTIMIZATION: Round floats to reduce JSON size
+            cols_to_round = ['open', 'high', 'low', 'close', 'sma_50', 'reg_line', 'upper_band', 'lower_band']
+            for c in cols_to_round:
+                if c in xsp.columns: xsp[c] = xsp[c].round(2)
 
+        # Process VIX
         vix = pd.DataFrame()
         if not df_idx.empty and 'VIX' in df_idx['ticker'].values:
             vix = df_idx[df_idx['ticker'] == 'VIX'].copy()
@@ -225,14 +232,20 @@ def load_replay_tape(entry_ts, ticker_override=None):
             down = -1 * delta.clip(upper=0)
             rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
             vix['rsi'] = 100 - (100 / (1 + rs))
+            # OPTIMIZATION: Round VIX metrics
+            for c in ['close', 'macd', 'signal', 'hist', 'rsi']:
+                if c in vix.columns: vix[c] = vix[c].round(3)
 
+        # Process ES
         es = pd.DataFrame()
         if not df_fut.empty:
             es = df_fut.copy()
             es['datetime_local'] = to_wall_clock(pd.to_datetime(es['datetime_utc']))
             es = es.sort_values('datetime_local')
             es['scaled_close'] = es['close'] / 10.0
+            es['scaled_close'] = es['scaled_close'].round(2)
 
+        # Process Options
         opt = pd.DataFrame()
         entry_price = 0
         max_gain = 0.0
@@ -245,7 +258,7 @@ def load_replay_tape(entry_ts, ticker_override=None):
             try:
                 idx = opt['datetime_local'].sub(entry_dt_wc).abs().idxmin()
                 entry_price = opt.loc[idx, 'open']
-                # Calculate Max Gain for day from entry
+                # Calculate Max Gain
                 post_entry = opt.loc[idx:]
                 max_price = post_entry['open'].max() if not post_entry.empty else entry_price
                 if entry_price > 0.05:
@@ -255,6 +268,10 @@ def load_replay_tape(entry_ts, ticker_override=None):
                 
             entry_price_safe = entry_price if entry_price > 0.05 else 9999.9
             opt['pnl_pct'] = ((opt['open'] - entry_price) / entry_price_safe) * 100
+            
+            # OPTIMIZATION: Round Option Data
+            for c in ['open', 'high', 'low', 'close', 'pnl_pct']:
+                if c in opt.columns: opt[c] = opt[c].round(2)
 
         if xsp.empty: return None
         
@@ -265,8 +282,8 @@ def load_replay_tape(entry_ts, ticker_override=None):
             'opt': opt.to_dict('records'),
             'entry_ts': entry_ts,
             'ticker': ticker,
-            'entry_price': entry_price,
-            'max_gain': max_gain
+            'entry_price': round(entry_price, 2),
+            'max_gain': round(max_gain, 1)
         }
         return packet
 
@@ -306,7 +323,7 @@ def render():
             ], width=4, className="align-self-center")
         ], className="mb-4 p-3 card flex-row align-items-center", style={"border": "2px solid #b5b8b9", "backgroundColor": "#283878", "color": "#f3f5f9"}),
 
-        # CONTROLS DECK (3 Cols)
+        # CONTROLS DECK
         dbc.Card([
             dbc.CardBody([
                 dbc.Row([
@@ -376,7 +393,7 @@ def render():
             ])
         ], className="mb-3 shadow-sm"),
 
-        # CHART (Removed dcc.Loading to fix blinking)
+        # CHART
         dbc.Row([dbc.Col([dcc.Graph(id='replay-chart', style={'height': '900px'}, config={'displayModeBar': True})], width=12)]),
 
         # HIDDEN STORES
@@ -417,7 +434,7 @@ def update_strike_options(entry_ts, mode):
     options, atm_ticker = fetch_available_strikes_for_replay(entry_ts, mode)
     return options, atm_ticker
 
-# B. Load Tape (Now Responsive to Strike)
+# B. Load Tape
 @callback(
     [Output('replay-tape-store', 'data'),
      Output('timeline-slider', 'max'),
@@ -428,7 +445,6 @@ def update_strike_options(entry_ts, mode):
 )
 def load_tape(entry_ts, ticker):
     if not entry_ts: return no_update, 390, 0, True
-    # If ticker is None, it defaults to ATM inside the function
     packet = load_replay_tape(entry_ts, ticker)
     if not packet: return None, 390, 0, True
     max_steps = len(packet['xsp']) - 1
@@ -451,13 +467,17 @@ def control_playback(play, pause, reset, speed, is_disabled):
     if not ctx.triggered: return no_update, no_update, no_update
     trig_id = ctx.triggered[0]['prop_id'].split('.')[0]
     
-    if trig_id == 'btn-play': return False, speed, no_update
-    elif trig_id == 'btn-pause': return True, speed, no_update
-    elif trig_id == 'btn-reset': return True, speed, 0
-    elif trig_id == 'speed-selector': return no_update, speed, no_update
+    # Cast speed to int to be safe
+    speed_ms = int(speed) if speed else 200
+
+    if trig_id == 'btn-play': return False, speed_ms, no_update
+    elif trig_id == 'btn-pause': return True, speed_ms, no_update
+    elif trig_id == 'btn-reset': return True, speed_ms, 0
+    elif trig_id == 'speed-selector': return no_update, speed_ms, no_update
+    
     return no_update, no_update, no_update
 
-# D. Render Frame (The Vault Engine)
+# D. Render Frame
 @callback(
     [Output('replay-chart', 'figure'),
      Output('clock-display', 'children'),
@@ -475,12 +495,17 @@ def render_frame(n, slider_val, show_signal, packet):
     ctx = dash.callback_context
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     
-    current_idx = slider_val
-    if trigger == 'replay-interval': current_idx += 1
+    # Ensure slider_val is int
+    current_idx = int(slider_val) if slider_val is not None else 0
     
-    # Init empty returns
+    # Increment only if the interval caused the update
+    if trigger == 'replay-interval': 
+        current_idx += 1
+    
+    # Initialize empty figure
     empty_fig = go.Figure()
     empty_fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+    
     if not packet: return empty_fig, "--:--", "Frame: 0", 0, True, ""
 
     xsp_data = packet['xsp']
@@ -495,30 +520,31 @@ def render_frame(n, slider_val, show_signal, packet):
     # ⚡ STOP LOGIC
     max_len = len(xsp_data) - 1
     should_disable = False
+    
     if current_idx >= max_len: 
         current_idx = max_len
         should_disable = True
     
-    # Use no_update if not stopping to avoid interfering with Play button logic
+    # Only update disabled state if we hit the end, otherwise no_update
     disable_output = True if should_disable else no_update
 
-    # Slice XSP (Always Visible)
+    # Slice XSP
     xsp_slice = pd.DataFrame(xsp_data[:current_idx+1])
     if xsp_slice.empty: return empty_fig, "09:30", "Frame: 0", 0, True, ""
     
     curr_time_str = pd.to_datetime(xsp_slice.iloc[-1]['datetime_local']).strftime('%H:%M')
     curr_dt_wc = pd.to_datetime(xsp_slice.iloc[-1]['datetime_local'])
     
-    # Calculate Day Range for Zoom Lock
     day_start = pd.to_datetime(xsp_data[0]['datetime_local']).replace(hour=6, minute=30, second=0)
     day_end = day_start.replace(hour=13, minute=0, second=0)
 
+    # Slice Others
     vix_slice = pd.DataFrame(vix_data)
     if not vix_slice.empty: vix_slice = vix_slice[pd.to_datetime(vix_slice['datetime_local']) <= curr_dt_wc]
+    
     es_slice = pd.DataFrame(es_data)
     if not es_slice.empty: es_slice = es_slice[pd.to_datetime(es_slice['datetime_local']) <= curr_dt_wc]
     
-    # Option Data (Subject to Blind Mode)
     opt_slice = pd.DataFrame(opt_data)
     if not opt_slice.empty: opt_slice = opt_slice[pd.to_datetime(opt_slice['datetime_local']) <= curr_dt_wc]
 
@@ -531,18 +557,16 @@ def render_frame(n, slider_val, show_signal, packet):
         subplot_titles=("CONTEXT: XSP + LinReg + ORB", f"STRATEGY: {ticker}", "VIX FRACTAL FLOW", "VIX RSI")
     )
 
-    # 1. XSP CONTEXT (Row 1)
+    # 1. XSP CONTEXT
     fig.add_trace(go.Candlestick(x=xsp_slice['datetime_local'], open=xsp_slice['open'], high=xsp_slice['high'], low=xsp_slice['low'], close=xsp_slice['close'], name="XSP"), row=1, col=1)
     if 'sma_50' in xsp_slice.columns:
         fig.add_trace(go.Scatter(x=xsp_slice['datetime_local'], y=xsp_slice['sma_50'], name="SMA 50", line=dict(color='orange', width=1)), row=1, col=1)
     
-    # Overlays
     if 'reg_line' in xsp_slice.columns:
         fig.add_trace(go.Scatter(x=xsp_slice['datetime_local'], y=xsp_slice['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Mean"), row=1, col=1)
         fig.add_trace(go.Scatter(x=xsp_slice['datetime_local'], y=xsp_slice['upper_band'], line=dict(color='cyan', width=1), name="+2σ"), row=1, col=1)
         fig.add_trace(go.Scatter(x=xsp_slice['datetime_local'], y=xsp_slice['lower_band'], line=dict(color='cyan', width=1), name="-2σ"), row=1, col=1)
 
-    # ORB Logic (Static for the day)
     orb_end = day_start + timedelta(minutes=30)
     if curr_dt_wc > orb_end:
         orb_df = pd.DataFrame(xsp_data)
@@ -557,21 +581,19 @@ def render_frame(n, slider_val, show_signal, packet):
     if not es_slice.empty:
         fig.add_trace(go.Scatter(x=es_slice['datetime_local'], y=es_slice['scaled_close'], name="/ES", line=dict(color='#00d2ff', width=1, dash='dot')), row=1, col=1)
 
-    # 2. STRATEGY (Row 2) - BLIND MODE PROTECTED
+    # 2. STRATEGY (BLIND MODE)
     entry_wc = datetime.fromtimestamp(entry_ts / 1000, tz=pytz.utc).astimezone(config.TZ_LOCAL).replace(tzinfo=None)
     reveal_strategy = (show_signal and "show" in show_signal) and (curr_dt_wc >= entry_wc)
     
     combat_report = ""
     
     if reveal_strategy:
-        # Show Metrics
         combat_report = html.Div([
             html.Div(f"ENTRY: ${entry_price:.2f}", className="text-white fw-bold"),
             html.Div(f"POTENTIAL: +{max_gain:.1f}%", className="text-success fw-bold")
         ])
         
         if not opt_slice.empty:
-            # ⚡ FORENSIC CANDLES (Dark Hover)
             fig.add_trace(go.Candlestick(
                 x=opt_slice['datetime_local'],
                 open=opt_slice['open'], high=opt_slice['high'],
@@ -579,15 +601,11 @@ def render_frame(n, slider_val, show_signal, packet):
                 name="Option",
             ), row=2, col=1, secondary_y=False)
             
-            # Price Line
             fig.add_trace(go.Scatter(x=opt_slice['datetime_local'], y=opt_slice['open'], name="Price", line=dict(color='white', width=1.5)), row=2, col=1, secondary_y=True)
-            
-            # Signal Marker
             fig.add_vline(x=entry_wc, line_width=1, line_dash="dash", line_color="lime")
             fig.add_annotation(x=entry_wc, y=1.0, yref="paper", text="SIGNAL", showarrow=False, font=dict(color="lime", size=10), bgcolor="rgba(0,0,0,0.5)")
     
     elif not reveal_strategy:
-        # Placeholder text
         fig.add_annotation(x=day_start + timedelta(hours=3), y=0.5, yref="y2", text="STRATEGY HIDDEN (WAIT FOR SIGNAL)", showarrow=False, font=dict(color="gray", size=20))
 
     # 3. MACD
@@ -595,13 +613,11 @@ def render_frame(n, slider_val, show_signal, packet):
         fig.add_trace(go.Bar(x=vix_slice['datetime_local'], y=vix_slice['hist'], name="Macro", marker_color='rgba(255, 255, 255, 0.2)'), row=3, col=1)
         fig.add_trace(go.Scatter(x=vix_slice['datetime_local'], y=vix_slice['macd'], name="Micro", line=dict(color='#f1c40f', width=1)), row=3, col=1)
         
-        # 4. RSI (Spline)
+        # 4. RSI
         fig.add_trace(go.Scatter(x=vix_slice['datetime_local'], y=vix_slice['rsi'], name="RSI", line=dict(color='#a855f7', width=1.5, shape='spline')), row=4, col=1)
         fig.add_hline(y=70, line_dash="dot", line_color="#e74c3c", row=4, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="#00bc8c", row=4, col=1)
-        fig.add_hrect(y0=30, y1=70, fillcolor="gray", opacity=0.1, layer="below", line_width=0, row=4, col=1)
 
-    # ⚡ ZOOM LOCKED & DARK HOVER
     fig.update_xaxes(matches='x', range=[day_start, day_end], type='date', fixedrange=True)
     fig.update_yaxes(fixedrange=True)
     

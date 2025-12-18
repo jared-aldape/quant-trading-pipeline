@@ -50,8 +50,8 @@ def get_market_status():
     Standardized Status Logic (Matches Training Grounds).
     Returns: HTML Status, Info String, Is_Active Boolean
     """
-    tz_ny = pytz.timezone('America/New_York')
-    now_ny = datetime.now(tz_ny)
+    # Use config.TZ_NY for market logic to be safe
+    now_ny = datetime.now(config.TZ_NY)
     today_str = now_ny.strftime("%Y-%m-%d")
     current_time = now_ny.time()
     
@@ -86,6 +86,7 @@ def get_market_status():
 
     info_line = ""
     if is_active_hours:
+        # Convert close to user local time for display if desired, keeping ET for standard
         close_str = market_close.strftime("%H:%M")
         info_line = f"SESSION: 09:30 - {close_str} ET"
     else:
@@ -108,12 +109,26 @@ def get_market_status():
 # 2. DATA ENGINE
 # ==============================================================================
 def filter_to_rth(df):
-    """Clips dataframe to 09:30 - 16:00 ET."""
+    """
+    Strict RTH Clip: 09:30 - 16:00 ET.
+    Ensures charts don't show pre/post market noise.
+    """
     if df is None or df.empty: return df
-    ny_times = df['Datetime'].dt.tz_localize(config.TZ_LOCAL).dt.tz_convert('America/New_York')
+    
+    # Ensure Datetime is timezone-aware before converting
+    if df['Datetime'].dt.tz is None:
+         # Fallback assumption: Data in snapshot is UTC if naive
+         df['Datetime'] = df['Datetime'].dt.tz_localize('UTC')
+    
+    # Convert to NY for filtering rules
+    ny_times = df['Datetime'].dt.tz_convert(config.TZ_NY)
+    
     start_time = time(9, 30)
     end_time = time(16, 0)
+    
+    # Create Mask
     mask = (ny_times.dt.time >= start_time) & (ny_times.dt.time <= end_time)
+    
     return df[mask].copy()
 
 def load_snapshot():
@@ -126,25 +141,29 @@ def load_snapshot():
         xsp = pd.DataFrame(data['xsp'])
         vix = pd.DataFrame(data['vix'])
         
-        # Parse Freshness from JSON (The "Last Updated" Proof)
+        # Parse Freshness
         updated_ts = pd.to_datetime(data.get('updated', datetime.now()))
-        updated_str = updated_ts.strftime('%H:%M:%S')
+        # Convert updated time to Local (PST)
+        if updated_ts.tzinfo is None:
+            updated_ts = updated_ts.replace(tzinfo=pytz.utc)
+        updated_str = updated_ts.astimezone(config.TZ_LOCAL).strftime('%H:%M:%S')
         
         # Hydrate XSP
         if not xsp.empty:
             xsp['Datetime'] = pd.to_datetime(xsp['datetime_utc'])
             xsp.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
+            # Ensure UTC then convert to Local (PST)
             if xsp['Datetime'].dt.tz is None: xsp['Datetime'] = xsp['Datetime'].dt.tz_localize('UTC')
-            xsp['Datetime'] = xsp['Datetime'].dt.tz_convert(config.TZ_LOCAL).dt.tz_localize(None)
+            xsp['Datetime'] = xsp['Datetime'].dt.tz_convert(config.TZ_LOCAL)
 
         # Hydrate VIX
         if not vix.empty:
             vix['Datetime'] = pd.to_datetime(vix['datetime_utc'])
             vix.rename(columns={'close': 'Close'}, inplace=True)
             if vix['Datetime'].dt.tz is None: vix['Datetime'] = vix['Datetime'].dt.tz_localize('UTC')
-            vix['Datetime'] = vix['Datetime'].dt.tz_convert(config.TZ_LOCAL).dt.tz_localize(None)
+            vix['Datetime'] = vix['Datetime'].dt.tz_convert(config.TZ_LOCAL)
 
-        # RTH Filter
+        # RTH Filter (Passes through NY logic but keeps Local TZ)
         xsp = filter_to_rth(xsp)
         vix = filter_to_rth(vix)
 
@@ -156,8 +175,11 @@ def calculate_orb(df):
     if df is None or df.empty: return None, None
     df = df.copy()
     if len(df) < 5: return None, None
+    
+    # ORB Logic: First 30 mins of the dataset (which is already RTH filtered)
     start_time = df.iloc[0]['Datetime']
     end_time = start_time + timedelta(minutes=30)
+    
     orb_df = df[(df['Datetime'] >= start_time) & (df['Datetime'] < end_time)]
     if orb_df.empty: return None, None
     return orb_df['High'].max(), orb_df['Low'].min()
@@ -165,12 +187,14 @@ def calculate_orb(df):
 def calculate_linreg(df):
     if df is None or len(df) < 20: return df
     df = df.copy()
+    # Simple linear regression on the available window
     df['x'] = np.arange(len(df))
-    slope, intercept = np.polyfit(df['x'], df['Close'], 1)
-    df['reg_line'] = slope * df['x'] + intercept
-    std = df['Close'].std()
-    df['upper_band'] = df['reg_line'] + (2 * std)
-    df['lower_band'] = df['reg_line'] - (2 * std)
+    if len(df) > 1:
+        slope, intercept = np.polyfit(df['x'], df['Close'], 1)
+        df['reg_line'] = slope * df['x'] + intercept
+        std = df['Close'].std()
+        df['upper_band'] = df['reg_line'] + (2 * std)
+        df['lower_band'] = df['reg_line'] - (2 * std)
     return df
 
 def fetch_market_internals(vix_df):
@@ -282,18 +306,31 @@ def update_hud(n):
     time_str = now_local.strftime("%H:%M:%S")
     status_html, next_info, is_active = get_market_status()
     
+    # 3. Calculate RTH Boundaries for X-Axis Lock
+    # This enforces the 09:30 - 16:00 ET window converted to local (PST)
+    today_date = now_local.date()
+    # 06:30 PST = 09:30 ET
+    rth_start_dt = datetime.combine(today_date, time(6, 30)).replace(tzinfo=config.TZ_LOCAL)
+    # 13:00 PST = 16:00 ET
+    rth_end_dt = datetime.combine(today_date, time(13, 0)).replace(tzinfo=config.TZ_LOCAL)
+
     if xsp is None or xsp.empty:
         fig = go.Figure()
         fig.add_annotation(text="WAITING FOR DATA PIPELINE...", font=dict(color="#fde722", size=24, family="Monospace"), showarrow=False)
-        fig.update_layout(template="plotly_dark", paper_bgcolor='black', plot_bgcolor='rgba(0,0,0,0)', xaxis_visible=False, yaxis_visible=False)
+        fig.update_layout(
+            template="plotly_dark", 
+            paper_bgcolor='black', 
+            plot_bgcolor='rgba(0,0,0,0)', 
+            xaxis_visible=False, yaxis_visible=False
+        )
         return fig, time_str, status_html, next_info, "OFFLINE", 0, "secondary", "--", [], ""
 
-    # 3. Math & Logic
+    # 4. Math & Logic
     xsp = calculate_linreg(xsp)
     vix = fetch_market_internals(vix)
     orb_h, orb_l = calculate_orb(xsp)
 
-    # 4. Metrics
+    # 5. Metrics
     curr_vix = 0
     vix_pct = 50
     p_call, p_put = 50, 50
@@ -302,9 +339,9 @@ def update_hud(n):
         curr_vix = vix.iloc[-1]['Close']
         vix_pct = min(max(((curr_vix - 12) / (20 - 12)) * 100, 0), 100)
         
-        # Calculate Fractal Score locally (Same logic as Strategy)
-        hist = vix.iloc[-1]['hist']
-        rsi = vix.iloc[-1]['rsi']
+        # Calculate Fractal Score
+        hist = vix.iloc[-1]['hist'] if 'hist' in vix.columns else 0
+        rsi = vix.iloc[-1]['rsi'] if 'rsi' in vix.columns else 50
         score = 50.0 + (float(hist) * -200.0)
         if rsi > 70: score += 5
         if rsi < 30: score -= 5
@@ -330,33 +367,38 @@ def update_hud(n):
     badges = [dbc.Badge(alert_msg, color=alert_color, className="me-2", style={"fontFamily": "'VT323', monospace"})]
     therm_color = "danger" if vix_pct > 75 else "info" if vix_pct < 25 else "success"
 
-    # 5. Chart (Rich Layout)
+    # 6. Chart (Rich Layout - Restored)
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2],
                         subplot_titles=("XSP (ORB + LinReg)", "VIX FRACTAL (MACD)", "VIX RSI"))
 
     # ROW 1: PRICE
     fig.add_trace(go.Candlestick(x=xsp['Datetime'], open=xsp['Open'], high=xsp['High'], low=xsp['Low'], close=xsp['Close'], name="Price"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=xsp['Datetime'], y=xsp['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Mean"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=xsp['Datetime'], y=xsp['upper_band'], line=dict(color='cyan', width=1), name="+2σ"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=xsp['Datetime'], y=xsp['lower_band'], line=dict(color='cyan', width=1), name="-2σ"), row=1, col=1)
+    if 'reg_line' in xsp.columns:
+        fig.add_trace(go.Scatter(x=xsp['Datetime'], y=xsp['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Mean"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=xsp['Datetime'], y=xsp['upper_band'], line=dict(color='cyan', width=1), name="+2σ"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=xsp['Datetime'], y=xsp['lower_band'], line=dict(color='cyan', width=1), name="-2σ"), row=1, col=1)
+    
     if orb_h:
         fig.add_hline(y=orb_h, line_color="#00bc8c", line_width=1, annotation_text="ORB H", row=1, col=1)
         fig.add_hline(y=orb_l, line_color="#e74c3c", line_width=1, annotation_text="ORB L", row=1, col=1)
 
-    # ROW 2: VIX MACD (The Fractal)
-    if vix is not None:
-        fig.add_trace(go.Bar(x=vix['Datetime'], y=vix['hist'], marker_color='rgba(255, 255, 255, 0.3)', name="Hist"), row=2, col=1)
+    # ROW 2: VIX MACD
+    if vix is not None and 'hist' in vix.columns:
+        # Color Logic: Red for Heat (Positive), Green for Cool (Negative)
+        colors = ['#ff5555' if val > 0 else '#00bc8c' for val in vix['hist']]
+        fig.add_trace(go.Bar(x=vix['Datetime'], y=vix['hist'], marker_color=colors, name="Hist"), row=2, col=1)
         fig.add_trace(go.Scatter(x=vix['Datetime'], y=vix['macd'], line=dict(color='#f1c40f', width=1), name="MACD"), row=2, col=1)
 
     # ROW 3: VIX RSI
-    if vix is not None:
+    if vix is not None and 'rsi' in vix.columns:
         fig.add_trace(go.Scatter(x=vix['Datetime'], y=vix['rsi'], line=dict(color='#a855f7', width=2, shape='spline'), name="RSI"), row=3, col=1)
         fig.add_hline(y=70, line_dash="dot", line_color="red", row=3, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="green", row=3, col=1)
 
     # ⚡ ZOOM LOCKED & DARK HOVER
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
+    # Lock X-Axis to Today's RTH Window (PST)
+    fig.update_xaxes(range=[rth_start_dt, rth_end_dt], row=3, col=1) # Apply to bottom chart (shared axis)
+    fig.update_yaxes(fixedrange=False) # Allow Y-axis zoom
 
     fig.update_layout(
         template="plotly_dark", 
