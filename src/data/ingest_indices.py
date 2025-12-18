@@ -53,10 +53,27 @@ def check_cooldown():
     except: pass 
     return True
 
+def validate_data_quality(df):
+    """
+    [MAGITEK GATEKEEPER]: Checks if the candles are 'Flat'.
+    If High == Low for the most recent data, it's a Snapshot, not an Aggregate.
+    We reject Snapshots to preserve chart integrity.
+    """
+    if df.empty: return False
+    
+    # Check the last row. If High == Low, it's likely a bad feed.
+    last_row = df.iloc[-1]
+    amplitude = last_row['high'] - last_row['low']
+    
+    if amplitude == 0:
+        return False
+    return True
+
 def fetch_polygon_backup(ticker):
     """
     Fallback: Fetches Index Data from Polygon (Massive.com).
     Protocol: I:VIX, I:XSP
+    
     [MAGITEK UPGRADE]: Enforces 16-minute delay to bypass Free Tier
     restrictions and ensure FULL CANDLE formation.
     """
@@ -68,10 +85,13 @@ def fetch_polygon_backup(ticker):
     log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker}) [Delayed Stream]")
     
     try:
-        # Ask for data ending 16 minutes ago (Authorized Aggregate Bucket)
+        # CRITICAL FIX: The "16-Minute Time Machine"
+        # We stop asking for 'Now' and strictly ask for '16 mins ago'
+        # This accesses the authorized aggregate bucket which has FULL CANDLES.
         end_dt = datetime.now() - timedelta(minutes=16)
         start_dt = end_dt - timedelta(days=2)
         
+        # Use v2/aggs endpoint which returns bars, not snapshots
         url = f"https://api.polygon.io/v2/aggs/ticker/{poly_ticker}/range/1/minute/{int(start_dt.timestamp()*1000)}/{int(end_dt.timestamp()*1000)}"
         params = {"apiKey": POLYGON_KEY, "limit": 50000, "adjusted": "true"}
         
@@ -101,8 +121,10 @@ def fetch_polygon_backup(ticker):
 def fetch_yahoo_data(y_ticker, friendly_name):
     """
     Primary: Fetches data using yfinance.
+    [MAGITEK UPGRADE]: Uses 'Light Mode' (1 Day) to stay under the radar.
     """
     try:
+        # LIGHT MODE: Requesting '1d' is much lighter than specific dates.
         ticker_dat = yf.Ticker(y_ticker)
         df = ticker_dat.history(period="1d", interval="1m", auto_adjust=True)
         
@@ -113,16 +135,19 @@ def fetch_yahoo_data(y_ticker, friendly_name):
         df = df.reset_index()
         df.columns = [c.lower() for c in df.columns]
         
+        # Standardize Columns
         if 'date' in df.columns: df.rename(columns={"date": "datetime"}, inplace=True)
         df.rename(columns={"datetime": "datetime_utc"}, inplace=True)
         df['ticker'] = friendly_name
         
-        # Timezone Normalization
+        # Timezone Normalization (Strict UTC)
         if pd.api.types.is_datetime64_any_dtype(df['datetime_utc']):
             if df['datetime_utc'].dt.tz is None:
+                # If naive, assume NY time (YF default) then convert to UTC
                 df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York')
             df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC').dt.tz_localize(None)
         
+        # Add volume if missing (Indices often have 0 vol on YF)
         if 'volume' not in df.columns: df['volume'] = 0
         
         return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
@@ -131,28 +156,13 @@ def fetch_yahoo_data(y_ticker, friendly_name):
         log.warning(f"⏳ Yahoo Fetch Error for {y_ticker}: {e}")
         return pd.DataFrame()
 
-def validate_data_quality(df):
-    """
-    Checks if the data is 'Flat' (Open ~= Close and High ~= Low).
-    Returns False if data is low quality (flat candles).
-    """
-    if df.empty: return False
-    
-    # Check the last 5 rows. If High == Low for all of them, it's garbage.
-    recent = df.tail(5)
-    flat_candles = recent[recent['high'] == recent['low']]
-    
-    if len(flat_candles) >= 3: # If 3+ of the last 5 candles are flat
-        return False
-        
-    return True
-
 # ==============================================================================
-# 3. SNAPSHOT LOGIC
+# 3. SNAPSHOT LOGIC (THE GLASS FEED)
 # ==============================================================================
 def calculate_orb(df):
     if df.empty: return None, None
     df = df.copy()
+    # ORB Logic (NY Time)
     df['dt_ny'] = df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
     start = t_time(9, 30)
     end = t_time(10, 0)
@@ -163,7 +173,12 @@ def calculate_orb(df):
     return None, None
 
 def generate_snapshot_from_db(con):
+    """
+    Generates the UI JSON from the Database.
+    Robustness: Runs even if ingest failed, using whatever data is in the Vault.
+    """
     try:
+        # Check freshness
         max_ts = con.execute(f"SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = 'XSP'").fetchone()[0]
         if not max_ts: return
         
@@ -174,6 +189,7 @@ def generate_snapshot_from_db(con):
         if time_diff > 3600: status = "STALE (>1h)"
         if time_diff > 86400: status = "STALE (>24h)"
 
+        # Fetch Window (Last 24h of data points)
         target_time = datetime.now() - timedelta(days=2) 
         
         q = f"SELECT * FROM {config.TBL_INDICES} WHERE datetime_utc >= '{target_time}' ORDER BY datetime_utc ASC"
@@ -216,17 +232,16 @@ def run_ingest():
         targets = [('VIX', '^VIX'), ('XSP', '^XSP')]
         
         for friendly, y_ticker in targets:
-            # 1. Try Yahoo
+            # 1. Try Yahoo (Optimized)
             df = fetch_yahoo_data(y_ticker, friendly)
             
-            # [FIX]: Check Quality. If flat, consider it failed.
-            is_good_quality = validate_data_quality(df)
+            # [MAGITEK GATE]: Check Quality
+            is_valid = validate_data_quality(df)
+            if not is_valid:
+                log.warning(f"⚠️ Yahoo Data for {friendly} is FLAT (High=Low). Rejecting and switching to Backup.")
+                df = pd.DataFrame() # Wipe it to trigger backup
             
-            if not is_good_quality:
-                log.warning(f"⚠️ Yahoo Data for {friendly} is FLAT/LOW QUALITY. Failing over to Polygon.")
-                df = pd.DataFrame() # Force Empty to trigger backup
-            
-            # 2. Try Polygon Backup if Yahoo Failed (or was rejected)
+            # 2. Try Polygon Backup if Yahoo Failed OR was Flat
             if df.empty and USE_POLYGON_BACKUP:
                 df = fetch_polygon_backup(friendly)
                 
@@ -239,6 +254,8 @@ def run_ingest():
         if config.DB_FILE.exists():
             try:
                 con = duckdb.connect(str(config.DB_FILE), config={'access_mode': 'READ_WRITE'})
+                
+                # Schema Assurance
                 con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (datetime_utc TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, ticker VARCHAR, PRIMARY KEY (datetime_utc, ticker))")
                 
                 if staged:
@@ -248,8 +265,9 @@ def run_ingest():
                         con.unregister('temp_idx')
                         log.info(f"   ✅ {friendly}: Ingested {len(df)} candles.")
                 else:
-                    log.warning("⚠️ No new data to write.")
+                    log.warning("⚠️ No new data to write. Attempting to update snapshot from existing Vault data.")
 
+                # 4. Generate Snapshot (Always Run)
                 generate_snapshot_from_db(con)
                 con.close()
                 
