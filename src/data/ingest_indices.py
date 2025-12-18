@@ -58,8 +58,8 @@ def fetch_polygon_backup(ticker):
     Fallback: Fetches Index Data from Polygon (Massive.com).
     Protocol: I:VIX, I:XSP
     
-    [MAGITEK UPDATE]: Applied 16-minute offset for Free Tier to ensure 
-    full candle formation (prevents flat candles).
+    [MAGITEK UPGRADE]: Enforces 16-minute delay to bypass Free Tier
+    restrictions and ensure FULL CANDLE formation.
     """
     if not POLYGON_KEY: return pd.DataFrame()
     
@@ -69,8 +69,9 @@ def fetch_polygon_backup(ticker):
     log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker}) [Delayed Stream]")
     
     try:
-        # FIX: Force the window to end 16 minutes ago.
-        # This accesses the 'Delayed' bucket which allows full aggregates on Free Tier.
+        # CRITICAL FIX: The "16-Minute Time Machine"
+        # We stop asking for 'Now' and strictly ask for '16 mins ago'
+        # This accesses the authorized aggregate bucket.
         end_dt = datetime.now() - timedelta(minutes=16)
         start_dt = end_dt - timedelta(days=2)
         
@@ -102,16 +103,14 @@ def fetch_polygon_backup(ticker):
 
 def fetch_yahoo_data(y_ticker, friendly_name):
     """
-    Primary: Fetches data using yfinance (Auto-Stealth).
-    Updated v3.5: Removed requests.Session() to fix curl_cffi conflict.
+    Primary: Fetches data using yfinance.
+    [MAGITEK UPGRADE]: Uses 'Light Mode' (1 Day) to stay under the radar.
     """
-    start_date = datetime.now().date() - timedelta(days=2) 
-    end_date = datetime.now().date() + timedelta(days=1)
-    
     try:
-        # v3.5 FIX: Let yfinance handle the session/headers internally
+        # LIGHT MODE: Requesting '1d' is much lighter than specific dates.
+        # This helps avoid the "Too Many Requests" ban.
         ticker_dat = yf.Ticker(y_ticker)
-        df = ticker_dat.history(start=start_date, end=end_date, interval="1m", auto_adjust=True)
+        df = ticker_dat.history(period="1d", interval="1m", auto_adjust=True)
         
         if df.empty: 
             log.warning(f"⚠️ Yahoo returned empty data for {y_ticker}")
@@ -218,10 +217,10 @@ def run_ingest():
         targets = [('VIX', '^VIX'), ('XSP', '^XSP')]
         
         for friendly, y_ticker in targets:
-            # 1. Try Yahoo
+            # 1. Try Yahoo (Optimized)
             df = fetch_yahoo_data(y_ticker, friendly)
             
-            # 2. Try Polygon Backup if Yahoo Failed OR returned empty
+            # 2. Try Polygon Backup if Yahoo Failed
             if df.empty and USE_POLYGON_BACKUP:
                 df = fetch_polygon_backup(friendly)
                 
