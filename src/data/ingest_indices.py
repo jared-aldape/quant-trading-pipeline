@@ -7,7 +7,7 @@ import json
 import os
 import requests
 import numpy as np
-from datetime import datetime, time as t_time, timedelta
+from datetime import datetime, time as t_time, timedelta, timezone
 from pathlib import Path
 
 # ==============================================================================
@@ -30,16 +30,35 @@ USE_POLYGON_BACKUP = True
 
 class RobustEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, np.integer): return int(obj)
-        if isinstance(obj, np.floating): return float(obj)
-        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, (np.integer, np.floating)): return float(obj)
         if isinstance(obj, (datetime, pd.Timestamp)): return obj.isoformat()
-        if pd.isna(obj): return None
         return super(RobustEncoder, self).default(obj)
 
 # ==============================================================================
-# 2. DATA HARVESTING LOGIC
+# 2. QUALITY CONTROL
 # ==============================================================================
+def validate_and_clean(df, ticker):
+    """
+    [CRITICAL GATEKEEPER]
+    Filters out 'Flat' candles (High == Low) which corrupt the signals.
+    """
+    if df.empty: return df
+    
+    # Calculate amplitude
+    df['amp'] = (df['high'] - df['low']).abs()
+    
+    # Identify flat rows (floating point tolerance)
+    flat_mask = df['amp'] < 0.0001
+    flat_count = flat_mask.sum()
+    
+    if flat_count > 0:
+        log.warning(f"⚠️ {ticker}: Filtering {flat_count} flat snapshots to preserve wicks.")
+        # Return only healthy rows
+        clean_df = df[~flat_mask].copy()
+        return clean_df.drop(columns=['amp'])
+    
+    return df.drop(columns=['amp'])
+
 def check_cooldown():
     """Prevents spamming if run frequently by the launcher."""
     now = time.time()
@@ -53,22 +72,22 @@ def check_cooldown():
     except: pass 
     return True
 
+# ==============================================================================
+# 3. FETCH ENGINES
+# ==============================================================================
 def fetch_polygon_backup(ticker):
     """
-    Fallback: Fetches Index Data from Polygon (Massive.com).
-    Protocol: I:VIX, I:XSP
+    Backup: Delayed Stream (16m ago) to guarantee FULL CANDLES on Free Tier.
     """
     if not POLYGON_KEY: return pd.DataFrame()
-    
-    # Polygon Index Ticker Format
     poly_ticker = f"I:{ticker}" 
     
-    log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker})")
+    log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker}) [Delayed Stream]")
     
     try:
-        # Fetch last 2 days of minute data
-        end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=2)
+        # STRATEGY: Enforce 16-minute offset
+        end_dt = datetime.now(timezone.utc) - timedelta(minutes=16)
+        start_dt = end_dt - timedelta(days=2) # Get history to fill gaps
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{poly_ticker}/range/1/minute/{int(start_dt.timestamp()*1000)}/{int(end_dt.timestamp()*1000)}"
         params = {"apiKey": POLYGON_KEY, "limit": 50000, "adjusted": "true"}
@@ -80,15 +99,11 @@ def fetch_polygon_backup(ticker):
             log.warning(f"⚠️ Polygon Backup Failed for {poly_ticker}: {data.get('status')}")
             return pd.DataFrame()
             
-        # Parse
         df = pd.DataFrame(data['results'])
-        df.rename(columns={
-            't': 'datetime_utc', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'
-        }, inplace=True)
+        df.rename(columns={'t': 'datetime_utc', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
         
-        # Convert Timestamp
-        df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms')
-        df['ticker'] = ticker # Store as standard ticker (VIX/XSP)
+        df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms').dt.tz_localize('UTC')
+        df['ticker'] = ticker
         
         return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
         
@@ -98,52 +113,49 @@ def fetch_polygon_backup(ticker):
 
 def fetch_yahoo_data(y_ticker, friendly_name):
     """
-    Primary: Fetches data using yfinance (Auto-Stealth).
-    Updated v3.5: Removed requests.Session() to fix curl_cffi conflict.
+    Primary: Fetches data using yfinance (Historical Block Mode).
     """
+    # 2-Day Historical Window
     start_date = datetime.now().date() - timedelta(days=2) 
     end_date = datetime.now().date() + timedelta(days=1)
     
     try:
-        # v3.5 FIX: Let yfinance handle the session/headers internally
         ticker_dat = yf.Ticker(y_ticker)
         df = ticker_dat.history(start=start_date, end=end_date, interval="1m", auto_adjust=True)
         
-        if df.empty: 
-            log.warning(f"⚠️ Yahoo returned empty data for {y_ticker}")
-            return pd.DataFrame()
+        if df.empty: return pd.DataFrame()
         
         df = df.reset_index()
         df.columns = [c.lower() for c in df.columns]
         
-        # Standardize Columns
-        if 'date' in df.columns: df.rename(columns={"date": "datetime"}, inplace=True)
+        if 'date' in df.columns: df.rename(columns={"date": "datetime_utc"}, inplace=True)
         df.rename(columns={"datetime": "datetime_utc"}, inplace=True)
         df['ticker'] = friendly_name
         
-        # Timezone Normalization (Strict UTC)
-        if pd.api.types.is_datetime64_any_dtype(df['datetime_utc']):
-            if df['datetime_utc'].dt.tz is None:
-                # If naive, assume NY time (YF default) then convert to UTC
-                df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York')
-            df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC').dt.tz_localize(None)
+        # Ensure UTC Alignment
+        if df['datetime_utc'].dt.tz is None:
+            df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York')
+        df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC')
         
-        # Add volume if missing (Indices often have 0 vol on YF)
         if 'volume' not in df.columns: df['volume'] = 0
         
-        return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
+        # [CRITICAL FIX] Explicitly select ONLY the 7 columns the DB expects.
+        # This removes 'dividends' and 'stock splits' which caused the crash.
+        schema_cols = ['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']
+        df_clean = df[schema_cols].copy()
+        
+        return validate_and_clean(df_clean, friendly_name)
         
     except Exception as e:
         log.warning(f"⏳ Yahoo Fetch Error for {y_ticker}: {e}")
         return pd.DataFrame()
 
 # ==============================================================================
-# 3. SNAPSHOT LOGIC (THE GLASS FEED)
+# 4. SNAPSHOT LOGIC
 # ==============================================================================
 def calculate_orb(df):
     if df.empty: return None, None
     df = df.copy()
-    # ORB Logic (NY Time)
     df['dt_ny'] = df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
     start = t_time(9, 30)
     end = t_time(10, 0)
@@ -154,24 +166,13 @@ def calculate_orb(df):
     return None, None
 
 def generate_snapshot_from_db(con):
-    """
-    Generates the UI JSON from the Database.
-    Robustness: Runs even if ingest failed, using whatever data is in the Vault.
-    """
     try:
-        # Check freshness
         max_ts = con.execute(f"SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = 'XSP'").fetchone()[0]
         if not max_ts: return
         
-        last_data_time = pd.to_datetime(max_ts)
-        time_diff = (datetime.now() - last_data_time).total_seconds()
-        
-        status = "LIVE"
-        if time_diff > 3600: status = "STALE (>1h)"
-        if time_diff > 86400: status = "STALE (>24h)"
+        # Use UTC for dashboard timestamp
+        current_time = datetime.now(timezone.utc)
 
-        # Fetch Window (Last 24h of data points)
-        # We fetch by TIME, not just date, to handle overnight transitions
         target_time = datetime.now() - timedelta(days=2) 
         
         q = f"SELECT * FROM {config.TBL_INDICES} WHERE datetime_utc >= '{target_time}' ORDER BY datetime_utc ASC"
@@ -183,9 +184,7 @@ def generate_snapshot_from_db(con):
         orb_h, orb_l = calculate_orb(xsp_df)
         
         snapshot = {
-            "updated": datetime.now().isoformat(),
-            "data_status": status,
-            "last_candle": last_data_time.isoformat(),
+            "updated": current_time.isoformat(),
             "xsp": xsp_df.to_dict(orient='records'),
             "vix": vix_df.to_dict(orient='records'),
             "orb": {"h": orb_h, "l": orb_l}
@@ -198,26 +197,24 @@ def generate_snapshot_from_db(con):
         if Path(temp_file).exists():
             os.replace(temp_file, SNAPSHOT_FILE)
             
-        log.info(f"📸 Snapshot Generated. Status: {status} (XSP: {len(xsp_df)} rows)")
+        log.info(f"📸 Snapshot Generated. (UTC: {current_time.strftime('%H:%M:%S')})")
 
     except Exception as e:
         log.error(f"Snapshot Generation Failed: {e}")
 
 # ==============================================================================
-# 4. EXECUTION
+# 5. EXECUTION
 # ==============================================================================
 def run_ingest():
     if check_cooldown():
-        log.info("📊 STARTING INDEX INGESTION CYCLE...")
+        log.info("📊 STARTING INDEX INGESTION (SUCCESS PROTOCOL)...")
         staged = []
         
         targets = [('VIX', '^VIX'), ('XSP', '^XSP')]
         
         for friendly, y_ticker in targets:
-            # 1. Try Yahoo
             df = fetch_yahoo_data(y_ticker, friendly)
             
-            # 2. Try Polygon Backup if Yahoo Failed
             if df.empty and USE_POLYGON_BACKUP:
                 df = fetch_polygon_backup(friendly)
                 
@@ -226,12 +223,9 @@ def run_ingest():
             else:
                 log.error(f"❌ DATA LOSS: Could not fetch {friendly} from any source.")
         
-        # 3. DB Transaction
         if config.DB_FILE.exists():
             try:
                 con = duckdb.connect(str(config.DB_FILE), config={'access_mode': 'READ_WRITE'})
-                
-                # Schema Assurance
                 con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (datetime_utc TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, ticker VARCHAR, PRIMARY KEY (datetime_utc, ticker))")
                 
                 if staged:
@@ -241,9 +235,8 @@ def run_ingest():
                         con.unregister('temp_idx')
                         log.info(f"   ✅ {friendly}: Ingested {len(df)} candles.")
                 else:
-                    log.warning("⚠️ No new data to write. Attempting to update snapshot from existing Vault data.")
+                    log.warning("⚠️ No new data to write.")
 
-                # 4. Generate Snapshot (Always Run)
                 generate_snapshot_from_db(con)
                 con.close()
                 

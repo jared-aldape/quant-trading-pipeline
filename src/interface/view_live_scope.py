@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, callback, Input, Output
+from dash import dcc, html, callback, Input, Output, State, no_update
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import json
 import sys
+import subprocess
 from datetime import datetime, time, timedelta
 import pytz
 from pathlib import Path
@@ -33,19 +34,19 @@ HOLIDAYS = {
     "2025-11-27": "Thanksgiving",   "2025-12-25": "Christmas Day"
 }
 
-# STYLES (Defined here to prevent Syntax Errors)
+# STYLES
 STYLE_MONO = {'fontFamily': "'VT323', monospace"}
 STYLE_VALUE = {'fontFamily': "'VT323', monospace", 'fontSize': '1.2rem', 'color': '#fff'}
 STYLE_LABEL = {'fontFamily': "'VT323', monospace", 'color': '#b5b8b9', 'fontSize': '0.9rem', 'fontWeight': 'bold'}
 
 def get_market_status():
     """Standardized Status Logic."""
-    now_ny = datetime.now(config.TZ_NY)
+    now_ny = datetime.now(pytz.timezone('America/New_York'))
     today_str = now_ny.strftime("%Y-%m-%d")
     current_time = now_ny.time()
     
     market_open = time(9, 30)
-    market_close = time(16, 0) # Simplified close
+    market_close = time(16, 0) 
 
     is_weekend = now_ny.weekday() >= 5
     is_holiday = today_str in HOLIDAYS
@@ -64,7 +65,6 @@ def get_market_status():
     elif current_time < market_open: reason = "(PRE-MARKET)"
     else: reason = "(POST-MARKET)"
 
-    # Robust HTML generation using pre-defined styles
     s_status = {'color': status_color, 'fontWeight': 'bold', 'fontSize': '1.2rem'}
     s_status.update(STYLE_MONO)
     
@@ -89,7 +89,6 @@ def get_market_status():
 # 2. DATA ENGINE
 # ==============================================================================
 def load_macro_bias():
-    """Reads the Commander's Intent (JSON)."""
     if not MACRO_FILE.exists():
         return "NEUTRAL", "#b5b8b9", "NO DATA"
     try:
@@ -98,47 +97,50 @@ def load_macro_bias():
             bias = data.get('bias', 'NEUTRAL')
             reason = data.get('reason', '')
             
-            color = "#fde722" # Neutral Yellow
-            if bias == "BULLISH": color = "#00ff41" # Green
-            elif bias == "BEARISH": color = "#ff5555" # Red
+            color = "#fde722" 
+            if bias == "BULLISH": color = "#00ff41"
+            elif bias == "BEARISH": color = "#ff5555"
             
             return bias, color, reason
     except:
         return "ERROR", "#ff5555", "READ FAIL"
 
 def filter_to_rth(df):
-    """Strict RTH Clip: 09:30 - 16:00 ET."""
     if df is None or df.empty: return df
     if df['Datetime'].dt.tz is None: df['Datetime'] = df['Datetime'].dt.tz_localize('UTC')
-    ny_times = df['Datetime'].dt.tz_convert(config.TZ_NY)
+    ny_times = df['Datetime'].dt.tz_convert(pytz.timezone('America/New_York'))
     start_time = time(9, 30)
     end_time = time(16, 0)
     mask = (ny_times.dt.time >= start_time) & (ny_times.dt.time <= end_time)
     return df[mask].copy()
 
 def load_snapshot():
-    """Reads JSON snapshot."""
     if not SNAPSHOT_FILE.exists(): return None, None, "NO FILE"
     try:
         with open(SNAPSHOT_FILE, 'r') as f:
             data = json.load(f)
         xsp = pd.DataFrame(data['xsp'])
         vix = pd.DataFrame(data['vix'])
+        
+        # TIMEZONE FIX: Force conversion to US/Pacific for display
         updated_ts = pd.to_datetime(data.get('updated', datetime.now()))
-        if updated_ts.tzinfo is None: updated_ts = updated_ts.replace(tzinfo=pytz.utc)
-        updated_str = updated_ts.astimezone(config.TZ_LOCAL).strftime('%H:%M:%S')
+        if updated_ts.tzinfo is None: 
+            updated_ts = updated_ts.replace(tzinfo=pytz.utc)
+        
+        target_tz = pytz.timezone('US/Pacific')
+        updated_str = updated_ts.astimezone(target_tz).strftime('%H:%M:%S %Z')
         
         if not xsp.empty:
             xsp['Datetime'] = pd.to_datetime(xsp['datetime_utc'])
             xsp.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
             if xsp['Datetime'].dt.tz is None: xsp['Datetime'] = xsp['Datetime'].dt.tz_localize('UTC')
-            xsp['Datetime'] = xsp['Datetime'].dt.tz_convert(config.TZ_LOCAL)
+            xsp['Datetime'] = xsp['Datetime'].dt.tz_convert(target_tz)
 
         if not vix.empty:
             vix['Datetime'] = pd.to_datetime(vix['datetime_utc'])
             vix.rename(columns={'close': 'Close'}, inplace=True)
             if vix['Datetime'].dt.tz is None: vix['Datetime'] = vix['Datetime'].dt.tz_localize('UTC')
-            vix['Datetime'] = vix['Datetime'].dt.tz_convert(config.TZ_LOCAL)
+            vix['Datetime'] = vix['Datetime'].dt.tz_convert(target_tz)
 
         xsp = filter_to_rth(xsp)
         vix = filter_to_rth(vix)
@@ -184,7 +186,7 @@ def fetch_market_internals(vix_df):
     return df
 
 # ==============================================================================
-# 3. LAYOUT (UNIFIED MAGITEK STANDARD)
+# 3. LAYOUT
 # ==============================================================================
 def render():
     return dbc.Container([
@@ -198,10 +200,14 @@ def render():
             
             dbc.Col([
                 dbc.Row([
+                    # UPDATED: REFRESH BUTTON & TIMESTAMP
                     dbc.Col([
-                        html.Div("DATA INTEGRITY:", className="text-end small fw-bold", style={'color': '#b5b8b9', **STYLE_MONO}),
+                        html.Div("LAST REFRESH:", className="text-end small fw-bold", style={'color': '#b5b8b9', **STYLE_MONO}),
                         html.Div(id="data-freshness", className="text-end fw-bold", style={'color': '#fde722', 'fontSize': '1.2rem', **STYLE_MONO}),
+                        dbc.Button("↻ REFRESH DATA", id="btn-manual-refresh", size="sm", color="info", className="mt-1 w-100 font-monospace", style={"fontSize": "0.8rem", "fontWeight": "bold"}),
+                        html.Div(id="refresh-feedback", style={'display': 'none'}) # Dummy for callback output
                     ], width=4),
+                    
                     dbc.Col([
                         html.H4(id='live-clock-time', className="mb-0 text-end fw-bold", style={'color': '#fde722', 'textShadow': '1px 1px #000', **STYLE_MONO}),
                         html.Div(id='live-market-status', className="text-end"),
@@ -213,7 +219,6 @@ def render():
 
         # --- ROW 2: TACTICAL STRIP ---
         dbc.Row([
-            # 1. VIX THERMOMETER
             dbc.Col([
                 html.Div("VIX THERMOMETER", className="small text-muted fw-bold mb-1", style=STYLE_MONO),
                 dbc.Row([
@@ -222,19 +227,16 @@ def render():
                 ], className="g-0 align-items-center"),
             ], width=3, className="border-end border-secondary pe-2"),
             
-            # 2. MACRO REGIME (NEW)
             dbc.Col([
                 html.Div("MACRO REGIME", className="small text-muted fw-bold mb-1 text-center", style=STYLE_MONO),
                 html.Div(id="macro-regime-display", className="text-center fw-bold", style={'fontSize': '1.3rem', 'letterSpacing': '1px', **STYLE_MONO})
             ], width=3, className="border-end border-secondary px-2"),
 
-            # 3. NEURAL CONFIDENCE
             dbc.Col([
                 html.Div("NEURAL CONFIDENCE", className="small text-muted fw-bold mb-1 text-center", style=STYLE_MONO),
                 html.Div(id="oracle-readout", className="text-center d-flex align-items-center justify-content-center", style={'fontSize': '1.2rem', 'color': '#00bc8c', **STYLE_MONO})
             ], width=3, className="border-end border-secondary px-2"),
 
-            # 4. SYSTEM ALERTS
             dbc.Col([
                 html.Div("SYSTEM ALERTS", className="small text-muted fw-bold mb-1", style=STYLE_MONO),
                 html.Div(id="hud-alerts", className="text-start d-flex align-items-center h-100", style={'fontSize': '1.1rem', **STYLE_MONO})
@@ -254,6 +256,28 @@ def render():
 # ==============================================================================
 # 4. CALLBACKS
 # ==============================================================================
+
+# NEW CALLBACK: MANUAL REFRESH TRIGGER
+@callback(
+    Output("refresh-feedback", "children"),
+    Input("btn-manual-refresh", "n_clicks"),
+    prevent_initial_call=True
+)
+def trigger_pipeline(n):
+    """
+    Spawns the main_pipeline.py as a separate process.
+    This prevents the UI from freezing while the heavy lifting happens.
+    The Dashboard will update automatically when the file is written.
+    """
+    if n:
+        try:
+            # Execute main_pipeline.py in a detached process
+            subprocess.Popen([sys.executable, "main_pipeline.py"], cwd=str(ROOT_DIR))
+            return "Triggered"
+        except Exception as e:
+            return f"Error: {e}"
+    return no_update
+
 @callback(
     [Output('live-scope-chart', 'figure'),
      Output('live-clock-time', 'children'),
@@ -275,14 +299,14 @@ def update_hud(n):
     macro_bias, macro_color, macro_reason = load_macro_bias()
     
     # 2. Clock & Status
-    now_local = datetime.now(config.TZ_LOCAL)
+    now_local = datetime.now(pytz.timezone('US/Pacific'))
     time_str = now_local.strftime("%H:%M:%S")
     status_html, next_info, is_active = get_market_status()
     
-    # RTH Boundaries for X-Axis Lock
+    # RTH Boundaries
     today_date = now_local.date()
-    rth_start_dt = datetime.combine(today_date, time(6, 30)).replace(tzinfo=config.TZ_LOCAL)
-    rth_end_dt = datetime.combine(today_date, time(13, 0)).replace(tzinfo=config.TZ_LOCAL)
+    rth_start_dt = datetime.combine(today_date, time(6, 30)).replace(tzinfo=pytz.timezone('US/Pacific'))
+    rth_end_dt = datetime.combine(today_date, time(13, 0)).replace(tzinfo=pytz.timezone('US/Pacific'))
 
     macro_style = {'color': macro_color, 'fontSize': '1.3rem', 'letterSpacing': '1px'}
     macro_style.update(STYLE_MONO)
