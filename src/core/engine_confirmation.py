@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import json
 import sys
 from pathlib import Path
 
@@ -18,13 +19,31 @@ log = get_logger("MTC_Engine")
 class ConfirmationEngine:
     def __init__(self, ticker="SPY"):
         self.ticker = ticker
+        self.macro_file = ROOT_DIR / "data" / "macro_sentiment.json"
         
+    def _get_macro_regime(self):
+        """
+        Reads the Commander's Intent (Step 0 Output).
+        Returns: 'BULLISH', 'BEARISH', or 'NEUTRAL'
+        """
+        if not self.macro_file.exists():
+            return "NEUTRAL"
+        try:
+            with open(self.macro_file, 'r') as f:
+                data = json.load(f)
+                return data.get('bias', 'NEUTRAL')
+        except:
+            return "NEUTRAL"
+
     def _fetch_data(self, interval, period="5d"):
         """
         Fetches 'Glass' data (Yahoo) for real-time confirmation.
         """
         try:
-            df = yf.Ticker(self.ticker).history(period=period, interval=interval)
+            # Force "SPY" if user passes "XSP" since Yahoo data for XSP is often broken
+            target = "SPY" if self.ticker in ["XSP", "^XSP"] else self.ticker
+            
+            df = yf.Ticker(target).history(period=period, interval=interval)
             if df.empty: 
                 return pd.DataFrame()
             return df
@@ -33,21 +52,16 @@ class ConfirmationEngine:
             return pd.DataFrame()
 
     def _calculate_sma(self, df, window=50):
-        """Calculates Simple Moving Average."""
         if df.empty: return None
         return df['Close'].rolling(window=window).mean().iloc[-1]
 
     def _calculate_rsi(self, df, window=14):
-        """Calculates RSI manually to avoid TA-Lib dependencies."""
         if df.empty: return None
-        
         delta = df['Close'].diff()
         up = delta.clip(lower=0)
         down = -1 * delta.clip(upper=0)
-        
         ema_up = up.ewm(com=window-1, adjust=False).mean()
         ema_down = down.ewm(com=window-1, adjust=False).mean()
-        
         rs = ema_up / ema_down
         rsi = 100 - (100 / (1 + rs))
         return rsi.iloc[-1]
@@ -55,10 +69,8 @@ class ConfirmationEngine:
     def check_trend_alignment(self):
         """
         Gatekeeper Law Part 1: Trend Filter.
-        Checks if current price is above the 1H 50-SMA.
-        Returns: (bool, reason_string)
         """
-        df_1h = self._fetch_data(interval="1h", period="20d") # Need history for 50 SMA
+        df_1h = self._fetch_data(interval="1h", period="20d")
         if df_1h.empty: return False, "Data Error (1H)"
         
         current_price = df_1h['Close'].iloc[-1]
@@ -66,19 +78,25 @@ class ConfirmationEngine:
         
         if sma_50 is None: return False, "Initializing SMA"
 
-        # BULLISH CHECK (For Calls/Longs)
         is_bullish = current_price > sma_50
-        
         status = "BULLISH" if is_bullish else "BEARISH"
-        log.info(f"🛡️ Trend Check: Price ${current_price:.2f} vs SMA50 ${sma_50:.2f} [{status}]")
         
-        return is_bullish, f"Trend is {status} (Price vs 1H SMA)"
+        # --- MACRO OVERRIDE ---
+        # If Macro is BULLISH, we are more lenient on a "Bearish" technical trend (Buy the Dip)
+        regime = self._get_macro_regime()
+        if regime == "BULLISH" and status == "BEARISH":
+            # Check how far below SMA we are. If < 0.5%, it might just be a dip.
+            dist = (sma_50 - current_price) / current_price
+            if dist < 0.005: 
+                log.info(f"🛡️ Trend Override: Macro BULLISH saves the dip.")
+                return True, "Macro-Supported Dip"
+
+        log.info(f"🛡️ Trend Check: Price ${current_price:.2f} vs SMA50 ${sma_50:.2f} [{status}]")
+        return is_bullish, f"Trend is {status}"
 
     def check_momentum_health(self):
         """
-        Gatekeeper Law Part 2: Momentum Filter.
-        Checks if 15m RSI is healthy (not overbought/oversold).
-        Returns: (bool, rsi_value)
+        Gatekeeper Law Part 2: Momentum Filter (ADAPTIVE).
         """
         df_15m = self._fetch_data(interval="15m", period="5d")
         if df_15m.empty: return False, 0.0
@@ -86,11 +104,22 @@ class ConfirmationEngine:
         rsi = self._calculate_rsi(df_15m)
         if rsi is None: return False, 0.0
         
-        # Valid range: 30 to 70 (Avoid extremes)
-        is_healthy = 30 < rsi < 70
+        # --- DYNAMIC THRESHOLDS ---
+        regime = self._get_macro_regime()
         
-        log.info(f"🛡️ Momentum Check: 15m RSI = {rsi:.2f}")
+        rsi_floor = 30
+        rsi_ceil = 70
         
+        if regime == "BULLISH":
+            rsi_ceil = 80 # Allow runs to extend in a Bull Market
+            log.info("🛡️ Mode: BULLISH (RSI Ceiling extended to 80)")
+        elif regime == "BEARISH":
+            rsi_floor = 20 # Allow dumps to extend in a Bear Market
+            log.info("🛡️ Mode: BEARISH (RSI Floor lowered to 20)")
+        
+        is_healthy = rsi_floor < rsi < rsi_ceil
+        
+        log.info(f"🛡️ Momentum Check: 15m RSI = {rsi:.2f} (Limits: {rsi_floor}-{rsi_ceil})")
         return is_healthy, rsi
 
     def validate_signal(self):
@@ -107,7 +136,7 @@ class ConfirmationEngine:
             }
         else:
             fail_reasons = []
-            if not is_trend_ok: fail_reasons.append(f"Counter-Trend ({trend_msg})")
+            if not is_trend_ok: fail_reasons.append(f"Trend Mismatch ({trend_msg})")
             if not is_rsi_ok: fail_reasons.append(f"RSI Extended ({rsi_val:.2f})")
             
             return {
@@ -116,7 +145,6 @@ class ConfirmationEngine:
             }
 
 if __name__ == "__main__":
-    # Test Block
     engine = ConfirmationEngine()
     result = engine.validate_signal()
     print("\n--- MTC DIAGNOSTIC ---")
