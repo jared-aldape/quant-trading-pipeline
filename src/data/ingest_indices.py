@@ -53,45 +53,23 @@ def check_cooldown():
     except: pass 
     return True
 
-def validate_data_quality(df):
-    """
-    [MAGITEK GATEKEEPER]: Checks if the candles are 'Flat'.
-    If High == Low for the most recent data, it's a Snapshot, not an Aggregate.
-    We reject Snapshots to preserve chart integrity.
-    """
-    if df.empty: return False
-    
-    # Check the last row. If High == Low, it's likely a bad feed.
-    last_row = df.iloc[-1]
-    amplitude = last_row['high'] - last_row['low']
-    
-    if amplitude == 0:
-        return False
-    return True
-
 def fetch_polygon_backup(ticker):
     """
     Fallback: Fetches Index Data from Polygon (Massive.com).
     Protocol: I:VIX, I:XSP
-    
-    [MAGITEK UPGRADE]: Enforces 16-minute delay to bypass Free Tier
-    restrictions and ensure FULL CANDLE formation.
     """
     if not POLYGON_KEY: return pd.DataFrame()
     
     # Polygon Index Ticker Format
     poly_ticker = f"I:{ticker}" 
     
-    log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker}) [Delayed Stream]")
+    log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker})")
     
     try:
-        # CRITICAL FIX: The "16-Minute Time Machine"
-        # We stop asking for 'Now' and strictly ask for '16 mins ago'
-        # This accesses the authorized aggregate bucket which has FULL CANDLES.
-        end_dt = datetime.now() - timedelta(minutes=16)
+        # Fetch last 2 days of minute data
+        end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=2)
         
-        # Use v2/aggs endpoint which returns bars, not snapshots
         url = f"https://api.polygon.io/v2/aggs/ticker/{poly_ticker}/range/1/minute/{int(start_dt.timestamp()*1000)}/{int(end_dt.timestamp()*1000)}"
         params = {"apiKey": POLYGON_KEY, "limit": 50000, "adjusted": "true"}
         
@@ -120,13 +98,16 @@ def fetch_polygon_backup(ticker):
 
 def fetch_yahoo_data(y_ticker, friendly_name):
     """
-    Primary: Fetches data using yfinance.
-    [MAGITEK UPGRADE]: Uses 'Light Mode' (1 Day) to stay under the radar.
+    Primary: Fetches data using yfinance (Auto-Stealth).
+    Updated v3.5: Removed requests.Session() to fix curl_cffi conflict.
     """
+    start_date = datetime.now().date() - timedelta(days=2) 
+    end_date = datetime.now().date() + timedelta(days=1)
+    
     try:
-        # LIGHT MODE: Requesting '1d' is much lighter than specific dates.
+        # v3.5 FIX: Let yfinance handle the session/headers internally
         ticker_dat = yf.Ticker(y_ticker)
-        df = ticker_dat.history(period="1d", interval="1m", auto_adjust=True)
+        df = ticker_dat.history(start=start_date, end=end_date, interval="1m", auto_adjust=True)
         
         if df.empty: 
             log.warning(f"⚠️ Yahoo returned empty data for {y_ticker}")
@@ -190,6 +171,7 @@ def generate_snapshot_from_db(con):
         if time_diff > 86400: status = "STALE (>24h)"
 
         # Fetch Window (Last 24h of data points)
+        # We fetch by TIME, not just date, to handle overnight transitions
         target_time = datetime.now() - timedelta(days=2) 
         
         q = f"SELECT * FROM {config.TBL_INDICES} WHERE datetime_utc >= '{target_time}' ORDER BY datetime_utc ASC"
@@ -232,16 +214,10 @@ def run_ingest():
         targets = [('VIX', '^VIX'), ('XSP', '^XSP')]
         
         for friendly, y_ticker in targets:
-            # 1. Try Yahoo (Optimized)
+            # 1. Try Yahoo
             df = fetch_yahoo_data(y_ticker, friendly)
             
-            # [MAGITEK GATE]: Check Quality
-            is_valid = validate_data_quality(df)
-            if not is_valid:
-                log.warning(f"⚠️ Yahoo Data for {friendly} is FLAT (High=Low). Rejecting and switching to Backup.")
-                df = pd.DataFrame() # Wipe it to trigger backup
-            
-            # 2. Try Polygon Backup if Yahoo Failed OR was Flat
+            # 2. Try Polygon Backup if Yahoo Failed
             if df.empty and USE_POLYGON_BACKUP:
                 df = fetch_polygon_backup(friendly)
                 
