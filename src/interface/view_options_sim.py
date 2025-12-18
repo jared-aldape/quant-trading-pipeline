@@ -67,7 +67,7 @@ def get_market_status():
 
     html_status = html.Span([
         html.Span(f"MARKET: {status_text}", style={'color': status_color, 'fontWeight': 'bold', 'fontFamily': "'VT323', monospace", 'fontSize': '1.2rem'}),
-        html.Span(f" {reason}", className="small ms-2", style={'color': '#b5b8b9', 'fontFamily': "'VT323', monospace"})
+        html.Span(f" {reason}", className="small ms-2", style={'color': '#b5b8b9', 'fontFamily': "'VT323', monospace'"})
     ])
 
     info_line = ""
@@ -126,7 +126,7 @@ def render():
                         dbc.Row([
                             dbc.Col([
                                 html.Div("TOTAL PORTFOLIO VALUE", className="small text-muted font-monospace"),
-                                html.Div(id='trainer-hero-balance', className="display-4 fw-bold font-monospace", style={"color": "#00ff41", "lineHeight": "1"}),
+                                html.Div(id='trainer-hero-balance', className="font-monospace", style={"lineHeight": "1"}),
                             ], width=4, className="border-end border-secondary"),
                             dbc.Col([
                                 html.Div("DAY P&L (UNREALIZED)", className="small text-muted font-monospace"),
@@ -135,6 +135,7 @@ def render():
                             dbc.Col([
                                 html.Div("LIQUID BUYING POWER", className="small text-muted font-monospace"),
                                 html.Div(id='trainer-hero-cash', className="fs-2 font-monospace text-info"),
+                                dcc.Store(id='trainer-cash-store') # Hidden store for callbacks
                             ], width=4),
                         ])
                     ], className="py-2")
@@ -196,7 +197,10 @@ def render():
                                 html.Label("QTY", className="small text-muted font-monospace"),
                                 dbc.Input(id='trainer-qty', type='number', min=1, value=1, className="font-monospace text-center bg-black text-white border-secondary")
                             ], width=6)
-                        ], className="mb-4"),
+                        ], className="mb-2"),
+
+                        # Cost Estimator
+                        html.Div(id='trainer-cost-preview', className="text-center mb-3 font-monospace", style={"fontSize": "1.2rem", "minHeight": "25px"}),
 
                         dbc.Button("EXECUTE SIGNAL", id='trainer-btn-buy', color="success", className="w-100 fw-bold font-monospace py-3", size="lg"),
                         html.Div(id='trainer-feedback', className="text-center mt-2 small font-monospace text-warning")
@@ -208,7 +212,21 @@ def render():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader("ACTIVE COMBAT POSITIONS", className="card-header font-monospace py-1", style={"backgroundColor": "#1a2a4a"}),
-                    dbc.CardBody(html.Div(id='trainer-positions-container', style={'minHeight': '150px'}), className="p-0")
+                    
+                    # --- NEW: TABLE HEADERS ---
+                    dbc.CardBody([
+                        # Static Header Row
+                        dbc.Row([
+                            dbc.Col("CONTRACT", width=4, className="small text-muted font-monospace fw-bold"),
+                            dbc.Col("EQUITY / MARK", width=3, className="text-center small text-muted font-monospace fw-bold"),
+                            dbc.Col("P&L / ROI", width=3, className="text-end small text-muted font-monospace fw-bold"),
+                            dbc.Col("ACTION", width=2, className="text-end small text-muted font-monospace fw-bold"),
+                        ], className="border-bottom border-secondary px-2 py-1 mx-2 mb-2"),
+
+                        # Dynamic Content Container
+                        html.Div(id='trainer-positions-container', style={'minHeight': '150px'})
+                    ], className="p-0 pt-2")
+
                 ], className="mb-3 border-secondary", style={"backgroundColor": "#0a0f1e"}),
 
                 dbc.Card([
@@ -271,7 +289,8 @@ def update_fast_ui(n):
      Output('trainer-positions-container', 'children'),
      Output('trainer-feedback', 'children'),
      Output('trainer-ledger', 'data'),
-     Output('trainer-strike', 'options')],
+     Output('trainer-strike', 'options'),
+     Output('trainer-cash-store', 'data')],
     [Input('trainer-refresh-slow', 'n_intervals'),
      Input('trainer-btn-buy', 'n_clicks'),
      Input({'type': 'trainer-close', 'index': ALL}, 'n_clicks'),
@@ -300,12 +319,30 @@ def update_slow_ui(n, buy_clicks, close_clicks, trade_type, strike, qty, order_m
     
     strike_opts = engine_simulator.generate_strikes(price, trade_type) if price > 0 else []
 
-    bal_str = f"${data['balance']:,.2f}"
-    pnl_val = data['day_pnl']
-    p_color = "#00ff41" if pnl_val >= 0 else "#ff5555"
-    pnl_str = html.Span(f"{pnl_val:+.2f}", style={"color": p_color})
+    # 1. HERO BALANCE
+    current_bal = data['balance']
+    day_gain = data['day_pnl']
+    start_bal = current_bal - day_gain
+    total_pct = (day_gain / start_bal * 100) if start_bal > 0 else 0.0
+    
+    if day_gain > 0: bal_color = "#00ff41" # Green
+    elif day_gain < 0: bal_color = "#ff5555" # Red
+    else: bal_color = "#ffffff" # White
+    
+    bal_str = html.Div([
+        html.Span(f"${current_bal:,.2f}", className="me-2", style={"fontSize": "2.5rem", "fontWeight": "bold", "color": bal_color}),
+        html.Span(f"({total_pct:+.1f}%)", style={"fontSize": "1.5rem", "color": bal_color})
+    ], className="d-flex align-items-baseline")
+    
+    # 2. DAY P&L
+    pnl_str = html.Div([
+        html.Span(f"${day_gain:+.2f}", className="me-2"),
+        html.Span(f"({total_pct:+.1f}%)", style={"fontSize": "1.2rem", "opacity": "0.8"})
+    ], style={"color": bal_color})
+
     cash_str = f"${data['cash']:,.2f}"
 
+    # 3. ACTIVE POSITIONS
     pos_ui = []
     if not data['positions']:
         pos_ui = html.Div("NO ACTIVE COMBAT POSITIONS", className="text-center text-muted font-monospace py-4")
@@ -314,31 +351,87 @@ def update_slow_ui(n, buy_clicks, close_clicks, trade_type, strike, qty, order_m
             try:
                 pnl_v = p['current_val'] - p['cost_basis']
                 pnl_p = (pnl_v / p['cost_basis']) * 100 if p['cost_basis'] > 0 else 0
-                c_color = "#00ff41" if pnl_v >= 0 else "#ff5555"
+                total_equity = p['current_val']
+                
+                if pnl_v > 0: c_color = "#00ff41"
+                elif pnl_v < 0: c_color = "#ff5555"
+                else: c_color = "#ffffff"
+                
+                contracts = p.get('contracts', 1)
+                curr_mark = (total_equity / (contracts * 100)) if contracts > 0 else 0.0
                 
                 row = dbc.Row([
+                    # COL 1: TICKER
                     dbc.Col([
                         html.Div(p['ticker'], className="fw-bold text-white font-monospace"),
-                        html.Div(f"{p['contracts']}x @ ${p['entry_px']:.2f}", className="text-muted small")
-                    ], width=5),
+                        html.Div(f"{contracts}x @ ${p['entry_px']:.2f}", className="text-muted small")
+                    ], width=4),
+                    
+                    # COL 2: EQUITY & MARK
+                    dbc.Col([
+                        html.Div(f"${total_equity:,.2f}", className="text-center fw-bold font-monospace text-info"),
+                        html.Div(f"@{curr_mark:.2f}", className="text-center text-muted x-small font-monospace")
+                    ], width=3),
+                    
+                    # COL 3: PNL
                     dbc.Col([
                         html.Div(f"${pnl_v:+.2f}", className="text-end fw-bold font-monospace", style={"color": c_color}),
                         html.Div(f"{pnl_p:+.1f}%", className="text-end small", style={"color": c_color})
-                    ], width=4),
+                    ], width=3),
+                    
+                    # COL 4: EXIT
                     dbc.Col([
                         dbc.Button("EXIT", id={'type': 'trainer-close', 'index': p['id']}, size="sm", color="warning", className="py-0 px-2 font-monospace")
-                    ], width=3, className="text-end")
+                    ], width=2, className="text-end")
                 ], className="border-bottom border-secondary py-2 mx-2 align-items-center")
                 pos_ui.append(row)
             except: continue
 
-    try:
-        ledger = engine_simulator.fetch_recent_transactions()
+    try: ledger = engine_simulator.fetch_recent_transactions()
     except: ledger = []
     
     price_disp = f"${price:.2f}" if price else "OFFLINE"
     
-    return price_disp, bal_str, pnl_str, cash_str, pos_ui, msg, ledger, strike_opts
+    return price_disp, bal_str, pnl_str, cash_str, pos_ui, msg, ledger, strike_opts, data['cash']
 
+# CALLBACK: TOGGLE LIMIT INPUT
 @callback(Output('trainer-limit-price', 'disabled'), Input('trainer-order-type', 'value'))
 def toggle_limit(mode): return mode == 'MARKET'
+
+# CALLBACK: COST CALCULATOR
+@callback(
+    Output('trainer-cost-preview', 'children'),
+    [Input('trainer-limit-price', 'value'),
+     Input('trainer-qty', 'value'),
+     Input('trainer-strike', 'value'),
+     Input('trainer-cash-store', 'data')],
+    [State('trainer-strike', 'options')]
+)
+def update_cost_preview(limit_px, qty, strike_val, available_cash, strike_opts):
+    def render_msg(val, color="#fff"):
+         return html.Span(f"EST. COST: ${val:,.2f}", style={"color": color, "fontWeight": "bold", "fontSize": "1.2rem"})
+
+    if not qty: return render_msg(0)
+
+    price = 0.0
+    if limit_px:
+        try: price = float(limit_px)
+        except: price = 0.0
+    elif strike_val and strike_opts:
+        selected_opt = next((o for o in strike_opts if o['value'] == strike_val), None)
+        if selected_opt:
+            label = selected_opt['label']
+            try:
+                price_part = label.split('$')[-1].strip()
+                price = float(price_part)
+            except:
+                price = 0.0
+
+    cost = price * int(qty) * 100
+    cash = float(available_cash) if available_cash else 0.0
+    
+    color = "#ffffff"
+    if cost > cash: color = "#ff5555"
+    elif cost > 0: color = "#fde722"
+
+    return render_msg(cost, color)
