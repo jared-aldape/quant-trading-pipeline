@@ -69,8 +69,8 @@ def fetch_polygon_backup(ticker):
     log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker}) [Delayed Stream]")
     
     try:
-        # Fetch last 2 days, but STOP 16 minutes ago to ensure completed candles
-        # This fixes the "High = Low" flat candle issue on Free Tier
+        # FIX: Force the window to end 16 minutes ago.
+        # This accesses the 'Delayed' bucket which allows full aggregates on Free Tier.
         end_dt = datetime.now() - timedelta(minutes=16)
         start_dt = end_dt - timedelta(days=2)
         
