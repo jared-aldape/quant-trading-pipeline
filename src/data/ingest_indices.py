@@ -57,17 +57,21 @@ def fetch_polygon_backup(ticker):
     """
     Fallback: Fetches Index Data from Polygon (Massive.com).
     Protocol: I:VIX, I:XSP
+    
+    [MAGITEK UPDATE]: Applied 16-minute offset for Free Tier to ensure 
+    full candle formation (prevents flat candles).
     """
     if not POLYGON_KEY: return pd.DataFrame()
     
     # Polygon Index Ticker Format
     poly_ticker = f"I:{ticker}" 
     
-    log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker})")
+    log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker}) [Delayed Stream]")
     
     try:
-        # Fetch last 2 days of minute data
-        end_dt = datetime.now()
+        # Fetch last 2 days, but STOP 16 minutes ago to ensure completed candles
+        # This fixes the "High = Low" flat candle issue on Free Tier
+        end_dt = datetime.now() - timedelta(minutes=16)
         start_dt = end_dt - timedelta(days=2)
         
         url = f"https://api.polygon.io/v2/aggs/ticker/{poly_ticker}/range/1/minute/{int(start_dt.timestamp()*1000)}/{int(end_dt.timestamp()*1000)}"
@@ -217,7 +221,7 @@ def run_ingest():
             # 1. Try Yahoo
             df = fetch_yahoo_data(y_ticker, friendly)
             
-            # 2. Try Polygon Backup if Yahoo Failed
+            # 2. Try Polygon Backup if Yahoo Failed OR returned empty
             if df.empty and USE_POLYGON_BACKUP:
                 df = fetch_polygon_backup(friendly)
                 
