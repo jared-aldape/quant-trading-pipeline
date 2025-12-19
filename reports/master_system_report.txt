@@ -1,6 +1,6 @@
 ================================================================================
 MAGITEK MASTER SYSTEM REPORT
-GENERATED: 2025-12-17 17:12:41
+GENERATED: 2025-12-18 13:29:25
 ================================================================================
 
 PART 1: FILE SYSTEM STRUCTURE
@@ -8,7 +8,6 @@ PART 1: FILE SYSTEM STRUCTURE
 .gitignore
 .ingest_cooldown
 Dockerfile
-Master Forensic Auditor.py
 assets\interface.css
 assets\magitek.css
 assets\quant_logo.svg
@@ -23,6 +22,7 @@ data\backups\quant_strategy_BACKUP_20251212_031531.duckdb
 data\debug_ytd_extract.csv
 data\full_options_dump.csv
 data\live_snapshot.json
+data\macro_sentiment.json
 data\model_fractal.pkl
 data\oracle_v1.joblib
 data\oracle_v2.joblib
@@ -42,6 +42,7 @@ logs\night_ops.log
 logs\pipeline.log
 logs\system.log
 main_pipeline.py
+master_forensic_auditor.py
 ops\99_init_repository.py
 ops\99_mobile_setup.sh
 ops\backfill_history.py
@@ -77,8 +78,10 @@ quant-key.pem
 quant_launcher.py
 readme.md
 reports\master_system_report.txt
+reports\robinhood_export_for_review.csv
 requirements.txt
 run_quant_os.bat
+service_live_data.py
 src\analysis\audit_model_features.py
 src\core\engine_backtest.py
 src\core\engine_bulk_history.py
@@ -100,8 +103,10 @@ src\core\sentinel.py
 src\core\strat_fractal.py
 src\core\train_scheduler.py
 src\data\db_schema.py
+src\data\export_ledger.py
 src\data\export_spx_flow.py
 src\data\hydrate_simulator.py
+src\data\ingest_catalyst.py
 src\data\ingest_daily_update.py
 src\data\ingest_indices.py
 src\data\ingest_macro.py
@@ -110,6 +115,7 @@ src\data\ingest_rh_html.py
 src\data\ingest_user_history.py
 src\data\inspect_ledger.py
 src\data\inspect_schema.py
+src\data\prime_vault.py
 src\data\probe_options_data.py
 src\interface\view_audit.py
 src\interface\view_capital_growth.py
@@ -137,7 +143,7 @@ PART 2: DATABASE SCHEMA & METRICS
 Source: quant_strategy.duckdb
 
 [TABLE: active_rh_log]
-Rows: 830
+Rows: 839
 Columns:
   - source_id            (VARCHAR)
   - entry_time_utc       (TIMESTAMP)
@@ -154,7 +160,7 @@ Columns:
   - opra_code            (VARCHAR)
 
 [TABLE: active_simulation_log]
-Rows: 20
+Rows: 3
 Columns:
   - entry_time           (TIMESTAMP)
   - exit_time            (TIMESTAMP)
@@ -194,7 +200,7 @@ Columns:
   - volume               (DOUBLE)
 
 [TABLE: indices_1m]
-Rows: 507,496
+Rows: 8,078
 Columns:
   - datetime_utc         (TIMESTAMP)
   - open                 (DOUBLE)
@@ -235,7 +241,7 @@ Columns:
   - bear_pct             (DOUBLE)
 
 [TABLE: options_1m]
-Rows: 1,071,685
+Rows: 1,079,593
 Columns:
   - datetime_utc         (TIMESTAMP)
   - ticker               (VARCHAR)
@@ -288,8 +294,8 @@ Columns:
 PART 3: ACTIVE SIM SESSION
 ------------------------------
 {
-    "balance": 1950.9310000515595,
-    "liquid_cash": 1950.9310000515595,
+    "balance": 3709.5539816521996,
+    "liquid_cash": 3709.5539816521996,
     "positions": [],
     "trades": [
         {
@@ -430,6 +436,26 @@ PART 3: ACTIVE SIM SESSION
             "entry_px": 0.01,
             "price": 0.01,
             "pnl": -1.0300000000000002,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-18 10:02:18",
+            "ticker": "XSP 679P",
+            "action": "SELL",
+            "qty": 10,
+            "entry_px": 0.19704743628602728,
+            "price": 0.5436714903822804,
+            "pnl": 336.32405409625306,
+            "reason": "MANUAL"
+        },
+        {
+            "exit_time": "2025-12-18 10:02:19",
+            "ticker": "XSP 682P",
+            "action": "SELL",
+            "qty": 10,
+            "entry_px": 1.192465866076759,
+            "price": 2.6250647935811458,
+            "pnl": 1422.2989275043867,
             "reason": "MANUAL"
         }
     ]

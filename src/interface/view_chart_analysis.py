@@ -9,7 +9,6 @@ from datetime import datetime, time, timedelta
 import pytz
 import pathlib
 import sys
-import time as t_time
 import numpy as np
 
 # ==============================================================================
@@ -47,30 +46,51 @@ def calculate_linreg(df):
 # 3. DATA INGESTION
 # ==============================================================================
 def fetch_unique_dates(trade_type_filter='call'):
+    """
+    Revised: Pulls ALL dates from Indices (Truth), then joins with Manifest.
+    This ensures we can see dates even if 0 signals exist.
+    """
     try:
         if not config.DB_FILE.exists(): return []
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
-        tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
-        if config.TBL_MANIFEST not in tables: 
-             con.close(); return []
-
-        t_filter = trade_type_filter.upper()
-        query = f"""
-            SELECT date, COUNT(*) as sig_count
-            FROM {config.TBL_MANIFEST}
-            WHERE trade_type = '{t_filter}'
-            GROUP BY date
+        
+        # 1. Get All Valid Data Dates
+        q_dates = f"""
+            SELECT DISTINCT CAST(datetime_utc AS DATE) as date 
+            FROM {config.TBL_INDICES} 
             ORDER BY date DESC
         """
-        df = con.execute(query).df()
+        df_dates = con.execute(q_dates).df()
+        
+        if df_dates.empty: 
+            con.close(); return []
+
+        # 2. Get Signal Counts (Optional Context)
+        t_filter = trade_type_filter.upper()
+        try:
+            q_sigs = f"""
+                SELECT date, COUNT(*) as cnt 
+                FROM {config.TBL_MANIFEST} 
+                WHERE trade_type = '{t_filter}' 
+                GROUP BY date
+            """
+            df_sigs = con.execute(q_sigs).df()
+            
+            # Merge
+            df = pd.merge(df_dates, df_sigs, on='date', how='left')
+            df['cnt'] = df['cnt'].fillna(0).astype(int)
+        except:
+            df = df_dates
+            df['cnt'] = 0
+
         con.close()
         
-        if df.empty: return []
         options = []
         for _, row in df.iterrows():
-            d_str = row['date'].strftime('%Y-%m-%d') if not isinstance(row['date'], str) else row['date']
-            label = f"{d_str} ({row['sig_count']} Signals)"
-            options.append({'label': label, 'value': d_str})
+            d_str = row['date'].strftime('%Y-%m-%d')
+            count_str = f"({row['cnt']} Signals)" if row['cnt'] > 0 else "(No Signals)"
+            options.append({'label': f"{d_str} {count_str}", 'value': d_str})
+            
         return options
     except Exception as e: return []
 
@@ -87,10 +107,17 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             ORDER BY entry_timestamp_utc ASC
         """
         signals = con.execute(query).df()
-        con.close()
         
-        if signals.empty: return [], None
+        # --- FALLBACK IF NO SIGNALS ---
+        if signals.empty: 
+            con.close()
+            # Create a "Dummy Signal" at 9:30 AM ET so user can still view the chart
+            dt_ny = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=9, minute=30)
+            dt_ny = config.TZ_NY.localize(dt_ny)
+            dummy_ts = int(dt_ny.timestamp() * 1000)
+            return [{'label': '⚠️ No Signals (View Session)', 'value': dummy_ts}], dummy_ts
 
+        # --- NORMAL PROCESSING ---
         options_list = []
         best_ts = None
         
@@ -101,11 +128,30 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             clean_meta = str(row['meta_data']).replace('VIX_FRACTAL_LONG', '').replace('VIX_FRACTAL_SHORT', '').strip()
             if "|" in clean_meta: clean_meta = clean_meta.split('|')[-1].strip()
             
-            label = f"Signal #{i+1} ({time_str}) | {clean_meta}"
+            # PnL Preview
+            gain_str = ""
+            try:
+                date_fmt = entry_dt.strftime('%y%m%d')
+                opt_code = 'C' if t_type == 'CALL' else 'P'
+                strike = int(round(float(row['xsp_price'])) * 1000)
+                ticker_part = f"XSP{date_fmt}{opt_code}{strike:08d}"
+                
+                q_px = f"SELECT open, high FROM {config.TBL_OPTIONS} WHERE ticker LIKE '%{ticker_part}' LIMIT 100"
+                px_df = con.execute(q_px).df()
+                if not px_df.empty:
+                    entry = px_df['open'].iloc[0]
+                    high = px_df['high'].max()
+                    if entry > 0:
+                        gain = ((high - entry) / entry) * 100
+                        gain_str = f" | Max: +{gain:.0f}%"
+            except: pass
+
+            label = f"Signal #{i+1} ({time_str}){gain_str} | {clean_meta}"
             options_list.append({'label': label, 'value': ts})
             
             if i == 0: best_ts = ts
 
+        con.close()
         return options_list, best_ts
     except Exception as e:
         return [], None
@@ -113,19 +159,33 @@ def scout_day_performance(date_str, trade_type_filter='call'):
 def fetch_available_strikes(entry_ts, trade_type):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        
+        # 1. Try Manifest First
         res = con.execute(f"SELECT xsp_price, date FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc={entry_ts}").fetchone()
         
-        if not res: 
-            con.close(); return [], None
+        if res:
+            xsp_price, date_val = res
+            dt = date_val if isinstance(date_val, (datetime, pd.Timestamp)) else datetime.strptime(str(date_val), '%Y-%m-%d')
+        else:
+            # 2. Fallback: Lookup Price from Indices directly (For No-Signal Days)
+            ts_sec = entry_ts / 1000
+            dt = datetime.fromtimestamp(ts_sec, tz=pytz.utc).astimezone(config.TZ_NY)
+            dt_str = dt.strftime('%Y-%m-%d %H:%M:%S')
             
-        xsp_price, date_val = res
+            # Get Price at that minute
+            q_fallback = f"SELECT close FROM {config.TBL_INDICES} WHERE ticker='XSP' AND datetime_utc <= '{dt_str}' ORDER BY datetime_utc DESC LIMIT 1"
+            res_fb = con.execute(q_fallback).fetchone()
+            
+            if not res_fb:
+                con.close(); return [], None
+            
+            xsp_price = res_fb[0]
+
         target_strike = round(float(xsp_price))
-        
-        dt = date_val if isinstance(date_val, (datetime, pd.Timestamp)) else datetime.strptime(str(date_val), '%Y-%m-%d')
         date_fmt = dt.strftime('%y%m%d')
         opt_code = 'C' if trade_type.upper() == 'CALL' else 'P'
+        like_pattern = f"%XSP{date_fmt}{opt_code}%"
         
-        like_pattern = f"O:XSP{date_fmt}{opt_code}%"
         tickers = con.execute(f"SELECT DISTINCT ticker FROM {config.TBL_OPTIONS} WHERE ticker LIKE '{like_pattern}'").fetchall()
         con.close()
         
@@ -138,7 +198,8 @@ def fetch_available_strikes(entry_ts, trade_type):
         for t in tickers:
             ticker = t[0]
             try:
-                strike_val = int(ticker[-8:]) / 1000.0
+                strike_str = ticker[-8:] 
+                strike_val = int(strike_str) / 1000.0
                 diff = strike_val - target_strike
                 
                 if diff == 0: label = f"{strike_val:.0f} (ATM)"
@@ -170,7 +231,6 @@ def fetch_trade_performance(entry_ts_ms, ticker, sim_stop_pct=20):
 
         entry_dt_utc = datetime.fromtimestamp(entry_ts_ms / 1000, tz=pytz.utc).replace(tzinfo=None)
         
-        # Determine RTH window
         entry_dt_ny = datetime.fromtimestamp(entry_ts_ms / 1000, tz=pytz.utc).astimezone(config.TZ_NY)
         day_date = entry_dt_ny.date()
         start_str = config.TZ_NY.localize(datetime.combine(day_date, time(9, 30))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -188,35 +248,33 @@ def fetch_trade_performance(entry_ts_ms, ticker, sim_stop_pct=20):
              temp['datetime_utc'] = temp['datetime_utc'].dt.tz_convert(None)
         
         idx = temp['datetime_utc'].sub(entry_dt_utc).abs().idxmin()
-        df = df.loc[idx:].copy()
         
-        entry_price = 0.0
-        for px in df['open'].head(30):
-            if px > 0.01:
-                entry_price = px
-                break
+        sim_slice = df.loc[idx:].copy()
+        entry_price = df.loc[idx, 'open']
         
-        if entry_price == 0.0 and not df.empty: entry_price = df.iloc[0]['open']
         if entry_price < 0.01: entry_price = 0.01
 
-        df['pnl_pct'] = ((df['open'] - entry_price) / entry_price) * 100
-        
-        max_price = df['high'].max()
-        max_gain = ((max_price - entry_price) / entry_price) * 100
-        sim_exit_pct = df.iloc[-1]['pnl_pct']
+        sim_slice['pnl_pct'] = ((sim_slice['open'] - entry_price) / entry_price) * 100
         
         stop_mult = 1.0 - (sim_stop_pct / 100.0)
-        df['rolling_max'] = df['high'].cummax()
-        df['stop_level'] = df['rolling_max'] * stop_mult
+        sim_slice['rolling_max'] = sim_slice['high'].cummax()
+        sim_slice['stop_level'] = sim_slice['rolling_max'] * stop_mult
         
-        stop_hits = df[df['low'] < df['stop_level']]
-        df['sim_pnl_pct'] = df['pnl_pct']
+        stop_hits = sim_slice[sim_slice['low'] < sim_slice['stop_level']]
+        sim_slice['sim_pnl_pct'] = sim_slice['pnl_pct']
         
+        sim_exit_pct = sim_slice.iloc[-1]['pnl_pct'] if not sim_slice.empty else 0
         if not stop_hits.empty:
             first_stop_idx = stop_hits.index[0]
-            sim_exit_pct = df.loc[first_stop_idx, 'pnl_pct']
-            df.loc[first_stop_idx:, 'sim_pnl_pct'] = sim_exit_pct
-            
+            sim_exit_pct = sim_slice.loc[first_stop_idx, 'pnl_pct']
+            sim_slice.loc[first_stop_idx:, 'sim_pnl_pct'] = sim_exit_pct
+
+        df['sim_pnl_pct'] = np.nan
+        df.loc[idx:, 'sim_pnl_pct'] = sim_slice['sim_pnl_pct']
+        
+        max_price = sim_slice['high'].max() if not sim_slice.empty else 0
+        max_gain = ((max_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        
         stats = {
             "entry": entry_price,
             "max_price": max_price,
@@ -272,7 +330,7 @@ def fetch_indicators(entry_ts_ms):
         if config.TBL_INDICES not in tables:
              con.close(); return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        df_idx = con.execute(f"SELECT datetime_utc, ticker, open, high, low, close FROM {config.TBL_INDICES} WHERE ticker IN ('VIX', 'XSP') AND datetime_utc >= '{s_str}' AND datetime_utc <= '{e_str}' ORDER BY datetime_utc ASC").df()
+        df_idx = con.execute(f"SELECT datetime_utc, ticker, open, high, low, close FROM {config.TBL_INDICES} WHERE datetime_utc >= '{s_str}' AND datetime_utc <= '{e_str}' ORDER BY datetime_utc ASC").df()
         
         tbl_fut = getattr(config, 'TBL_FUTURES', 'futures_1m')
         if tbl_fut in tables:
@@ -291,13 +349,18 @@ def fetch_indicators(entry_ts_ms):
             df_idx['datetime_utc'] = pd.to_datetime(df_idx['datetime_utc'])
             df_idx['datetime_local'] = to_wall_clock(df_idx['datetime_utc'])
             
-            if 'XSP' in df_idx['ticker'].values:
-                xsp = df_idx[df_idx['ticker'] == 'XSP'].copy().set_index('datetime_local')
+            xsp_mask = df_idx['ticker'].str.contains('XSP', case=False, na=False)
+            if xsp_mask.any():
+                xsp = df_idx[xsp_mask].copy().set_index('datetime_local')
+                xsp = xsp[~xsp.index.duplicated(keep='first')]
                 xsp['sma_50'] = xsp['close'].rolling(50).mean()
                 xsp = calculate_linreg(xsp)
 
-            if 'VIX' in df_idx['ticker'].values:
-                vix = df_idx[df_idx['ticker'] == 'VIX'].copy().set_index('datetime_local')
+            vix_mask = df_idx['ticker'].str.contains('VIX', case=False, na=False)
+            if vix_mask.any():
+                vix = df_idx[vix_mask].copy().set_index('datetime_local')
+                vix = vix[~vix.index.duplicated(keep='first')]
+                
                 vix['ema12'] = vix['close'].ewm(span=12).mean()
                 vix['ema26'] = vix['close'].ewm(span=26).mean()
                 vix['macd'] = vix['ema12'] - vix['ema26']
@@ -325,7 +388,6 @@ def fetch_indicators(entry_ts_ms):
 # ==============================================================================
 def render():
     return dbc.Container([
-        # HEADER
         dbc.Row([
             dbc.Col([
                 html.H2("LIBRA SCAN COMMAND", className="magitek-h2"),
@@ -351,7 +413,6 @@ def render():
             ], width=4, className="align-self-center")
         ], className="mb-4 p-3 card flex-row align-items-center", style={"backgroundColor": "#283878", "border": "2px solid #b5b8b9", "borderRadius": "4px", "color": "#f3f5f9", "boxShadow": "0px 0px 10px rgba(0,0,0,0.5)"}),
 
-        # 3-COLUMN LAYOUT
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -386,7 +447,6 @@ def render():
             ], width=4)
         ], className="mb-3"),
 
-        # CHART (ModeBar Restored)
         dbc.Row([dbc.Col([dcc.Graph(id='chart-main-display', style={'height': '900px'}, config={'displayModeBar': True})], width=12)])
     ], fluid=True)
 
@@ -431,7 +491,7 @@ def update_strike_options(entry_ts, mode):
 )
 def update_chart(entry_ts, ticker, stop_pct, mode):
     empty_fig = go.Figure()
-    empty_fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+    empty_fig.update_layout(template="plotly_dark", paper_bgcolor='#000000', plot_bgcolor='#000000') 
     if not entry_ts or not ticker: return empty_fig, "NO DATA", ""
 
     if not config.DB_FILE.exists(): return empty_fig, "DB MISSING", ""
@@ -456,56 +516,52 @@ def update_chart(entry_ts, ticker, stop_pct, mode):
     day_start = entry_wc.replace(hour=6, minute=30, second=0)
     day_end = entry_wc.replace(hour=13, minute=0, second=0)
 
-    # 1. XSP + LinReg + ORB (Row 1)
+    # 1. XSP (Row 1)
     if not xsp_df.empty:
-        # ORB
-        start_window = day_start
-        end_window = day_start + timedelta(minutes=30)
-        orb_df = xsp_df[(xsp_df.index >= start_window) & (xsp_df.index <= end_window)]
+        orb_start = day_start
+        orb_end = day_start + timedelta(minutes=30)
+        orb_df = xsp_df[(xsp_df.index >= orb_start) & (xsp_df.index <= orb_end)]
         orb_h = orb_df['high'].max() if not orb_df.empty else None
         orb_l = orb_df['low'].min() if not orb_df.empty else None
 
-        fig.add_trace(go.Candlestick(x=xsp_df.index, open=xsp_df['open'], high=xsp_df['high'], low=xsp_df['low'], close=xsp_df['close'], name="XSP"), row=1, col=1)
+        fig.add_trace(go.Candlestick(
+            x=xsp_df.index, open=xsp_df['open'], high=xsp_df['high'], low=xsp_df['low'], close=xsp_df['close'], name="XSP",
+            increasing_line_color='#00bc8c', decreasing_line_color='#e74c3c',
+            line_width=1 
+        ), row=1, col=1)
         
         if 'reg_line' in xsp_df.columns:
             fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Mean"), row=1, col=1)
             fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['upper_band'], line=dict(color='cyan', width=1), name="+2σ"), row=1, col=1)
             fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['lower_band'], line=dict(color='cyan', width=1), name="-2σ"), row=1, col=1)
-            
-            # ⚡ GHOST LINES ON ROW 2 - MOVED TO SECONDARY AXIS + HOVER SKIP
-            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['reg_line'], line=dict(color='yellow', width=1, dash='dot'), showlegend=False, hoverinfo='skip'), row=2, col=1, secondary_y=True)
-            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['upper_band'], line=dict(color='cyan', width=1), showlegend=False, hoverinfo='skip'), row=2, col=1, secondary_y=True)
-            fig.add_trace(go.Scatter(x=xsp_df.index, y=xsp_df['lower_band'], line=dict(color='cyan', width=1), showlegend=False, hoverinfo='skip'), row=2, col=1, secondary_y=True)
 
         if orb_h and orb_l:
             fig.add_hline(y=orb_h, line_dash="solid", line_color="green", opacity=0.5, row=1, col=1)
             fig.add_hline(y=orb_l, line_dash="solid", line_color="red", opacity=0.5, row=1, col=1)
-            # Ghost ORB Row 2 (On Secondary Axis)
-            fig.add_hline(y=orb_h, line_dash="solid", line_color="green", opacity=0.3, row=2, col=1, secondary_y=True)
-            fig.add_hline(y=orb_l, line_dash="solid", line_color="red", opacity=0.3, row=2, col=1, secondary_y=True)
 
         has_data = True
+    else:
+        fig.add_annotation(text="NO XSP DATA", row=1, col=1, font=dict(color="red"))
 
     if not es_df.empty:
         fig.add_trace(go.Scatter(x=es_df.index, y=es_df['scaled_close'], name="/ES (x0.1)", line=dict(color='#00d2ff', width=1, dash='dot')), row=1, col=1)
 
-    # 2. OPTIONS (Row 2) - CLEAN CANDLES (Replay Style)
+    # 2. OPTIONS (Row 2) - FULL DAY VISIBLE
     if opt_df is not None and not opt_df.empty:
         has_data = True
         
-        # ⚡ OPTION CANDLES (Primary Axis - Dollars)
         fig.add_trace(go.Candlestick(
             x=opt_df['datetime_local'],
             open=opt_df['open'], high=opt_df['high'],
             low=opt_df['low'], close=opt_df['close'],
             name="Option",
+            increasing_line_color='#00bc8c', decreasing_line_color='#e74c3c',
+            line_width=1,
             hoverlabel=dict(bgcolor="#1e1e1e", font=dict(color="white", family="monospace"))
         ), row=2, col=1, secondary_y=False)
         
-        # Sim Line (Primary Axis)
         fig.add_trace(go.Scatter(x=opt_df['datetime_local'], y=opt_df['sim_pnl_pct'], name="Sim Stop", line=dict(color='yellow', width=2, dash='dot')), row=2, col=1, secondary_y=False)
         
-        # Thin White Price Line (Secondary Axis - Index Scale)
         fig.add_trace(go.Scatter(x=opt_df['datetime_local'], y=opt_df['open'], name="Price", line=dict(color='white', width=1)), row=2, col=1, secondary_y=True)
         
         if not fills.empty:
@@ -513,28 +569,49 @@ def update_chart(entry_ts, ticker, stop_pct, mode):
 
     # 3. VIX Fractal (Row 3)
     if not vix_df.empty:
-        fig.add_trace(go.Bar(x=vix_df.index, y=vix_df['hist'], name="Hist", marker_color='rgba(255, 255, 255, 0.3)'), row=3, col=1)
-        fig.add_trace(go.Scatter(x=vix_df.index, y=vix_df['macd'], name="MACD", line=dict(color='#f1c40f', width=1)), row=3, col=1)
+        fig.add_trace(go.Bar(
+            x=vix_df.index, 
+            y=vix_df['hist'], 
+            name="Hist", 
+            marker_color='rgba(255, 255, 255, 0.4)' 
+        ), row=3, col=1)
+        
+        fig.add_trace(go.Scatter(
+            x=vix_df.index, 
+            y=vix_df['macd'], 
+            name="MACD", 
+            line=dict(color='#f1c40f', width=1.5) 
+        ), row=3, col=1)
+    else:
+        fig.add_annotation(text="NO VIX DATA", row=3, col=1, font=dict(color="red"))
 
     # 4. RSI (Row 4)
     if not vix_df.empty:
-        fig.add_trace(go.Scatter(x=vix_df.index, y=vix_df['rsi'], name="RSI", line=dict(color='#a855f7', width=1.5, shape='spline')), row=4, col=1)
-        fig.add_hline(y=70, line_dash="dot", line_color="red", row=4, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="green", row=4, col=1)
+        fig.add_trace(go.Scatter(
+            x=vix_df.index, 
+            y=vix_df['rsi'], 
+            name="RSI", 
+            line=dict(color='#aa00ff', width=1.5)
+        ), row=4, col=1)
+        
+        fig.add_hline(y=70, line_dash="dot", line_color="#e74c3c", row=4, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="#00bc8c", row=4, col=1)
+    else:
+        fig.add_annotation(text="NO RSI DATA", row=4, col=1, font=dict(color="red"))
 
     if not has_data:
         empty_fig.add_annotation(text="DATA UNAVAILABLE", showarrow=False, font=dict(size=20, color="red"))
         return empty_fig, "NO DATA", ""
         
-    # ⚡ ZOOM LOCKED & STATE RESET
-    fig.update_xaxes(matches='x', range=[day_start, day_end], type='date', fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
+    # LAYOUT LOCK
+    fig.update_xaxes(matches='x', range=[day_start, day_end], type='date', rangeslider_visible=False, showgrid=True, gridcolor='#222')
+    fig.update_yaxes(fixedrange=True, showgrid=True, gridcolor='#222')
     
     fig.update_layout(
-        uirevision=entry_ts, # ⚡ CRITICAL FIX: Resets View State on New Signal
+        uirevision=entry_ts,
         template="plotly_dark", 
-        paper_bgcolor='rgba(0,0,0,0)', 
-        plot_bgcolor='rgba(0,0,0,0)', 
+        paper_bgcolor='#000000', 
+        plot_bgcolor='#000000', 
         margin=dict(l=40, r=40, t=30, b=40), 
         showlegend=False, 
         height=900,
@@ -546,12 +623,9 @@ def update_chart(entry_ts, ticker, stop_pct, mode):
     fig.add_vline(x=entry_wc, line_width=1, line_dash="dash", line_color="lime", row=1, col=1)
     fig.add_annotation(x=entry_wc, y=1.0, yref="paper", text="SIGNAL", showarrow=False, font=dict(color="lime", size=10), bgcolor="rgba(0,0,0,0.5)")
     
-    # --- REPORT CARD GENERATION ---
     entry = stats.get('entry', 0)
     max_gain = stats.get('max_gain', 0)
     sim_exit = stats.get('sim_exit', 0)
-    
-    # Safe coloring logic for formatted string
     sim_color = 'text-success' if sim_exit > 0 else 'text-danger'
     
     report_html = html.Div([
