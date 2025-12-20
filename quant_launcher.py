@@ -17,6 +17,7 @@ from src.interface import view_live_scope, view_options_sim, view_replay_analysi
 from src.interface import view_chart_analysis, view_audit, view_rh_ledger
 from src.interface import view_statistics, view_capital_growth
 from src.interface import view_data_generator, view_rh_mirror, view_system_info
+from src.interface import view_optimal_lab  # <--- NEW MODULE
 
 # ==============================================================================
 # 3. APP INITIALIZATION
@@ -52,6 +53,7 @@ nav_content = html.Div([
     dbc.Nav(
         [
             dbc.NavLink("👁️ LIBRA SCAN", href="/chart", active="exact"),
+            dbc.NavLink("🧪 OPTIMAL LAB", href="/lab", active="exact", className="text-success fw-bold"), # <--- NEW LINK
             dbc.NavLink("⚖️ JUDGMENT", href="/audit", active="exact"),
             dbc.NavLink("💰 GIL LEDGER", href="/ledger", active="exact"),
             dbc.NavLink("📊 JOB STATS", href="/stats", active="exact"),
@@ -154,12 +156,12 @@ def manage_sidebar(n_clicks, pathname, is_open):
 # Page Routing Logic
 @app.callback(Output("page-content", "children"), [Input("url", "pathname")])
 def render_page_content(pathname):
-    # CHANGED: Default "/" now points to Status Info
     if pathname == "/" or pathname == "/info": return view_system_info.render()
     elif pathname == "/scope": return view_live_scope.render()
     elif pathname == "/sim": return view_options_sim.render()
     elif pathname == "/replay": return view_replay_analysis.render()
     elif pathname == "/chart": return view_chart_analysis.render()
+    elif pathname == "/lab": return view_optimal_lab.render()  # <--- NEW ROUTE
     elif pathname == "/audit": return view_audit.render()
     elif pathname == "/ledger": return view_rh_ledger.render()
     elif pathname == "/stats": return view_statistics.render()

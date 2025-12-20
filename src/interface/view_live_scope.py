@@ -37,7 +37,6 @@ HOLIDAYS = {
 # STYLES
 STYLE_MONO = {'fontFamily': "'VT323', monospace"}
 STYLE_VALUE = {'fontFamily': "'VT323', monospace", 'fontSize': '1.2rem', 'color': '#fff'}
-STYLE_LABEL = {'fontFamily': "'VT323', monospace", 'color': '#b5b8b9', 'fontSize': '0.9rem', 'fontWeight': 'bold'}
 
 def get_market_status():
     """Standardized Status Logic."""
@@ -89,21 +88,16 @@ def get_market_status():
 # 2. DATA ENGINE
 # ==============================================================================
 def load_macro_bias():
-    if not MACRO_FILE.exists():
-        return "NEUTRAL", "#b5b8b9", "NO DATA"
+    if not MACRO_FILE.exists(): return "NEUTRAL", "#b5b8b9", "NO DATA"
     try:
         with open(MACRO_FILE, 'r') as f:
             data = json.load(f)
             bias = data.get('bias', 'NEUTRAL')
-            reason = data.get('reason', '')
-            
             color = "#fde722" 
             if bias == "BULLISH": color = "#00ff41"
             elif bias == "BEARISH": color = "#ff5555"
-            
-            return bias, color, reason
-    except:
-        return "ERROR", "#ff5555", "READ FAIL"
+            return bias, color, ""
+    except: return "ERROR", "#ff5555", "READ FAIL"
 
 def filter_to_rth(df):
     if df is None or df.empty: return df
@@ -124,9 +118,7 @@ def load_snapshot():
         
         # TIMEZONE FIX: Force conversion to US/Pacific for display
         updated_ts = pd.to_datetime(data.get('updated', datetime.now()))
-        if updated_ts.tzinfo is None: 
-            updated_ts = updated_ts.replace(tzinfo=pytz.utc)
-        
+        if updated_ts.tzinfo is None: updated_ts = updated_ts.replace(tzinfo=pytz.utc)
         target_tz = pytz.timezone('US/Pacific')
         updated_str = updated_ts.astimezone(target_tz).strftime('%H:%M:%S %Z')
         
@@ -145,8 +137,7 @@ def load_snapshot():
         xsp = filter_to_rth(xsp)
         vix = filter_to_rth(vix)
         return xsp, vix, updated_str
-    except Exception as e:
-        return None, None, "ERROR"
+    except: return None, None, "ERROR"
 
 def calculate_orb(df):
     if df is None or df.empty: return None, None
@@ -190,8 +181,6 @@ def fetch_market_internals(vix_df):
 # ==============================================================================
 def render():
     return dbc.Container([
-        
-        # --- COMMAND HEADER ---
         dbc.Row([
             dbc.Col([
                 html.H2("ATB SCOPE COMMAND", className="fw-bold text-white mb-0", style={"fontFamily": "'VT323', monospace", "letterSpacing": "2px", "textShadow": "2px 2px #000"}),
@@ -200,12 +189,11 @@ def render():
             
             dbc.Col([
                 dbc.Row([
-                    # UPDATED: REFRESH BUTTON & TIMESTAMP
                     dbc.Col([
                         html.Div("LAST REFRESH:", className="text-end small fw-bold", style={'color': '#b5b8b9', **STYLE_MONO}),
                         html.Div(id="data-freshness", className="text-end fw-bold", style={'color': '#fde722', 'fontSize': '1.2rem', **STYLE_MONO}),
                         dbc.Button("↻ REFRESH DATA", id="btn-manual-refresh", size="sm", color="info", className="mt-1 w-100 font-monospace", style={"fontSize": "0.8rem", "fontWeight": "bold"}),
-                        html.Div(id="refresh-feedback", style={'display': 'none'}) # Dummy for callback output
+                        html.Div(id="refresh-feedback", style={'display': 'none'})
                     ], width=4),
                     
                     dbc.Col([
@@ -217,7 +205,6 @@ def render():
             ], width=6, className="align-self-center")
         ], className="mb-4 pb-2", style={"backgroundColor": "#283878", "border": "2px solid #b5b8b9", "borderRadius": "4px", "padding": "10px", "boxShadow": "0px 0px 15px rgba(0,0,0,0.8)"}),
 
-        # --- ROW 2: TACTICAL STRIP ---
         dbc.Row([
             dbc.Col([
                 html.Div("VIX THERMOMETER", className="small text-muted fw-bold mb-1", style=STYLE_MONO),
@@ -243,13 +230,7 @@ def render():
             ], width=3, className="ps-2")
         ], className="py-2 mb-3", style={"backgroundColor": "#050a18", "border": "1px solid #444", "borderRadius": "4px", "padding": "10px"}),
 
-        # --- ROW 3: SCOPE (THE CHARTS) ---
-        dbc.Row([
-            dbc.Col([
-                dcc.Graph(id='live-scope-chart', style={'height': '75vh'}, config={'displayModeBar': True})
-            ], width=12)
-        ], className="g-0"),
-
+        dbc.Row([dbc.Col([dcc.Graph(id='live-scope-chart', style={'height': '75vh'}, config={'displayModeBar': True})], width=12)], className="g-0"),
         dcc.Interval(id='scope-heartbeat', interval=5000, n_intervals=0)
     ], fluid=True, className="px-3 py-3", style={"backgroundColor": "#000"})
 
@@ -257,22 +238,17 @@ def render():
 # 4. CALLBACKS
 # ==============================================================================
 
-# NEW CALLBACK: MANUAL REFRESH TRIGGER
+# UPDATED: POINTS TO OPS/REFRESH_LIVE.PY
 @callback(
     Output("refresh-feedback", "children"),
     Input("btn-manual-refresh", "n_clicks"),
     prevent_initial_call=True
 )
 def trigger_pipeline(n):
-    """
-    Spawns the main_pipeline.py as a separate process.
-    This prevents the UI from freezing while the heavy lifting happens.
-    The Dashboard will update automatically when the file is written.
-    """
     if n:
         try:
-            # Execute main_pipeline.py in a detached process
-            subprocess.Popen([sys.executable, "main_pipeline.py"], cwd=str(ROOT_DIR))
+            # ⚡ CRITICAL FIX: Pointing to the new 'ops' script
+            subprocess.Popen([sys.executable, "ops/refresh_live.py"], cwd=str(ROOT_DIR))
             return "Triggered"
         except Exception as e:
             return f"Error: {e}"
@@ -294,22 +270,18 @@ def trigger_pipeline(n):
     [Input('scope-heartbeat', 'n_intervals')]
 )
 def update_hud(n):
-    # 1. Fetch Data
     xsp, vix, updated_str = load_snapshot()
-    macro_bias, macro_color, macro_reason = load_macro_bias()
+    macro_bias, macro_color, _ = load_macro_bias()
     
-    # 2. Clock & Status
     now_local = datetime.now(pytz.timezone('US/Pacific'))
     time_str = now_local.strftime("%H:%M:%S")
     status_html, next_info, is_active = get_market_status()
     
-    # RTH Boundaries
     today_date = now_local.date()
     rth_start_dt = datetime.combine(today_date, time(6, 30)).replace(tzinfo=pytz.timezone('US/Pacific'))
     rth_end_dt = datetime.combine(today_date, time(13, 0)).replace(tzinfo=pytz.timezone('US/Pacific'))
 
-    macro_style = {'color': macro_color, 'fontSize': '1.3rem', 'letterSpacing': '1px'}
-    macro_style.update(STYLE_MONO)
+    macro_style = {'color': macro_color, 'fontSize': '1.3rem', 'letterSpacing': '1px', **STYLE_MONO}
 
     if xsp is None or xsp.empty:
         fig = go.Figure()
@@ -317,12 +289,10 @@ def update_hud(n):
         fig.update_layout(template="plotly_dark", paper_bgcolor='black', plot_bgcolor='rgba(0,0,0,0)', xaxis_visible=False, yaxis_visible=False)
         return fig, time_str, status_html, next_info, "OFFLINE", 0, "secondary", "--", [], "", "WAITING", macro_style
 
-    # 3. Math & Logic
     xsp = calculate_linreg(xsp)
     vix = fetch_market_internals(vix)
     orb_h, orb_l = calculate_orb(xsp)
 
-    # 4. Metrics
     curr_vix = 0
     vix_pct = 50
     p_call, p_put = 50, 50
@@ -345,7 +315,6 @@ def update_hud(n):
         html.Span(f"PUT: {p_put}%", style={'color': '#e74c3c' if p_put > 55 else '#555', **STYLE_MONO})
     ])
     
-    # Badges
     alert_msg = "SYSTEM NOMINAL"
     alert_color = "success"
     if curr_vix > 20: 
@@ -358,7 +327,6 @@ def update_hud(n):
     badges = [dbc.Badge(alert_msg, color=alert_color, className="me-2", style=STYLE_MONO)]
     therm_color = "danger" if vix_pct > 75 else "info" if vix_pct < 25 else "success"
 
-    # 5. Chart
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2],
                         subplot_titles=("XSP (ORB + LinReg)", "VIX FRACTAL (MACD)", "VIX RSI"))
 

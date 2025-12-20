@@ -24,12 +24,10 @@ from src.utils import config
 # ==============================================================================
 def to_wall_clock(series):
     if series.empty: return series
-    # Ensure UTC awareness first
     if series.dt.tz is None:
         series = series.dt.tz_localize('UTC')
     else:
         series = series.dt.tz_convert('UTC')
-    # Convert to Local (PST)
     series = series.dt.tz_convert(config.TZ_LOCAL)
     return series.dt.tz_localize(None)
 
@@ -45,38 +43,70 @@ def calculate_linreg(df):
     return df
 
 def fetch_unique_dates(trade_type_filter='call'):
+    """
+    Fetches ALL trading dates from XSP data, merging with signal counts.
+    Ensures 'No Signal' days are visible for review.
+    """
     try:
         if not config.DB_FILE.exists(): return []
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
         tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
-        if config.TBL_MANIFEST not in tables: 
+        if config.TBL_INDICES not in tables: 
              con.close(); return []
 
         t_filter = trade_type_filter.upper()
-        query = f"""
+        
+        # 1. Get ALL valid trading days from XSP (implicitly handles weekends/holidays)
+        q_dates = f"SELECT DISTINCT CAST(datetime_utc AS DATE) as d FROM {config.TBL_INDICES} WHERE ticker='XSP' ORDER BY d DESC"
+        df_dates = con.execute(q_dates).df()
+        
+        # 2. Get Signal Counts
+        q_signals = f"""
             SELECT date, COUNT(*) as sig_count
             FROM {config.TBL_MANIFEST}
             WHERE trade_type = '{t_filter}'
             GROUP BY date
-            ORDER BY date DESC
         """
-        df = con.execute(query).df()
+        try:
+            df_sigs = con.execute(q_signals).df()
+        except:
+            df_sigs = pd.DataFrame(columns=['date', 'sig_count'])
+            
         con.close()
         
-        if df.empty: return []
+        if df_dates.empty: return []
+        
+        # Merge
+        df_dates['d'] = pd.to_datetime(df_dates['d'])
+        df_sigs['date'] = pd.to_datetime(df_sigs['date'])
+        
+        merged = pd.merge(df_dates, df_sigs, left_on='d', right_on='date', how='left')
+        merged['sig_count'] = merged['sig_count'].fillna(0).astype(int)
+        
         options = []
-        for _, row in df.iterrows():
-            d_str = row['date'].strftime('%Y-%m-%d') if not isinstance(row['date'], str) else row['date']
-            label = f"{d_str} ({row['sig_count']} Signals)"
+        for _, row in merged.iterrows():
+            d_str = row['d'].strftime('%Y-%m-%d')
+            count = row['sig_count']
+            if count > 0:
+                label = f"{d_str} ({count} Signals)"
+            else:
+                label = f"{d_str} (No Signals)"
             options.append({'label': label, 'value': d_str})
+            
         return options
-    except Exception as e: return []
+    except Exception as e: 
+        print(f"Date Fetch Error: {e}")
+        return []
 
 def scout_day_performance(date_str, trade_type_filter='call'):
+    """
+    Returns signals for a day. If no signals, returns a default 09:30 start point.
+    """
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
         t_type = trade_type_filter.upper()
         
+        # Check for actual signals
         query = f"""
             SELECT entry_timestamp_utc, signal_type, xsp_price, meta_data 
             FROM {config.TBL_MANIFEST}
@@ -84,40 +114,65 @@ def scout_day_performance(date_str, trade_type_filter='call'):
             AND date = '{date_str}'
             ORDER BY entry_timestamp_utc ASC
         """
-        signals = con.execute(query).df()
+        try:
+            signals = con.execute(query).df()
+        except:
+            signals = pd.DataFrame()
+        con.close()
         
-        if signals.empty: 
-            con.close(); return [], None
-
         options_list = []
         best_ts = None
-        
-        for i, row in signals.iterrows():
-            ts = row['entry_timestamp_utc']
-            entry_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc).astimezone(config.TZ_NY)
-            time_str = entry_dt.astimezone(config.TZ_LOCAL).strftime('%H:%M')
-            clean_meta = str(row['meta_data']).replace('VIX_FRACTAL_LONG', '').replace('VIX_FRACTAL_SHORT', '').strip()
-            if "|" in clean_meta: clean_meta = clean_meta.split('|')[-1].strip()
-            
-            label = f"Signal #{i+1} ({time_str}) | {clean_meta}"
-            options_list.append({'label': label, 'value': ts})
-            
-            if i == 0: best_ts = ts
 
-        con.close()
+        if not signals.empty:
+            for i, row in signals.iterrows():
+                ts = row['entry_timestamp_utc']
+                entry_dt = datetime.fromtimestamp(ts/1000, tz=pytz.utc).astimezone(config.TZ_NY)
+                time_str = entry_dt.astimezone(config.TZ_LOCAL).strftime('%H:%M')
+                clean_meta = str(row['meta_data']).replace('VIX_FRACTAL_LONG', '').replace('VIX_FRACTAL_SHORT', '').strip()
+                if "|" in clean_meta: clean_meta = clean_meta.split('|')[-1].strip()
+                
+                label = f"Signal #{i+1} ({time_str}) | {clean_meta}"
+                options_list.append({'label': label, 'value': ts})
+                if i == 0: best_ts = ts
+        else:
+            # NO SIGNALS: Create a "Market Open" anchor
+            dt = datetime.strptime(date_str, '%Y-%m-%d').date()
+            # 9:30 AM NY Time
+            open_ny = config.TZ_NY.localize(datetime.combine(dt, time(9, 30)))
+            ts = open_ny.timestamp() * 1000
+            options_list.append({'label': "09:30 Market Open (Review Mode)", 'value': ts})
+            best_ts = ts
+
         return options_list, best_ts
     except Exception as e:
+        print(f"Scout Error: {e}")
         return [], None
 
 def fetch_available_strikes_for_replay(entry_ts, trade_type):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        
+        # 1. Try to find price in Manifest (Signal Exists)
         res = con.execute(f"SELECT xsp_price, date FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc={entry_ts}").fetchone()
         
-        if not res: 
-            con.close(); return [], None
+        xsp_price = 0
+        date_val = None
+        
+        if res:
+            xsp_price, date_val = res
+        else:
+            # 2. Fallback: Find price in Indices (Manual Review)
+            entry_dt_utc = datetime.fromtimestamp(entry_ts / 1000, tz=pytz.utc)
+            date_val = entry_dt_utc.date()
             
-        xsp_price, date_val = res
+            # Find closest 1m candle
+            s_str = entry_dt_utc.strftime('%Y-%m-%d %H:%M:%S')
+            q_price = f"SELECT close FROM {config.TBL_INDICES} WHERE ticker='XSP' AND datetime_utc <= '{s_str}' ORDER BY datetime_utc DESC LIMIT 1"
+            px_res = con.execute(q_price).fetchone()
+            if px_res: xsp_price = px_res[0]
+            else: 
+                con.close(); return [], None
+
         target_strike = round(float(xsp_price))
         
         dt = date_val if isinstance(date_val, (datetime, pd.Timestamp)) else datetime.strptime(str(date_val), '%Y-%m-%d')
@@ -157,19 +212,35 @@ def fetch_available_strikes_for_replay(entry_ts, trade_type):
         return final_options, atm_ticker
 
     except Exception as e:
+        print(f"Strike Fetch Error: {e}")
         return [], None
 
 # ==============================================================================
-# 3. DATA LOADING (OPTIMIZED FOR AWS)
+# 3. DATA LOADING
 # ==============================================================================
 def load_replay_tape(entry_ts, ticker_override=None):
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
-        res = con.execute(f"SELECT xsp_price, trade_type, date FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc={entry_ts}").fetchone()
         
-        if not res: return None
-        xsp_est, trade_type, date_val = res
-        
+        # 1. Try Manifest
+        res = None
+        try:
+            res = con.execute(f"SELECT xsp_price, trade_type, date FROM {config.TBL_MANIFEST} WHERE entry_timestamp_utc={entry_ts}").fetchone()
+        except: pass
+
+        if res:
+            xsp_est, trade_type, date_val = res
+        else:
+            # 2. Fallback for Manual Review
+            entry_dt_utc = datetime.fromtimestamp(entry_ts / 1000, tz=pytz.utc)
+            date_val = entry_dt_utc.date()
+            trade_type = 'CALL' # Default, overriden by ticker_override usually
+            
+            # Estimate price
+            s_str = entry_dt_utc.strftime('%Y-%m-%d %H:%M:%S')
+            px_res = con.execute(f"SELECT close FROM {config.TBL_INDICES} WHERE ticker='XSP' AND datetime_utc <= '{s_str}' ORDER BY datetime_utc DESC LIMIT 1").fetchone()
+            xsp_est = px_res[0] if px_res else 0
+
         dt = date_val if isinstance(date_val, (datetime, pd.Timestamp)) else datetime.strptime(str(date_val), '%Y-%m-%d').date()
         s_str = config.TZ_NY.localize(datetime.combine(dt, time(9, 30))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
         e_str = config.TZ_NY.localize(datetime.combine(dt, time(16, 0))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -211,7 +282,7 @@ def load_replay_tape(entry_ts, ticker_override=None):
             xsp = xsp.sort_values('datetime_local')
             xsp['sma_50'] = xsp['close'].rolling(50).mean()
             xsp = calculate_linreg(xsp)
-            # OPTIMIZATION: Round floats to reduce JSON size
+            # OPTIMIZATION: Round floats
             cols_to_round = ['open', 'high', 'low', 'close', 'sma_50', 'reg_line', 'upper_band', 'lower_band']
             for c in cols_to_round:
                 if c in xsp.columns: xsp[c] = xsp[c].round(2)
@@ -295,8 +366,10 @@ def load_replay_tape(entry_ts, ticker_override=None):
 # 4. LAYOUT
 # ==============================================================================
 def render():
+    # REMOVED: Crash-prone html.Style block
+    # STYLES ARE NOW HANDLED BY assets/custom_style.css
+
     return dbc.Container([
-        
         # --- TITLE ROW ---
         dbc.Row([
             dbc.Col([
@@ -434,14 +507,15 @@ def update_strike_options(entry_ts, mode):
     options, atm_ticker = fetch_available_strikes_for_replay(entry_ts, mode)
     return options, atm_ticker
 
-# B. Load Tape
+# B. Load Tape (Added allow_duplicate to timeline-slider)
 @callback(
     [Output('replay-tape-store', 'data'),
      Output('timeline-slider', 'max'),
-     Output('timeline-slider', 'value'),
+     Output('timeline-slider', 'value', allow_duplicate=True),
      Output('btn-play', 'disabled')],
     [Input('replay-signal-dropdown', 'value'),
-     Input('replay-strike-dropdown', 'value')]
+     Input('replay-strike-dropdown', 'value')],
+    prevent_initial_call=True
 )
 def load_tape(entry_ts, ticker):
     if not entry_ts: return no_update, 390, 0, True
@@ -450,9 +524,9 @@ def load_tape(entry_ts, ticker):
     max_steps = len(packet['xsp']) - 1
     return packet, max_steps, 0, False
 
-# C. VCR Logic
+# C. VCR Logic (Added allow_duplicate to replay-interval)
 @callback(
-    [Output('replay-interval', 'disabled'),
+    [Output('replay-interval', 'disabled', allow_duplicate=True),
      Output('replay-interval', 'interval'),
      Output('timeline-slider', 'value', allow_duplicate=True)],
     [Input('btn-play', 'n_clicks'),
@@ -467,7 +541,6 @@ def control_playback(play, pause, reset, speed, is_disabled):
     if not ctx.triggered: return no_update, no_update, no_update
     trig_id = ctx.triggered[0]['prop_id'].split('.')[0]
     
-    # Cast speed to int to be safe
     speed_ms = int(speed) if speed else 200
 
     if trig_id == 'btn-play': return False, speed_ms, no_update
@@ -622,6 +695,7 @@ def render_frame(n, slider_val, show_signal, packet):
     fig.update_yaxes(fixedrange=True)
     
     fig.update_layout(
+        uirevision=entry_ts, # ⚡ CRITICAL FIX: Preserves zoom state during playback
         template="plotly_dark", 
         paper_bgcolor='rgba(0,0,0,0)', 
         plot_bgcolor='rgba(0,0,0,0)', 
@@ -634,3 +708,8 @@ def render_frame(n, slider_val, show_signal, packet):
     )
     
     return fig, curr_time_str, f"Frame: {current_idx}", current_idx, disable_output, combat_report
+
+if __name__ == '__main__':
+    app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
+    app.layout = render()
+    app.run_server(debug=True, port=8050)
