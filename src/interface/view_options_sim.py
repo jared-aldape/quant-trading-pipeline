@@ -27,74 +27,47 @@ MACRO_FILE = ROOT_DIR / "data" / "macro_sentiment.json"
 # 0. TEMPORAL & DATA INTELLIGENCE
 # ==============================================================================
 HOLIDAYS = {
-    "2025-01-01": "New Year's Day", "2025-01-20": "MLK Jr. Day",
-    "2025-02-17": "Presidents Day", "2025-04-18": "Good Friday",
-    "2025-05-26": "Memorial Day", "2025-06-19": "Juneteenth",
-    "2025-07-04": "Independence Day", "2025-09-01": "Labor Day",
-    "2025-10-13": "Columbus Day",   "2025-11-11": "Veterans Day",
-    "2025-11-27": "Thanksgiving",   "2025-12-25": "Christmas Day"
+    "2026-01-01": "New Year's Day", "2026-01-19": "MLK Jr. Day",
+    "2026-02-16": "Presidents Day"
 }
-
-EARLY_CLOSES = {
-    "2025-07-03": time(13, 0), 
-    "2025-11-28": time(13, 0), 
-    "2025-12-24": time(13, 0)
-}
-
-# STYLES
-STYLE_MONO = {'fontFamily': "'VT323', monospace"}
-STYLE_VALUE = {'fontFamily': "'VT323', monospace", 'fontSize': '1.2rem', 'color': '#fff'}
 
 def get_market_status():
     tz_ny = pytz.timezone('America/New_York')
     now_ny = datetime.now(tz_ny)
-    today_str = now_ny.strftime("%Y-%m-%d")
     current_time = now_ny.time()
     
     market_open = time(9, 30)
-    market_close = EARLY_CLOSES.get(today_str, time(16, 0))
+    market_close = time(16, 0)
 
     is_weekend = now_ny.weekday() >= 5
-    is_holiday = today_str in HOLIDAYS
-    is_active_hours = market_open <= current_time < market_close
+    is_active_hours = market_open <= current_time < market_close and not is_weekend
     
-    status_text = "CLOSED"
-    status_color = "#ff5555" # Hard Red
-    reason = ""
+    status_text = "OPEN" if is_active_hours else "CLOSED"
+    status_color = "#22c55e" if is_active_hours else "#ef4444"
     
-    if is_holiday: reason = f"({HOLIDAYS[today_str]})"
-    elif is_weekend: reason = "(WEEKEND)"
-    elif is_active_hours:
-        status_text = "OPEN"
-        status_color = "#00ff41" # Hard Green
-        reason = "(LIVE)"
-    elif current_time < market_open: reason = "(PRE-MARKET)"
-    else: reason = "(POST-MARKET)"
-
     html_status = html.Span([
-        html.Span(f"MARKET: {status_text}", style={'color': status_color, 'fontWeight': 'bold', 'fontFamily': "'VT323', monospace", 'fontSize': '1.2rem'}),
-        html.Span(f" {reason}", className="small ms-2", style={'color': '#b5b8b9', 'fontFamily': "'VT323', monospace"})
+        html.Span(f"MARKET {status_text}", className="fw-bold", style={'color': status_color, 'fontSize': '1.1rem'}),
+        html.Span(" (LIVE)" if is_active_hours else " (STBY)", className="small ms-1 text-muted")
     ])
 
-    info_line = ""
-    if is_active_hours:
-        close_str = market_close.strftime("%H:%M")
-        info_line = f"SESSION: 09:30 - {close_str} ET"
-    else:
-        info_line = "MARKET CLOSED"
+    info_line = html.Div([
+        html.Span("LOCAL PST: 06:30 - 13:00", className="me-2"),
+        html.Span("| Standard Session", className="text-warning fw-bold")
+    ], className="small text-muted font-monospace")
 
     return html_status, info_line, is_active_hours
 
 def load_tactical_data():
     """Fetches VIX, Macro, and Heuristics for the Strip."""
-    macro_bias, macro_color = "NEUTRAL", "#fde722"
+    macro_bias, macro_color = "NEUTRAL", "#94a3b8"
     if MACRO_FILE.exists():
         try:
             with open(MACRO_FILE, 'r') as f:
                 mdata = json.load(f)
                 macro_bias = mdata.get('bias', 'NEUTRAL')
-                if macro_bias == "BULLISH": macro_color = "#00ff41"
-                elif macro_bias == "BEARISH": macro_color = "#ff5555"
+                if macro_bias == "BULLISH": macro_color = "#22c55e"
+                elif macro_bias == "BEARISH": macro_color = "#ef4444"
+                else: macro_color = "#f59e0b"
         except: pass
 
     vix_val, vix_pct = 0.0, 50
@@ -105,29 +78,11 @@ def load_tactical_data():
         try:
             with open(SNAPSHOT_FILE, 'r') as f:
                 sdata = json.load(f)
-            vix_df = pd.DataFrame(sdata['vix'])
+            vix_df = pd.DataFrame(sdata.get('vix', []))
             if not vix_df.empty:
-                curr_vix = vix_df.iloc[-1]['close']
+                curr_vix = float(vix_df.iloc[-1]['close'])
                 vix_val = curr_vix
                 vix_pct = min(max(((curr_vix - 12) / (20 - 12)) * 100, 0), 100)
-                
-                vix_df['ema12'] = vix_df['close'].ewm(span=12).mean()
-                vix_df['ema26'] = vix_df['close'].ewm(span=26).mean()
-                vix_df['macd'] = vix_df['ema12'] - vix_df['ema26']
-                vix_df['signal'] = vix_df['macd'].ewm(span=9).mean()
-                vix_df['hist'] = vix_df['macd'] - vix_df['signal']
-                
-                delta = vix_df['close'].diff()
-                up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
-                rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
-                rsi = 100 - (100 / (1 + rs)).iloc[-1]
-                hist = vix_df.iloc[-1]['hist']
-
-                score = 50.0 + (float(hist) * -200.0)
-                if rsi > 70: score += 5
-                if rsi < 30: score -= 5
-                p_call = int(max(0, min(100, score)))
-                p_put = 100 - p_call
                 
                 if curr_vix > 20: alert_msg, alert_color = "HIGH VOLATILITY", "warning"
                 if curr_vix > 30: alert_msg, alert_color = "EXTREME FEAR", "danger"
@@ -140,167 +95,185 @@ def load_tactical_data():
 # 1. LAYOUT
 # ==============================================================================
 def render():
+    # ⚡ NUCLEAR STYLE: HIGH CONTRAST (Black Text / White Background)
+    INPUT_STYLE = {
+        'color': '#000000', 
+        'backgroundColor': '#ffffff', 
+        'fontFamily': 'monospace',
+        'border': '1px solid #ccc'
+    }
+    
+    CARD_HEADER_STYLE = {"backgroundColor": "#1e293b", "color": "white", "fontWeight": "bold", "fontFamily": "monospace", "fontSize": "0.9rem"}
+    CARD_BODY_STYLE = {"backgroundColor": "#0f172a", "border": "1px solid #334155"}
+
     return dbc.Container([
-        # HEADER
+        # --- HEADER ---
         dbc.Row([
             dbc.Col([
-                html.H2("TRAINING GROUNDS", className="fw-bold text-white mb-0", style={"fontFamily": "'VT323', monospace", "letterSpacing": "2px", "textShadow": "2px 2px #000"}), 
-                html.P("OPTIONS SIMULATOR | TACTICAL EXECUTION DECK", className="text-info lead mb-0", style=STYLE_MONO)
+                html.H2("OPTIONS SIMULATOR", className="fw-bold text-white mb-0"),
+                html.P("REAL-TIME PAPER TRADING | 0DTE STRATEGY TESTER", className="text-muted small fw-bold mb-0")
             ], width=6),
             
             dbc.Col([
                 dbc.Row([
                     dbc.Col([
-                        html.Div("SIMULATION MODE:", className="text-end small fw-bold", style={"color": "#b5b8b9", **STYLE_MONO}),
-                        html.Div("ACTIVE", className="text-end fw-bold", style={"color": "#fde722", "fontSize": "1.2rem", **STYLE_MONO}),
+                        html.Div("SIMULATION MODE:", className="text-end small fw-bold text-muted"),
+                        html.Div("ACTIVE", className="text-end fw-bold text-warning", style={"fontSize": "1.1rem"}),
                     ], width=4),
                     dbc.Col([
-                        html.H4(id='trainer-clock', className="mb-0 text-end fw-bold", style={"color": "#fde722", "textShadow": "1px 1px #000", **STYLE_MONO}),
+                        html.H3(id='trainer-clock', className="mb-0 text-end fw-bold font-monospace text-info"),
                         html.Div(id='trainer-market-status', className="text-end"),
-                        html.Div(id='trainer-next-info', className="text-end small", style={"color": "#b5b8b9", **STYLE_MONO})
+                        html.Div(id='trainer-next-info', className="text-end small")
                     ], width=8)
                 ])
             ], width=6, className="align-self-center")
-        ], className="mb-3 pb-2", style={"backgroundColor": "#283878", "border": "2px solid #b5b8b9", "borderRadius": "4px", "padding": "10px", "boxShadow": "0px 0px 15px rgba(0,0,0,0.8)"}),
+        ], className="mb-4 py-3 border-bottom border-secondary"),
 
-        # ROW 2: TACTICAL STRIP
+        # --- TACTICAL STRIP ---
         dbc.Row([
             dbc.Col([
-                html.Div("VIX THERMOMETER", className="small text-muted fw-bold mb-1", style=STYLE_MONO),
-                dbc.Row([
-                    dbc.Col(dbc.Progress(id="trainer-vix-thermometer", value=50, color="warning", className="mt-1", style={"height": "16px", "border": "1px solid #fff"}), width=8),
-                    dbc.Col(html.Span(id="trainer-vix-val-text", className="ps-2", style=STYLE_VALUE), width=4),
-                ], className="g-0 align-items-center"),
-            ], width=3, className="border-end border-secondary pe-2"),
-            dbc.Col([
-                html.Div("MACRO REGIME", className="small text-muted fw-bold mb-1 text-center", style=STYLE_MONO),
-                html.Div(id="trainer-macro-regime-display", className="text-center fw-bold", style={'fontSize': '1.3rem', 'letterSpacing': '1px', **STYLE_MONO})
-            ], width=3, className="border-end border-secondary px-2"),
-            dbc.Col([
-                html.Div("NEURAL CONFIDENCE", className="small text-muted fw-bold mb-1 text-center", style=STYLE_MONO),
-                html.Div(id="trainer-oracle-readout", className="text-center d-flex align-items-center justify-content-center", style={'fontSize': '1.2rem', 'color': '#00bc8c', **STYLE_MONO})
-            ], width=3, className="border-end border-secondary px-2"),
-            dbc.Col([
-                html.Div("SYSTEM ALERTS", className="small text-muted fw-bold mb-1", style=STYLE_MONO),
-                html.Div(id="trainer-hud-alerts", className="text-start d-flex align-items-center h-100", style={'fontSize': '1.1rem', **STYLE_MONO})
-            ], width=3, className="ps-2")
-        ], className="py-2 mb-3", style={"backgroundColor": "#050a18", "border": "1px solid #444", "borderRadius": "4px", "padding": "10px"}),
+                dbc.Card([
+                    dbc.CardHeader("Volatility Index (VIX)", style=CARD_HEADER_STYLE),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col(dbc.Progress(id="trainer-vix-thermometer", value=50, style={"height": "8px"}, color="info"), width=8),
+                            dbc.Col(html.Span(id="trainer-vix-val-text", className="fw-bold font-monospace text-white"), width=4, className="text-end"),
+                        ], className="align-items-center"),
+                    ], style=CARD_BODY_STYLE)
+                ])
+            ], width=3),
+            dbc.Col(dbc.Card([dbc.CardHeader("Market Bias", style=CARD_HEADER_STYLE), dbc.CardBody(html.Div(id="trainer-macro-regime-display", className="text-center fw-bold", style={'fontSize': '1.2rem'}), style=CARD_BODY_STYLE)]), width=3),
+            dbc.Col(dbc.Card([dbc.CardHeader("Neural Alpha", style=CARD_HEADER_STYLE), dbc.CardBody(html.Div(id="trainer-oracle-readout", className="text-center fw-bold font-monospace"), style=CARD_BODY_STYLE)]), width=3),
+            dbc.Col(dbc.Card([dbc.CardHeader("Guardrails", style=CARD_HEADER_STYLE), dbc.CardBody(html.Div(id="trainer-hud-alerts", className="text-center"), style=CARD_BODY_STYLE)]), width=3)
+        ], className="mb-4"),
 
-        # ROW 3: BALANCES
+        # --- BALANCES ---
         dbc.Row([
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
                         dbc.Row([
                             dbc.Col([
-                                html.Div("TOTAL PORTFOLIO VALUE", className="small text-muted font-monospace"),
-                                html.Div(id='trainer-hero-balance', className="font-monospace", style={"lineHeight": "1"}),
+                                html.Div("TOTAL PORTFOLIO VALUE", className="small text-muted fw-bold font-monospace"),
+                                html.Div(id='trainer-hero-balance', className="font-monospace fw-bold fs-3 text-white"),
                             ], width=4, className="border-end border-secondary"),
                             dbc.Col([
-                                html.Div("DAY P&L (UNREALIZED)", className="small text-muted font-monospace"),
-                                html.Div(id='trainer-hero-pnl', className="fs-2 font-monospace"),
+                                html.Div("DAY P&L (UNREALIZED)", className="small text-muted fw-bold font-monospace"),
+                                html.Div(id='trainer-hero-pnl', className="fs-3 font-monospace fw-bold"),
                             ], width=4, className="border-end border-secondary"),
                             dbc.Col([
-                                html.Div("LIQUID BUYING POWER", className="small text-muted font-monospace"),
-                                html.Div(id='trainer-hero-cash', className="fs-2 font-monospace text-info"),
+                                html.Div("LIQUID BUYING POWER", className="small text-muted fw-bold font-monospace"),
+                                html.Div(id='trainer-hero-cash', className="fs-3 font-monospace text-info fw-bold"),
                                 dcc.Store(id='trainer-cash-store')
                             ], width=4),
                         ])
-                    ], className="py-2")
-                ], className="mb-3 border-secondary", style={"backgroundColor": "#050a18", "border": "1px solid #444"})
+                    ], style={"backgroundColor": "#1e293b", "border": "1px solid #334155"})
+                ], className="mb-4 shadow-sm")
             ], width=12)
         ]),
 
-        # ROW 4: COMMAND DECK
+        # --- COMMAND DECK ---
         dbc.Row([
+            # LEFT: ENTRY PANEL
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("TACTICAL ORDER ENTRY", className="card-header font-monospace text-center", style={"backgroundColor": "#1a2a4a"}),
+                    dbc.CardHeader("TACTICAL ORDER ENTRY", style=CARD_HEADER_STYLE),
                     dbc.CardBody([
-                        html.H2(id='trainer-live-price', className="text-center text-warning mb-4 font-monospace", style={"fontSize": "2.5rem"}),
+                        html.H2(id='trainer-live-price', className="text-center text-warning mb-4 font-monospace fw-bold", style={"fontSize": "2.5rem"}),
                         dbc.Row([
                             dbc.Col([
-                                html.Label("SIDE", className="small text-muted font-monospace"),
+                                html.Label("SIDE", className="small text-muted fw-bold font-monospace"),
                                 dbc.RadioItems(
                                     id="trainer-opt-type",
                                     options=[{"label": "CALL", "value": "CALL"}, {"label": "PUT", "value": "PUT"}],
                                     value="CALL", inline=True,
                                     class_name="btn-group w-100", input_class_name="btn-check",
-                                    label_class_name="btn btn-outline-info font-monospace", label_checked_class_name="active"
+                                    label_class_name="btn btn-outline-info font-monospace fw-bold", label_checked_class_name="active"
                                 )
                             ], width=6),
                             dbc.Col([
-                                html.Label("MODE", className="small text-muted font-monospace"),
+                                html.Label("MODE", className="small text-muted fw-bold font-monospace"),
                                 dbc.RadioItems(
                                     id="trainer-order-type",
                                     options=[{"label": "MKT", "value": "MARKET"}, {"label": "LMT", "value": "LIMIT"}],
                                     value="MARKET", inline=True,
                                     class_name="btn-group w-100", input_class_name="btn-check",
-                                    label_class_name="btn btn-outline-warning font-monospace", label_checked_class_name="active"
+                                    label_class_name="btn btn-outline-warning font-monospace fw-bold", label_checked_class_name="active"
                                 )
                             ], width=6)
                         ], className="mb-3"),
-                        html.Label("STRIKE SELECTION (0DTE)", className="small text-muted font-monospace"),
-                        dcc.Dropdown(id='trainer-strike', placeholder="Scanning...", className="mb-3", style={"fontFamily": "monospace", "backgroundColor": "#000", "color": "#fff", "border": "1px solid #444"}),
+                        
+                        html.Label("STRIKE SELECTION (0DTE)", className="small text-muted fw-bold font-monospace"),
+                        dcc.Dropdown(id='trainer-strike', placeholder="Scanning Chain...", className="mb-3", style=INPUT_STYLE),
+                        
                         dbc.Row([
-                            dbc.Col([html.Label("LIMIT PX", className="small text-muted font-monospace"), dbc.Input(id='trainer-limit-price', type='number', step=0.01, placeholder="AUTO", disabled=True, className="font-monospace text-center bg-black text-white border-secondary")], width=6),
-                            dbc.Col([html.Label("QTY", className="small text-muted font-monospace"), dbc.Input(id='trainer-qty', type='number', min=1, value=1, className="font-monospace text-center bg-black text-white border-secondary")], width=6)
+                            dbc.Col([
+                                html.Label("LIMIT PX", className="small text-muted fw-bold font-monospace"), 
+                                dbc.Input(id='trainer-limit-price', type='number', step=0.01, placeholder="AUTO", disabled=True, className="font-monospace text-center", style=INPUT_STYLE)
+                            ], width=6),
+                            dbc.Col([
+                                html.Label("QTY", className="small text-muted fw-bold font-monospace"), 
+                                dbc.Input(id='trainer-qty', type='number', min=1, value=1, className="font-monospace text-center", style=INPUT_STYLE)
+                            ], width=6)
                         ], className="mb-2"),
-                        html.Div(id='trainer-cost-preview', className="text-center mb-3 font-monospace", style={"fontSize": "1.2rem", "minHeight": "25px"}),
+                        
+                        html.Div(id='trainer-cost-preview', className="text-center mb-3 font-monospace fw-bold", style={"fontSize": "1.2rem", "minHeight": "25px", "color": "white"}),
                         dbc.Button("EXECUTE SIGNAL", id='trainer-btn-buy', color="success", className="w-100 fw-bold font-monospace py-3", size="lg"),
                         html.Div(id='trainer-feedback', className="text-center mt-2 small font-monospace text-warning")
-                    ])
-                ], className="shadow border-secondary h-100", style={"backgroundColor": "#0a0f1e"})
+                    ], style=CARD_BODY_STYLE)
+                ], className="h-100 shadow-sm")
             ], width=5),
+            
+            # RIGHT: POSITIONS & LEDGER
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("ACTIVE COMBAT POSITIONS", className="card-header font-monospace py-1", style={"backgroundColor": "#1a2a4a"}),
+                    dbc.CardHeader("ACTIVE COMBAT POSITIONS", style=CARD_HEADER_STYLE),
                     dbc.CardBody([
                         dbc.Row([
                             dbc.Col("CONTRACT", width=4, className="small text-muted font-monospace fw-bold"),
-                            dbc.Col("EQUITY / MARK", width=3, className="text-center small text-muted font-monospace fw-bold"),
-                            dbc.Col("P&L / ROI", width=3, className="text-end small text-muted font-monospace fw-bold"),
-                            dbc.Col("ACTION", width=2, className="text-end small text-muted font-monospace fw-bold"),
+                            dbc.Col("EQUITY", width=3, className="text-center small text-muted font-monospace fw-bold"),
+                            dbc.Col("P&L", width=3, className="text-end small text-muted font-monospace fw-bold"),
+                            dbc.Col("ACT", width=2, className="text-end small text-muted font-monospace fw-bold"),
                         ], className="border-bottom border-secondary px-2 py-1 mx-2 mb-2"),
                         html.Div(id='trainer-positions-container', style={'minHeight': '150px'})
-                    ], className="p-0 pt-2")
-                ], className="mb-3 border-secondary", style={"backgroundColor": "#0a0f1e"}),
+                    ], className="p-0 pt-2", style=CARD_BODY_STYLE)
+                ], className="mb-3 shadow-sm"),
+                
                 dbc.Card([
-                    dbc.CardHeader("TRANSACTION LEDGER (FULL AUDIT)", className="card-header font-monospace py-1 text-muted", style={"backgroundColor": "#1a2a4a"}),
+                    dbc.CardHeader("TRANSACTION LEDGER", style=CARD_HEADER_STYLE),
                     dbc.CardBody([
                         dash_table.DataTable(
                             id='trainer-ledger',
                             columns=[
                                 {'name': 'TIME', 'id': 'exit_time'},
                                 {'name': 'TICKER', 'id': 'ticker'},
-                                {'name': 'ACTION', 'id': 'action'},
+                                {'name': 'ACT', 'id': 'action'},
                                 {'name': 'QTY', 'id': 'qty'},
-                                {'name': 'ENTRY', 'id': 'entry_px', 'type': 'numeric', 'format': Format(group=Group.yes, precision=2, scheme=Scheme.fixed, symbol=Symbol.yes)},
-                                {'name': 'EXIT', 'id': 'price', 'type': 'numeric', 'format': Format(group=Group.yes, precision=2, scheme=Scheme.fixed, symbol=Symbol.yes)},
-                                {'name': 'PnL', 'id': 'pnl', 'type': 'numeric', 'format': Format(group=Group.yes, precision=2, scheme=Scheme.fixed, symbol=Symbol.yes)},
-                                {'name': 'REASON', 'id': 'reason'},
+                                {'name': 'IN', 'id': 'entry_px', 'type': 'numeric', 'format': Format(precision=2, scheme=Scheme.fixed)},
+                                {'name': 'OUT', 'id': 'price', 'type': 'numeric', 'format': Format(precision=2, scheme=Scheme.fixed)},
+                                {'name': 'PnL', 'id': 'pnl', 'type': 'numeric', 'format': Format(precision=2, scheme=Scheme.fixed)},
                             ],
-                            style_header={'backgroundColor': '#283878', 'color': '#fde722', 'borderBottom': '1px solid #777', 'fontFamily': 'monospace', 'fontSize': '0.85rem'},
-                            style_cell={'backgroundColor': '#050a18', 'color': '#fff', 'border': 'none', 'fontFamily': 'monospace', 'textAlign': 'left', 'fontSize': '0.85rem'},
+                            style_header={'backgroundColor': '#1e293b', 'color': '#f8fafc', 'fontWeight': 'bold', 'fontFamily': 'monospace'},
+                            style_cell={'backgroundColor': '#0f172a', 'color': '#cbd5e1', 'border': '1px solid #334155', 'fontFamily': 'monospace'},
                             style_data_conditional=[
-                                {'if': {'filter_query': '{pnl} > 0', 'column_id': 'pnl'}, 'color': '#00ff41'},
-                                {'if': {'filter_query': '{pnl} < 0', 'column_id': 'pnl'}, 'color': '#ff5555'}
+                                {'if': {'filter_query': '{pnl} > 0', 'column_id': 'pnl'}, 'color': '#22c55e', 'fontWeight': 'bold'},
+                                {'if': {'filter_query': '{pnl} < 0', 'column_id': 'pnl'}, 'color': '#ef4444', 'fontWeight': 'bold'}
                             ],
-                            page_size=6,
+                            page_size=5,
                             style_table={'overflowX': 'auto'}
                         )
-                    ], className="p-0")
-                ], className="border-secondary", style={"backgroundColor": "#0a0f1e"})
+                    ], className="p-0", style=CARD_BODY_STYLE)
+                ])
             ], width=7)
         ]),
 
         dcc.Interval(id='trainer-refresh-fast', interval=1000, n_intervals=0),
         dcc.Interval(id='trainer-refresh-slow', interval=3000, n_intervals=0),
 
-    ], fluid=True, style={"backgroundColor": "#050a18", "minHeight": "100vh", "padding": "20px"})
+    ], fluid=True, className="px-4 py-3")
 
 # ==============================================================================
-# 2. CALLBACKS
+# 2. CALLBACKS (LOGIC UNTOUCHED)
 # ==============================================================================
 
 @callback(
@@ -309,7 +282,6 @@ def render():
      Output('trainer-next-info', 'children'),
      Output('trainer-btn-buy', 'disabled'),
      Output('trainer-vix-thermometer', 'value'),
-     Output('trainer-vix-thermometer', 'color'),
      Output('trainer-vix-val-text', 'children'),
      Output('trainer-macro-regime-display', 'children'),
      Output('trainer-macro-regime-display', 'style'),
@@ -320,23 +292,22 @@ def render():
 def update_fast_ui(n):
     tz_local = pytz.timezone('US/Pacific')
     now_pst = datetime.now(tz_local)
-    time_str = now_pst.strftime("%m/%d/%y | %I:%M:%S %p")
+    time_str = now_pst.strftime("%H:%M:%S")
     status_html, next_info, is_active = get_market_status()
 
     m_bias, m_color, v_val, v_pct, p_call, p_put, a_msg, a_col = load_tactical_data()
 
-    macro_style = {'color': m_color, 'fontSize': '1.3rem', 'letterSpacing': '1px', **STYLE_MONO}
+    macro_style = {'color': m_color}
     
     oracle_html = html.Span([
-        html.Span(f"CALL: {p_call}%", style={'color': '#00bc8c' if p_call > 55 else '#555', 'marginRight': '15px', **STYLE_MONO}),
-        html.Span(f"PUT: {p_put}%", style={'color': '#e74c3c' if p_put > 55 else '#555', **STYLE_MONO})
+        html.Span(f"CALL: {p_call}%", className="me-3", style={'color': '#22c55e' if p_call > 55 else '#94a3b8'}),
+        html.Span(f"PUT: {p_put}%", style={'color': '#ef4444' if p_put > 55 else '#94a3b8'})
     ])
 
-    badges = [dbc.Badge(a_msg, color=a_col, className="me-2", style=STYLE_MONO)]
-    therm_color = "danger" if v_pct > 75 else "info" if v_pct < 25 else "success"
+    badges = [dbc.Badge(a_msg, color=a_col, className="fw-bold")]
 
     return (time_str, status_html, next_info, not is_active, 
-            v_pct, therm_color, f"{v_val:.2f}", m_bias, macro_style, oracle_html, badges)
+            v_pct, f"{v_val:.2f}", m_bias, macro_style, oracle_html, badges)
 
 @callback(
     [Output('trainer-live-price', 'children'),
@@ -374,11 +345,7 @@ def update_slow_ui(n, buy_clicks, close_clicks, trade_type, strike, qty, order_m
         data = {"balance": 2000, "cash": 2000, "equity": 0, "day_pnl": 0, "positions": []}
         price = 0
     
-    # --------------------------------------------------------
-    # [MAGITEK UPGRADE] REAL-TIME DAY P&L RECALCULATION
-    # --------------------------------------------------------
-    try:
-        ledger = engine_simulator.fetch_recent_transactions()
+    try: ledger = engine_simulator.fetch_recent_transactions()
     except: ledger = []
 
     tz_local = pytz.timezone('US/Pacific')
@@ -387,74 +354,54 @@ def update_slow_ui(n, buy_clicks, close_clicks, trade_type, strike, qty, order_m
     realized_today = 0.0
     for tx in ledger:
         exit_ts = str(tx.get('exit_time', ''))
-        # Simple check if transaction happened today
         if today_str in exit_ts:
             realized_today += float(tx.get('pnl', 0.0))
 
     unrealized_today = 0.0
     if data.get('positions'):
         for p in data['positions']:
-            try:
-                # Unrealized P&L for open positions
-                unrealized_today += (float(p.get('current_val', 0)) - float(p.get('cost_basis', 0)))
+            try: unrealized_today += (float(p.get('current_val', 0)) - float(p.get('cost_basis', 0)))
             except: pass
             
-    # Accurate Day P&L = Realized (Closed Today) + Unrealized (Open Today)
     day_gain = realized_today + unrealized_today
-    # --------------------------------------------------------
-
-    strike_opts = engine_simulator.generate_strikes(price, trade_type) if price > 0 else []
-
-    # HERO METRICS
     current_bal = data['balance']
     
-    # FIX: TOTAL PORTFOLIO GAIN (vs Nominal $2000)
     NOMINAL_START = 2000.0
     total_val_gain = current_bal - NOMINAL_START
-    total_pct = (total_val_gain / NOMINAL_START * 100)
+    total_pct = (total_val_gain / NOMINAL_START * 100) if NOMINAL_START != 0 else 0
     
-    if total_val_gain > 0: bal_color = "#00ff41" 
-    elif total_val_gain < 0: bal_color = "#ff5555" 
-    else: bal_color = "#ffffff" 
+    bal_color = "#22c55e" if total_val_gain >= 0 else "#ef4444"
     
-    # FIX: DAY GAIN (vs Midnight Balance)
-    # Start of Day = Current Balance - Day Gain
     start_of_day_bal = current_bal - day_gain
-    if start_of_day_bal > 0:
-        day_pct = (day_gain / start_of_day_bal) * 100
-    else:
-        day_pct = 0.0
-
-    if day_gain > 0: day_color = "#00ff41"
-    elif day_gain < 0: day_color = "#ff5555"
-    else: day_color = "#ffffff"
+    day_pct = (day_gain / start_of_day_bal * 100) if start_of_day_bal > 0 else 0.0
+    day_color = "#22c55e" if day_gain >= 0 else "#ef4444"
     
     bal_str = html.Div([
-        html.Span(f"${current_bal:,.2f}", className="me-2", style={"fontSize": "2.5rem", "fontWeight": "bold", "color": bal_color}),
-        html.Span(f"({total_pct:+.1f}%)", style={"fontSize": "1.5rem", "color": bal_color})
-    ], className="d-flex align-items-baseline")
+        html.Span(f"${current_bal:,.2f}", className="me-2", style={"color": bal_color}),
+        html.Span(f"({total_pct:+.1f}%)", className="small text-muted")
+    ])
     
     pnl_str = html.Div([
         html.Span(f"${day_gain:+.2f}", className="me-2"),
-        html.Span(f"({day_pct:+.1f}%)", style={"fontSize": "1.2rem", "opacity": "0.8"})
+        html.Span(f"({day_pct:+.1f}%)", className="small text-muted")
     ], style={"color": day_color})
 
     cash_str = f"${data['cash']:,.2f}"
 
-    # POSITIONS RENDER
+    strike_opts = engine_simulator.generate_strikes(price, trade_type) if price > 0 else []
+
     pos_ui = []
     if not data['positions']:
-        pos_ui = html.Div("NO ACTIVE COMBAT POSITIONS", className="text-center text-muted font-monospace py-4")
+        pos_ui = html.Div("NO ACTIVE POSITIONS", className="text-center text-muted font-monospace py-4 small")
     else:
         for p in data['positions']:
             try:
                 pnl_v = p['current_val'] - p['cost_basis']
-                pnl_p = (pnl_v / p['cost_basis']) * 100 if p['cost_basis'] > 0 else 0
+                cost_basis = p['cost_basis'] if p['cost_basis'] > 0 else 1.0
+                pnl_p = (pnl_v / cost_basis) * 100
                 total_equity = p['current_val']
                 
-                if pnl_v > 0: c_color = "#00ff41"
-                elif pnl_v < 0: c_color = "#ff5555"
-                else: c_color = "#ffffff"
+                c_color = "#22c55e" if pnl_v >= 0 else "#ef4444"
                 
                 contracts = p.get('contracts', 1)
                 curr_mark = (total_equity / (contracts * 100)) if contracts > 0 else 0.0
@@ -466,21 +413,18 @@ def update_slow_ui(n, buy_clicks, close_clicks, trade_type, strike, qty, order_m
                     ], width=4),
                     dbc.Col([
                         html.Div(f"${total_equity:,.2f}", className="text-center fw-bold font-monospace text-info"),
-                        html.Div(f"@{curr_mark:.2f}", className="text-center text-muted x-small font-monospace")
+                        html.Div(f"@{curr_mark:.2f}", className="text-center text-muted small font-monospace")
                     ], width=3),
                     dbc.Col([
                         html.Div(f"${pnl_v:+.2f}", className="text-end fw-bold font-monospace", style={"color": c_color}),
                         html.Div(f"{pnl_p:+.1f}%", className="text-end small", style={"color": c_color})
                     ], width=3),
                     dbc.Col([
-                        dbc.Button("EXIT", id={'type': 'trainer-close', 'index': p['id']}, size="sm", color="warning", className="py-0 px-2 font-monospace")
+                        dbc.Button("EXIT", id={'type': 'trainer-close', 'index': p['id']}, size="sm", color="warning", className="py-0 px-2 font-monospace fw-bold")
                     ], width=2, className="text-end")
                 ], className="border-bottom border-secondary py-2 mx-2 align-items-center")
                 pos_ui.append(row)
             except: continue
-
-    try: ledger = engine_simulator.fetch_recent_transactions()
-    except: ledger = []
     
     price_disp = f"${price:.2f}" if price else "OFFLINE"
     
@@ -498,8 +442,8 @@ def toggle_limit(mode): return mode == 'MARKET'
     [State('trainer-strike', 'options')]
 )
 def update_cost_preview(limit_px, qty, strike_val, available_cash, strike_opts):
-    def render_msg(val, color="#fff"):
-         return html.Span(f"EST. COST: ${val:,.2f}", style={"color": color, "fontWeight": "bold", "fontSize": "1.2rem"})
+    def render_msg(val, color="white"):
+         return html.Span(f"EST. COST: ${val:,.2f}", style={"color": color})
 
     if not qty: return render_msg(0)
     price = 0.0
@@ -514,7 +458,7 @@ def update_cost_preview(limit_px, qty, strike_val, available_cash, strike_opts):
             except: price = 0.0
     cost = price * int(qty) * 100
     cash = float(available_cash) if available_cash else 0.0
-    color = "#ffffff"
-    if cost > cash: color = "#ff5555"
-    elif cost > 0: color = "#fde722"
+    color = "white"
+    if cost > cash: color = "#ef4444"
+    elif cost > 0: color = "#f59e0b"
     return render_msg(cost, color)

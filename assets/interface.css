@@ -1,34 +1,149 @@
 /* ==========================================================================
-   4. VISIBILITY PROTOCOLS (Color Schema Fix)
+   QUANT OS: INSTITUTIONAL ANALYTICS LAYER (v3.5.2)
+   TYPOGRAPHY: INTER & ROBOTO MONO
+   AESTHETIC: HIGH-DENSITY PROFESSIONAL
    ========================================================================== */
 
-/* Fix 1: Eliminate the "Invisible Grey" (.text-muted) */
-/* Replaces dark grey with "Magitek Silver" for readability */
+/* 1. INSTITUTIONAL TYPEFACE IMPORT */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap');
+
+/* 2. ROOT INSTITUTIONAL VARIABLES */
+:root {
+    --inst-bg: #0a0c10;
+    --inst-card: #11141d;
+    --inst-border: #2d3748;
+    --inst-text-main: #f3f5f9;
+    --inst-text-muted: #94a3b8;
+    --inst-accent: #00d2ff;
+    --inst-success: #10b981;
+    --inst-danger: #ef4444;
+    --inst-warning: #f59e0b;
+    
+    /* Standardized Font Stacks */
+    --font-primary: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-data: 'Roboto Mono', 'SFMono-Regular', Consolas, monospace;
+}
+
+/* 3. GLOBAL RESET & MODERNIZATION */
+body {
+    background-color: var(--inst-bg) !important;
+    background-image: none !important; /* Stripping Legacy Scanlines */
+    font-family: var(--font-primary) !important;
+    color: var(--inst-text-main) !important;
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.01em;
+}
+
+/* 4. VISIBILITY PROTOCOLS (Color Schema Fixes) */
+
+/* Eliminate the "Invisible Grey" (.text-muted) */
+/* Replaces dark grey with high-contrast Slate for readability */
 .text-muted {
-    color: #cbd5e0 !important; /* Cool Silver-Blue */
-    opacity: 0.9;
+    color: var(--inst-text-muted) !important; 
+    opacity: 1 !important;
 }
 
-/* Fix 2: Force Labels to be Legible */
-/* Standardizes all form labels to Theme White or Gold */
+/* Force Labels to be Legible */
+/* Standardizes all form labels for professional density */
 label {
-    color: #f3f5f9 !important; /* Off-White */
-    font-weight: bold;
-    letter-spacing: 0.5px;
+    color: var(--inst-text-main) !important;
+    font-weight: 600 !important;
+    text-transform: uppercase;
+    font-size: 0.75rem !important;
+    letter-spacing: 0.05em !important;
+    margin-bottom: 6px;
+    font-family: var(--font-primary) !important;
 }
 
-/* Fix 3: Subtitles and Small Text */
+/* Subtitles and Small Text */
 .small, small {
-    color: #a0aec0 !important; /* Lighter Steel */
-    font-family: 'Courier New', monospace; /* Tech vibe */
+    color: var(--inst-text-muted) !important;
+    font-family: var(--font-primary);
+    font-weight: 400;
 }
 
-/* Fix 4: Card Headers vs Body */
+/* High-Density Monospace values (Price, Time, PnL) */
+.font-monospace, 
+#live-clock, 
+.display-6, 
+.table, 
+.badge, 
+.metric-value {
+    font-family: var(--font-data) !important;
+}
+
+/* 5. CARD & CONTAINER REHAUL */
+.card {
+    background-color: var(--inst-card) !important;
+    border: 1px solid var(--inst-border) !important;
+    border-radius: 6px !important;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1) !important;
+}
+
 .card-header {
-    border-bottom: 1px solid #444 !important;
+    background-color: rgba(255, 255, 255, 0.02) !important;
+    border-bottom: 1px solid var(--inst-border) !important;
+    padding: 0.75rem 1.25rem !important;
+    font-weight: 700 !important;
+    font-size: 0.8rem !important;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
 }
 
-/* Optional: Make the "Value" text (H3/H4) pop more */
+/* 6. TABLE MODERNIZATION (Bloomberg Style) */
+.table {
+    font-size: 0.85rem !important;
+    border-color: var(--inst-border) !important;
+}
+
+.table thead th {
+    background-color: rgba(0, 0, 0, 0.2) !important;
+    color: var(--inst-text-muted) !important;
+    border-bottom: 2px solid var(--inst-border) !important;
+    font-weight: 600 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.table-hover tbody tr:hover {
+    background-color: rgba(0, 210, 255, 0.05) !important;
+    color: var(--inst-accent) !important;
+}
+
+/* 7. ACTION & FEEDBACK OVERRIDES */
+.btn {
+    font-weight: 600 !important;
+    letter-spacing: 0.02em;
+    border-radius: 4px !important;
+    text-transform: uppercase;
+    font-size: 0.75rem !important;
+}
+
+.btn-success { background-color: var(--inst-success) !important; border-color: var(--inst-success) !important; color: #000 !important; }
+.btn-danger { background-color: var(--inst-danger) !important; border-color: var(--inst-danger) !important; }
+.btn-outline-light { border-color: var(--inst-border) !important; color: var(--inst-text-main) !important; }
+
+/* 8. STATUS & VALUE POP */
 h3, h4, h5 {
-    text-shadow: 0px 0px 5px rgba(0,0,0,0.8);
+    font-weight: 700 !important;
+    letter-spacing: -0.02em !important;
+    text-shadow: none !important; /* Removing RPG glow for clarity */
+}
+
+.text-success { color: var(--inst-success) !important; }
+.text-danger { color: var(--inst-danger) !important; }
+.text-warning { color: var(--inst-warning) !important; }
+.text-info { color: var(--inst-accent) !important; }
+
+/* Institutional Navigation specific */
+.nav-pills .nav-link {
+    color: var(--inst-text-muted) !important;
+    border-radius: 4px !important;
+    font-weight: 500;
+}
+
+.nav-pills .nav-link.active {
+    background-color: rgba(0, 210, 255, 0.1) !important;
+    color: var(--inst-accent) !important;
+    border-left: 3px solid var(--inst-accent) !important;
 }

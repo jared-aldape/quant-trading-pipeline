@@ -15,29 +15,23 @@ ROOT_DIR = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
-# Import hydration logic
 from src.data.hydrate_simulator import hydrate_ledger 
 
 # CONSTANTS
 TBL_RH_LEDGER = "active_rh_log"
 TZ_VAULT = pytz.UTC
-TZ_GLASS = pytz.timezone('US/Pacific') # The Glass is Local
+TZ_GLASS = pytz.timezone('US/Pacific') 
 
 # ==============================================================================
-# 2. DATA CONTROLLER
+# 2. DATA CONTROLLER (PRESERVED)
 # ==============================================================================
 def fetch_ledger_data():
-    """
-    Fetches the Reality Ledger (active_rh_log) from the Vault.
-    Performs Timezone Conversion (UTC -> PST) for display.
-    """
     if not config.DB_FILE.exists():
         return pd.DataFrame()
 
     try:
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
         
-        # Check if table exists
         tables = con.execute("SHOW TABLES").fetchall()
         table_list = [t[0] for t in tables]
         
@@ -45,7 +39,6 @@ def fetch_ledger_data():
             con.close()
             return pd.DataFrame()
 
-        # Query the Atomized Data
         query = f"""
             SELECT 
                 entry_time_utc, 
@@ -69,11 +62,7 @@ def fetch_ledger_data():
         if df.empty:
             return df
 
-        # --- TIMEZONE LAW (Vault -> Glass) ---
-        # 1. Ensure UTC awareness
         df['entry_time_utc'] = pd.to_datetime(df['entry_time_utc']).dt.tz_localize('UTC')
-        
-        # 2. Convert to Local (PST) and Format
         df['time_local'] = df['entry_time_utc'].dt.tz_convert(TZ_GLASS).dt.strftime('%Y-%m-%d %H:%M:%S')
         
         return df
@@ -83,16 +72,16 @@ def fetch_ledger_data():
         return pd.DataFrame()
 
 # ==============================================================================
-# 3. INTERFACE LAYOUT (WRAPPED)
+# 3. INTERFACE LAYOUT (MODERNIZED)
 # ==============================================================================
 def render():
     return dbc.Container([
         
-        # --- TITLE ROW (ATB SCOPE STYLE) ---
+        # --- TITLE ROW ---
         dbc.Row([
             dbc.Col([
-                html.H2("GIL LEDGER COMMAND", className="magitek-h2"),
-                html.P("REALITY LEDGER | ROBINHOOD FEED | ATOMIZED LOG", className="magitek-note")
+                html.H2("RH LEDGER", className="fw-bold text-white mb-0"),
+                html.P("REALITY LEDGER | ROBINHOOD FEED | ATOMIZED LOG", className="text-muted small fw-bold mb-0")
             ], width=7),
             
             dbc.Col([
@@ -102,36 +91,36 @@ def render():
                         html.Div(id="hydration-status", className="text-end text-warning font-monospace small")
                     ], width=8),
                     dbc.Col([
-                        dbc.Button("🌊 HYDRATE", id="btn-hydrate", color="info", size="sm", className="w-100 font-monospace")
+                        dbc.Button("🌊 HYDRATE", id="btn-hydrate", color="info", size="sm", className="w-100 font-monospace fw-bold")
                     ], width=4, className="align-self-center")
                 ])
             ], width=5, className="align-self-center")
-        ], className="mb-4 p-3 card flex-row align-items-center", style={"border": "2px solid #b5b8b9"}),
+        ], className="mb-4 py-3 border-bottom border-secondary"),
 
-        # KPI ROW (The Scoreboard)
+        # KPI ROW
         dbc.Row([
             dbc.Col(dbc.Card([
-                dbc.CardHeader("NET LIQUID PnL", className="card-header"),
+                dbc.CardHeader("NET LIQUID PnL", className="fw-bold small font-monospace"),
                 dbc.CardBody(html.H3("$0.00", id="kpi-pnl", className="text-success font-monospace"))
-            ], className="shadow"), width=3),
+            ], className="shadow-sm border-secondary h-100", style={"backgroundColor": "#1e293b"}), width=3),
             
             dbc.Col(dbc.Card([
-                dbc.CardHeader("REGULATORY FEES", className="card-header"),
+                dbc.CardHeader("REGULATORY FEES", className="fw-bold small font-monospace"),
                 dbc.CardBody(html.H3("$0.00", id="kpi-fees", className="text-warning font-monospace"))
-            ], className="shadow"), width=3),
+            ], className="shadow-sm border-secondary h-100", style={"backgroundColor": "#1e293b"}), width=3),
             
             dbc.Col(dbc.Card([
-                dbc.CardHeader("FILLED ORDERS", className="card-header"),
+                dbc.CardHeader("FILLED ORDERS", className="fw-bold small font-monospace"),
                 dbc.CardBody(html.H3("0", id="kpi-filled", className="text-info font-monospace"))
-            ], className="shadow"), width=3),
+            ], className="shadow-sm border-secondary h-100", style={"backgroundColor": "#1e293b"}), width=3),
             
             dbc.Col(dbc.Card([
-                dbc.CardHeader("CANCELLATIONS", className="card-header"),
-                dbc.CardBody(html.H3("0", id="kpi-cancel", className="text-secondary font-monospace"))
-            ], className="shadow"), width=3),
+                dbc.CardHeader("CANCELLATIONS", className="fw-bold small font-monospace"),
+                dbc.CardBody(html.H3("0", id="kpi-cancel", className="text-muted font-monospace"))
+            ], className="shadow-sm border-secondary h-100", style={"backgroundColor": "#1e293b"}), width=3),
         ], className="mb-4"),
 
-        # THE GRID (Atomized Data Table)
+        # THE GRID
         dbc.Row([
             dbc.Col(dash_table.DataTable(
                 id='ledger-table',
@@ -150,54 +139,51 @@ def render():
                     {'name': 'OPRA Code', 'id': 'opra_code'}, 
                 ],
                 style_table={'overflowX': 'auto'},
-                # FIXED: Magitek Blue Background
-                style_cell={
-                    'backgroundColor': '#101830', # Dark Blue
-                    'color': '#f3f5f9',           # Off White
-                    'border': '1px solid #444',
-                    'textAlign': 'left',
-                    'fontFamily': "'VT323', monospace",
-                    'fontSize': '1.1rem'
-                },
                 style_header={
-                    'backgroundColor': '#283878', # Magitek Blue
-                    'fontWeight': 'bold',
-                    'color': '#fde722',           # Gold
-                    'borderBottom': '2px solid #b5b8b9'
+                    'backgroundColor': '#1e293b', 
+                    'color': '#f8fafc', 
+                    'fontWeight': 'bold', 
+                    'borderBottom': '2px solid #475569',
+                    'fontFamily': 'monospace'
+                },
+                style_cell={
+                    'backgroundColor': '#0f172a', 
+                    'color': '#e2e8f0', 
+                    'border': '1px solid #334155', 
+                    'textAlign': 'left', 
+                    'fontFamily': 'monospace', 
+                    'fontSize': '13px'
                 },
                 style_data_conditional=[
-                    # Color Net PnL
                     {
                         'if': {'filter_query': '{net_pnl} > 0', 'column_id': 'net_pnl'},
-                        'color': '#00ff41', 'fontWeight': 'bold'
+                        'color': '#22c55e', 'fontWeight': 'bold'
                     },
                     {
                         'if': {'filter_query': '{net_pnl} < 0', 'column_id': 'net_pnl'},
-                        'color': '#ff3333', 'fontWeight': 'bold'
+                        'color': '#ef4444', 'fontWeight': 'bold'
                     },
-                    # Color Action
                     {
                         'if': {'filter_query': '{action} = "BUY"', 'column_id': 'action'},
-                        'color': '#33ccff'
+                        'color': '#38bdf8' # Sky Blue
                     },
                     {
                         'if': {'filter_query': '{action} = "SELL"', 'column_id': 'action'},
-                        'color': '#ff9900'
+                        'color': '#fbbf24' # Amber
                     },
-                    # Dim Cancelled
                     {
                         'if': {'filter_query': '{status} contains "CANCEL"', 'column_id': 'status'},
-                        'color': '#666', 'textDecoration': 'line-through'
+                        'color': '#64748b', 'textDecoration': 'line-through'
                     }
                 ],
                 page_size=20
             ), width=12)
         ])
 
-    ], fluid=True)
+    ], fluid=True, className="px-4 py-3")
 
 # ==============================================================================
-# 4. CALLBACKS
+# 4. CALLBACKS (PRESERVED)
 # ==============================================================================
 @callback(
     [Output('ledger-table', 'data'),
@@ -210,7 +196,6 @@ def render():
     [Input('btn-hydrate', 'n_clicks')]
 )
 def update_ledger_view(n_clicks):
-    # 1. Handle Hydration Request
     status_msg = "READY"
     if n_clicks:
         try:
@@ -219,13 +204,11 @@ def update_ledger_view(n_clicks):
         except Exception as e:
             status_msg = f"❌ ERROR: {e}"
 
-    # 2. Fetch Data
     df = fetch_ledger_data()
     
     if df.empty:
         return [], "$0.00", {'color': 'white'}, "$0.00", "0", "0", status_msg
 
-    # 3. Calculate KPIs
     total_pnl = df['net_pnl'].sum()
     total_fees = df['fees'].sum()
     
@@ -236,9 +219,8 @@ def update_ledger_view(n_clicks):
         filled_count = 0
         cancel_count = 0
 
-    # 4. Format Output
     pnl_str = f"${total_pnl:,.2f}"
-    pnl_style = {'color': '#00ff41'} if total_pnl >= 0 else {'color': '#ff3333'}
+    pnl_style = {'color': '#22c55e'} if total_pnl >= 0 else {'color': '#ef4444'}
     
     fees_str = f"${total_fees:,.2f}"
     filled_str = f"{filled_count}"

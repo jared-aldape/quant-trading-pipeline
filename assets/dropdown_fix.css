@@ -1,0 +1,7 @@
+/* assets/dropdown_fix.css */
+.Select-control { background-color: white !important; color: black !important; }
+.Select-menu-outer { background-color: white !important; color: black !important; }
+.Select-value-label { color: black !important; }
+.Select-placeholder { color: #757575 !important; }
+.VirtualizedSelectOption { color: black !important; }
+.VirtualizedSelectFocusedOption { background-color: #e2e8f0 !important; color: black !important; }

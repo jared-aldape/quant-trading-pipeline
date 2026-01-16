@@ -37,12 +37,12 @@ class RobustEncoder(json.JSONEncoder):
 # ==============================================================================
 def validate_and_clean(df, ticker):
     if df.empty: return df
+    # Remove flat-line data (bad ticks)
     df['amp'] = (df['high'] - df['low']).abs()
     flat_mask = df['amp'] < 0.0001
     flat_count = flat_mask.sum()
     
     if flat_count > 0:
-        log.warning(f"⚠️ {ticker}: Filtering {flat_count} flat snapshots.")
         clean_df = df[~flat_mask].copy()
         return clean_df.drop(columns=['amp'])
     
@@ -53,9 +53,12 @@ def check_cooldown():
     return True
 
 # ==============================================================================
-# 3. FETCH ENGINES
+# 3. FETCH ENGINES (STRICT UTC MODE)
 # ==============================================================================
 def fetch_polygon_backup(ticker):
+    """
+    Fallback method if Yahoo Fails. Fetches 1-minute aggregates.
+    """
     if not POLYGON_KEY: return pd.DataFrame()
     poly_ticker = f"I:{ticker}" 
     log.info(f"🛡️ ACTIVATING BACKUP: Polygon.io ({poly_ticker})")
@@ -75,36 +78,53 @@ def fetch_polygon_backup(ticker):
             
         df = pd.DataFrame(data['results'])
         df.rename(columns={'t': 'datetime_utc', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
-        df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms').dt.tz_localize('UTC')
+        
+        # 🛡️ POLYGON IS ALWAYS UTC -> Just Strip TZ
+        df['datetime_utc'] = pd.to_datetime(df['datetime_utc'], unit='ms').dt.tz_localize('UTC').dt.tz_localize(None)
+        
         df['ticker'] = ticker
         return df[['datetime_utc', 'open', 'high', 'low', 'close', 'volume', 'ticker']]
     except: return pd.DataFrame()
 
-def fetch_yahoo_data(y_ticker, friendly_name, days=5):
+def fetch_yahoo_data(y_ticker, friendly_name, days=5, interval="1m"):
     """
-    Primary Fetcher.
-    days: Defaults to 5 (Live Mode). Can be set to 30 manually.
+    Primary Fetcher. Includes ROBUST UTC ENFORCEMENT to prevent 'Local Drift'.
     """
     start_date = datetime.now().date() - timedelta(days=days) 
     end_date = datetime.now().date() + timedelta(days=1)
     
     try:
         ticker_dat = yf.Ticker(y_ticker)
-        # Fetch 1m data. 'shared=False' prevents some multi-ticker errors.
-        df = ticker_dat.history(start=start_date, end=end_date, interval="1m", auto_adjust=True)
+        # Fetch data with variable interval
+        df = ticker_dat.history(start=start_date, end=end_date, interval=interval, auto_adjust=True)
         
         if df.empty: return pd.DataFrame()
         
         df = df.reset_index()
         df.columns = [c.lower() for c in df.columns]
         
+        # Normalize Date Column Name
         if 'date' in df.columns: df.rename(columns={"date": "datetime_utc"}, inplace=True)
         df.rename(columns={"datetime": "datetime_utc"}, inplace=True)
+        
         df['ticker'] = friendly_name
         
+        # 🛡️ CRITICAL FIX: FORCE UTC CONVERSION 🛡️
+        # Yahoo often returns "America/New_York" (aware) or Local Time (naive) depending on the system.
+        # We must standardize this before saving to DuckDB.
+        
+        df['datetime_utc'] = pd.to_datetime(df['datetime_utc'])
+        
         if df['datetime_utc'].dt.tz is None:
-            df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York')
-        df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC')
+            # Case A: Naive Timestamp (Likely Local Time or NY Time from YF)
+            # We assume NY Time for market data to be safe, then convert to UTC.
+            df['datetime_utc'] = df['datetime_utc'].dt.tz_localize('America/New_York').dt.tz_convert('UTC')
+        else:
+            # Case B: Aware Timestamp (Convert directly to UTC)
+            df['datetime_utc'] = df['datetime_utc'].dt.tz_convert('UTC')
+            
+        # 🛡️ FINAL STRIP: DuckDB prefers Naive UTC timestamps
+        df['datetime_utc'] = df['datetime_utc'].dt.tz_localize(None)
         
         if 'volume' not in df.columns: df['volume'] = 0
         
@@ -119,11 +139,12 @@ def fetch_yahoo_data(y_ticker, friendly_name, days=5):
         return pd.DataFrame()
 
 # ==============================================================================
-# 4. SNAPSHOT
+# 4. SNAPSHOT (UI Support)
 # ==============================================================================
 def calculate_orb(df):
     if df.empty: return None, None
     df = df.copy()
+    # Convert Naive UTC -> Aware UTC -> NY Time
     df['dt_ny'] = df['datetime_utc'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
     start = t_time(9, 30)
     end = t_time(10, 0)
@@ -134,6 +155,9 @@ def calculate_orb(df):
     return None, None
 
 def generate_snapshot_from_db(con):
+    """
+    Creates a JSON snapshot for the frontend to display without hitting DB.
+    """
     try:
         max_ts = con.execute(f"SELECT MAX(datetime_utc) FROM {config.TBL_INDICES} WHERE ticker = 'XSP'").fetchone()[0]
         if not max_ts: return
@@ -159,45 +183,48 @@ def generate_snapshot_from_db(con):
         with open(SNAPSHOT_FILE, 'w') as f:
             json.dump(snapshot, f, cls=RobustEncoder)
             
-        log.info(f"📸 Snapshot Generated. (UTC: {current_time.strftime('%H:%M:%S')})")
-
     except Exception as e:
         log.error(f"Snapshot Fail: {e}")
 
 # ==============================================================================
 # 5. EXECUTION
 # ==============================================================================
-def run_ingest(lookback_days=5):
-    """
-    Main Entry Point.
-    lookback_days: 5 for Live Mode, 30 for Deep Recovery.
-    """
-    log.info(f"📊 STARTING INDEX INGESTION (Lookback: {lookback_days}d)...")
+def run_ingest(lookback_days=30):
+    log.info(f"📊 STARTING INDEX INGESTION (Lookback: {lookback_days} days)...")
     staged = []
     targets = [('VIX', '^VIX'), ('XSP', '^XSP')]
     
+    # PASS 1: HIGH PRECISION (1m, last 5 days)
     for friendly, y_ticker in targets:
-        df = fetch_yahoo_data(y_ticker, friendly, days=lookback_days)
-        
+        df = fetch_yahoo_data(y_ticker, friendly, days=5, interval="1m")
         if df.empty and USE_POLYGON_BACKUP:
             df = fetch_polygon_backup(friendly)
-            
-        if not df.empty: 
-            staged.append((friendly, df))
-        else:
-            log.warning(f"⚠️ No data fetched for {friendly}")
+        
+        if not df.empty: staged.append(df)
+
+    # PASS 2: DEEP HISTORY (5m, last 59 days)
+    if lookback_days > 7:
+        log.info("   ⏳ Fetching Deep History (5m)...")
+        for friendly, y_ticker in targets:
+            # Yahoo limit for 5m data is ~60 days. We clip lookback to 59.
+            fetch_days = min(lookback_days, 59)
+            df_hist = fetch_yahoo_data(y_ticker, friendly, days=fetch_days, interval="5m")
+            if not df_hist.empty: staged.append(df_hist)
     
+    # DB COMMIT
     if config.DB_FILE.exists():
         try:
             con = duckdb.connect(str(config.DB_FILE), config={'access_mode': 'READ_WRITE'})
             con.execute(f"CREATE TABLE IF NOT EXISTS {config.TBL_INDICES} (datetime_utc TIMESTAMP, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, ticker VARCHAR, PRIMARY KEY (datetime_utc, ticker))")
             
             if staged:
-                for friendly, df in staged:
+                for df in staged:
                     con.register('temp_idx', df)
+                    # INSERT OR IGNORE protects the high-res 1m data from being overwritten by 5m data
                     con.execute(f"INSERT OR IGNORE INTO {config.TBL_INDICES} SELECT * FROM temp_idx")
                     con.unregister('temp_idx')
-                    log.info(f"   ✅ {friendly}: Ingested {len(df)} candles.")
+                
+                log.info(f"✅ Ingested {len(staged)} batches.")
 
             generate_snapshot_from_db(con)
             con.close()
@@ -206,5 +233,4 @@ def run_ingest(lookback_days=5):
             log.error(f"DB Write Error: {e}")
 
 if __name__ == "__main__":
-    # Default to 5 days if run directly
-    run_ingest(lookback_days=5)
+    run_ingest(lookback_days=30)

@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, dash_table, callback, Input, Output
+from dash import dcc, html, dash_table, callback, Input, Output, State, no_update
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -18,14 +18,20 @@ ROOT_DIR = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
+from src.utils.logger import get_logger
+
+log = get_logger("RH_Mirror")
 
 TBL_RH_LEDGER = "active_rh_log"
 TBL_SIM_LOG = "active_simulation_log"
 TBL_INDICES = getattr(config, 'TBL_INDICES', 'indices_1m')
 TBL_FUTURES = getattr(config, 'TBL_FUTURES', 'futures_1m')
 
+# Define Timezone locally to ensure safety
+TZ_NY = pytz.timezone('America/New_York')
+
 # ==============================================================================
-# 1. HELPER FUNCTIONS (Vault Standard)
+# 1. HELPER FUNCTIONS
 # ==============================================================================
 def to_wall_clock(series):
     if series.empty: return series
@@ -47,342 +53,311 @@ def calculate_linreg(df):
     df['lower_band'] = df['reg_line'] - (2 * std)
     return df
 
-# ==============================================================================
-# 2. DATA FETCHING
-# ==============================================================================
-def fetch_active_trading_days(source):
-    if not config.DB_FILE.exists(): return []
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    
-    tbl = None
-    condition = "1=1"
-    date_col = 'entry_time'
-
-    if source == 'rh':
-        tbl = TBL_RH_LEDGER
-        date_col = 'entry_time_utc'
-    elif source in ['manual', 'gen']:
-        tbl = TBL_SIM_LOG
-        if source == 'manual': condition = "reason LIKE 'MANUAL%'"
-        elif source == 'gen': condition = "reason = 'DATA_GENERATOR'"
-
-    if not tbl: return []
-    
+def fetch_unique_dates(source='rh'):
+    """Finds all dates available in the trade logs."""
     try:
+        if not config.DB_FILE.exists(): return []
+        con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        
+        target_tbl = TBL_RH_LEDGER if source == 'rh' else TBL_SIM_LOG
+        date_col = 'entry_time_utc' if source == 'rh' else 'entry_time'
+        
         tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
-        if tbl not in tables: 
-            con.close(); return []
+        if target_tbl not in tables: 
+            con.close()
+            return []
 
-        query = f"SELECT DISTINCT CAST({date_col} AS DATE) AS trade_date FROM {tbl} WHERE {condition} ORDER BY trade_date DESC"
-        df = con.execute(query).df()
+        # ⚡ FIX: Filter by STATUS='FILLED' for RH to match session data
+        where_clause = "WHERE status = 'FILLED'" if source == 'rh' else ""
+
+        q = f"""
+            SELECT CAST({date_col} AS DATE) as d, COUNT(*) as cnt 
+            FROM {target_tbl} 
+            {where_clause}
+            GROUP BY d 
+            ORDER BY d DESC
+        """
+        df = con.execute(q).df()
         con.close()
         
         if df.empty: return []
-        dates = [d.strftime('%Y-%m-%d') for d in df['trade_date'].tolist()]
-        return [{'label': d, 'value': d} for d in dates]
+        
+        return [
+            {'label': f"{r['d']} ({r['cnt']} trades)", 'value': str(r['d'])}
+            for _, r in df.iterrows()
+        ]
     except Exception as e:
-        print(f"Date Fetch Error: {e}")
+        log.error(f"Date Fetch Error: {e}")
         return []
 
-def fetch_session_data(date_str, source):
-    if not config.DB_FILE.exists(): return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    con = duckdb.connect(str(config.DB_FILE), read_only=True)
-    
-    # Time Boundaries (UTC)
-    dt_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-    start_utc = config.TZ_NY.localize(datetime.combine(dt_date, time(9, 30))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
-    end_utc = config.TZ_NY.localize(datetime.combine(dt_date, time(16, 0))).astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
-    
-    # 1. INDICES (XSP & VIX)
-    q_idx = f"""
-        SELECT datetime_utc, ticker, open, high, low, close 
-        FROM {TBL_INDICES} 
-        WHERE ticker IN ('XSP', 'VIX') AND datetime_utc BETWEEN '{start_utc}' AND '{end_utc}'
-        ORDER BY datetime_utc ASC
-    """
-    df_idx = con.execute(q_idx).df()
-    
-    xsp = pd.DataFrame()
-    vix = pd.DataFrame()
-    
-    if not df_idx.empty:
-        df_idx['datetime_utc'] = pd.to_datetime(df_idx['datetime_utc'])
-        df_idx['datetime_local'] = to_wall_clock(df_idx['datetime_utc'])
+def fetch_session_data(date_str, source='rh'):
+    if not config.DB_FILE.exists(): 
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
-        if 'XSP' in df_idx['ticker'].values:
-            xsp = df_idx[df_idx['ticker'] == 'XSP'].copy()
-            xsp['sma_50'] = xsp['close'].rolling(50).mean()
-            xsp = calculate_linreg(xsp)
-            
-        if 'VIX' in df_idx['ticker'].values:
-            vix = df_idx[df_idx['ticker'] == 'VIX'].copy()
-            vix['ema12'] = vix['close'].ewm(span=12).mean()
-            vix['ema26'] = vix['close'].ewm(span=26).mean()
-            vix['macd'] = vix['ema12'] - vix['ema26']
-            vix['signal'] = vix['macd'].ewm(span=9).mean()
-            vix['hist'] = vix['macd'] - vix['signal']
-            # RSI
-            delta = vix['close'].diff()
-            up = delta.clip(lower=0)
-            down = -1 * delta.clip(upper=0)
-            rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
-            vix['rsi'] = 100 - (100 / (1 + rs))
-
-    # 2. FUTURES (/ES)
-    es = pd.DataFrame()
     try:
-        tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
-        if TBL_FUTURES in tables:
-            q_fut = f"""
-                SELECT datetime_utc, ticker, close 
-                FROM {TBL_FUTURES} 
-                WHERE (ticker LIKE 'ES%' OR ticker = '/ES') AND datetime_utc BETWEEN '{start_utc}' AND '{end_utc}'
-                ORDER BY datetime_utc ASC
-            """
-            es = con.execute(q_fut).df()
-            if not es.empty:
-                es['datetime_utc'] = pd.to_datetime(es['datetime_utc'])
-                es['datetime_local'] = to_wall_clock(es['datetime_utc'])
-                es['scaled_close'] = es['close'] / 10.0
-    except: pass
-
-    # 3. TRANSACTIONS
-    trd_df = pd.DataFrame()
-    if source == 'rh':
-        q_trd = f"""
-            SELECT entry_time_utc, action, fill_price, root || ' ' || strike || option_right as ticker
-            FROM {TBL_RH_LEDGER} 
-            WHERE entry_time_utc BETWEEN '{start_utc}' AND '{end_utc}'
-            AND status = 'FILLED'
-        """
-        trd_df = con.execute(q_trd).df().rename(columns={'entry_time_utc': 'time_utc', 'fill_price': 'price'})
+        con = duckdb.connect(str(config.DB_FILE), read_only=True)
         
-    elif source in ['manual', 'gen']:
-        condition = "reason LIKE 'MANUAL%'" if source == 'manual' else "reason = 'DATA_GENERATOR'"
-        q_trd = f"""
-            SELECT entry_time, exit_time, entry_price, exit_price, ticker
-            FROM {TBL_SIM_LOG} 
-            WHERE entry_time BETWEEN '{start_utc}' AND '{end_utc}' AND {condition}
-        """
-        raw = con.execute(q_trd).df()
-        if not raw.empty:
-            entries = raw[['entry_time', 'ticker', 'entry_price']].rename(columns={'entry_time': 'time_utc', 'entry_price': 'price'})
-            entries['action'] = 'BUY'
-            exits = raw[['exit_time', 'ticker', 'exit_price']].rename(columns={'exit_time': 'time_utc', 'exit_price': 'price'})
-            exits['action'] = 'SELL'
-            trd_df = pd.concat([entries, exits]).sort_values('time_utc')
+        # Sanitize Date
+        clean_date_str = str(date_str).split(' ')[0]
+        dt_target = datetime.strptime(clean_date_str, '%Y-%m-%d').date()
+        
+        # RTH Window (NY -> UTC)
+        t_open = TZ_NY.localize(datetime.combine(dt_target, time(9, 30)))
+        t_close = TZ_NY.localize(datetime.combine(dt_target, time(16, 0)))
+        
+        s_utc = t_open.astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
+        e_utc = t_close.astimezone(pytz.utc).strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 1. INDICES (XSP, VIX)
+        tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
+        xsp, vix = pd.DataFrame(), pd.DataFrame()
+        
+        if TBL_INDICES in tables:
+            q_idx = f"""
+                SELECT datetime_utc, ticker, open, high, low, close 
+                FROM {TBL_INDICES} 
+                WHERE ticker IN ('XSP', 'VIX') 
+                AND datetime_utc BETWEEN '{s_utc}' AND '{e_utc}'
+                ORDER BY datetime_utc
+            """
+            df_idx = con.execute(q_idx).df()
+            
+            if not df_idx.empty:
+                df_idx['datetime_utc'] = pd.to_datetime(df_idx['datetime_utc'])
+                df_idx['datetime_local'] = to_wall_clock(df_idx['datetime_utc'])
+                
+                xsp = df_idx[df_idx['ticker']=='XSP'].copy()
+                if not xsp.empty: xsp = calculate_linreg(xsp)
+                
+                vix = df_idx[df_idx['ticker']=='VIX'].copy()
+                if not vix.empty:
+                    vix['macd'] = vix['close'].ewm(span=12).mean() - vix['close'].ewm(span=26).mean()
+                    vix['hist'] = vix['macd'] - vix['macd'].ewm(span=9).mean()
+                    d = vix['close'].diff()
+                    rs = d.clip(lower=0).ewm(com=13).mean() / (-1 * d.clip(upper=0)).ewm(com=13).mean()
+                    vix['rsi'] = 100 - (100 / (1 + rs))
 
-    con.close()
-    
-    if not trd_df.empty:
-        trd_df['datetime_local'] = to_wall_clock(pd.to_datetime(trd_df['time_utc']))
+        # 2. TRADES
+        trades = pd.DataFrame()
+        if source == 'rh' and TBL_RH_LEDGER in tables:
+            q_trd = f"""
+                SELECT entry_time_utc, action, fill_price as price, 
+                       root || ' ' || strike || option_right as ticker,
+                       quantity
+                FROM {TBL_RH_LEDGER}
+                WHERE entry_time_utc BETWEEN '{s_utc}' AND '{e_utc}'
+                AND status='FILLED'
+                ORDER BY entry_time_utc
+            """
+            trades = con.execute(q_trd).df()
+            if not trades.empty:
+                trades.rename(columns={'entry_time_utc': 'time_utc'}, inplace=True)
+                
+        elif source != 'rh' and TBL_SIM_LOG in tables:
+            # Fallback for sim
+            q_trd = f"""
+                SELECT entry_time as time_utc, 'BUY' as action, entry_price as price, ticker, 1 as quantity
+                FROM {TBL_SIM_LOG} WHERE entry_time BETWEEN '{s_utc}' AND '{e_utc}'
+                UNION ALL
+                SELECT exit_time as time_utc, 'SELL' as action, exit_price as price, ticker, 1 as quantity
+                FROM {TBL_SIM_LOG} WHERE exit_time BETWEEN '{s_utc}' AND '{e_utc}'
+                ORDER BY time_utc
+            """
+            trades = con.execute(q_trd).df()
 
-    return xsp, vix, es, trd_df
+        con.close()
+        
+        if not trades.empty:
+            trades['time_utc'] = pd.to_datetime(trades['time_utc'])
+            trades['datetime_local'] = to_wall_clock(trades['time_utc'])
+            
+        return trades, xsp, vix, pd.DataFrame()
+
+    except Exception as e:
+        log.error(f"Fetch Session Error: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 # ==============================================================================
 # 3. LAYOUT
 # ==============================================================================
 def render():
+    INPUT_STYLE = {'color': '#000', 'backgroundColor': '#fff', 'fontFamily': 'monospace', 'border': '1px solid #ccc'}
+    
     return dbc.Container([
-        
         # HEADER
         dbc.Row([
             dbc.Col([
-                html.H2("MIMIC COMMAND", className="magitek-h2"),
-                html.P("EXECUTION REPLAY | INDEX CONTEXT | TICKER TAPE", className="magitek-note"),
-                html.Div([
-                    html.Span("PROFILE: ", className="fw-bold text-warning small me-2 align-middle font-monospace"),
-                    dcc.Dropdown(
-                        id='mirror-source',
-                        options=[
-                            {'label': 'GIL LEDGER (Robinhood)', 'value': 'rh'},
-                            {'label': 'SAVE CRYSTAL (Backtest)', 'value': 'gen'},
-                            {'label': 'TRAINING GROUNDS (Sim)', 'value': 'manual'}
-                        ],
-                        value='rh',
-                        clearable=False,
-                        style={'width': '250px', 'display': 'inline-block', 'verticalAlign': 'middle'}
-                    )
-                ], className="d-inline-block mt-1")
+                html.H2("RH MIRROR", className="fw-bold text-white mb-0"),
+                html.P("EXECUTION REPLAY | INDEX CONTEXT | TICKER TAPE", className="text-muted small fw-bold mb-0"),
             ], width=8),
-            
             dbc.Col([
                 html.Div("SYSTEM STATUS: ONLINE", className="text-end text-success font-monospace fw-bold"),
-                html.Div("MODE: REFLECTION", className="text-end text-warning font-monospace")
+                html.Div("MODE: REFLECTION", className="text-end text-warning font-monospace small")
             ], width=4, className="align-self-center")
-        ], className="mb-4 p-3 card flex-row align-items-center", style={"backgroundColor": "#283878", "border": "2px solid #b5b8b9", "borderRadius": "4px", "color": "#f3f5f9", "boxShadow": "0px 0px 10px rgba(0,0,0,0.5)"}),
+        ], className="mb-4 py-3 border-bottom border-secondary"),
 
-        # 3-COLUMN CONTROL DECK
+        # CONTROLS
         dbc.Row([
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("1. TARGETING", className="card-header"),
+                    dbc.CardHeader("1. TARGETING", className="fw-bold small font-monospace"),
                     dbc.CardBody([
-                        html.Label("Session Date", className="small text-muted font-monospace"), 
-                        dcc.Dropdown(id='mirror-date', placeholder="Select Active Day...", className="mb-2"),
+                        html.Label("Source", className="small text-muted fw-bold"),
+                        dbc.Select(
+                            id='mirror-source',
+                            options=[{'label': 'RH LEDGER', 'value': 'rh'}, {'label': 'SIMULATION', 'value': 'gen'}],
+                            value='rh', style=INPUT_STYLE, className="mb-2"
+                        ),
+                        html.Label("Date", className="small text-muted fw-bold"), 
+                        dbc.Select(id='mirror-date', style=INPUT_STYLE),
                     ])
-                ], className="h-100 shadow-sm")
+                ], className="h-100 border-secondary")
             ], width=4),
             
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("2. COMBAT REPORT", className="card-header"),
+                    dbc.CardHeader("2. PERFORMANCE", className="fw-bold small font-monospace"),
                     dbc.CardBody(id='mirror-report-card', className="d-flex align-items-center justify-content-center h-100")
-                ], className="h-100 shadow-sm")
+                ], className="h-100 border-secondary")
             ], width=4),
 
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("3. TRANSACTION TAPE", className="card-header"),
-                    dbc.CardBody(id='mirror-table-container', className="p-0", style={"overflowY": "auto", "maxHeight": "120px"})
-                ], className="h-100 shadow-sm")
+                    dbc.CardHeader("3. TAPE", className="fw-bold small font-monospace"),
+                    dbc.CardBody(id='mirror-table-container', className="p-0", style={"overflowY": "auto", "maxHeight": "150px"})
+                ], className="h-100 border-secondary")
             ], width=4)
         ], className="mb-3"),
 
-        # FORENSIC STACK
-        dbc.Row([dbc.Col([dcc.Loading(dcc.Graph(id='mirror-chart', style={'height': '900px'}, config={'displayModeBar': True}))], width=12)])
-    ], fluid=True)
+        # CHART
+        dbc.Row([
+            dbc.Col([
+                dcc.Loading(
+                    dcc.Graph(
+                        id='mirror-chart', 
+                        style={'height': '900px'}, 
+                        config={'displayModeBar': True, 'scrollZoom': True}
+                    )
+                )
+            ], width=12)
+        ])
+    ], fluid=True, className="px-4 py-3")
 
 # ==============================================================================
 # 4. CALLBACKS
 # ==============================================================================
 @callback(
-    [Output('mirror-date', 'options'),
-     Output('mirror-date', 'value')],
+    [Output('mirror-date', 'options'), Output('mirror-date', 'value')],
     Input('mirror-source', 'value')
 )
-def set_date_options(source):
-    dates = fetch_active_trading_days(source)
-    return dates, dates[0]['value'] if dates else None
+def update_date_opts(source):
+    opts = fetch_unique_dates(source)
+    val = opts[0]['value'] if opts else None
+    return opts, val
 
 @callback(
     [Output('mirror-chart', 'figure'),
      Output('mirror-report-card', 'children'),
      Output('mirror-table-container', 'children')],
-    [Input('mirror-date', 'value'),
-     Input('mirror-source', 'value')]
+    [Input('mirror-date', 'value')],
+    [State('mirror-source', 'value')]
 )
-def update_mirror(date_str, source):
-    empty_fig = go.Figure()
-    empty_fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-    if not date_str: return empty_fig, "NO DATA", ""
-        
-    xsp, vix, es, trd = fetch_session_data(date_str, source)
+def update_mirror_view(date_str, source):
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02, 
+                        row_heights=[0.4, 0.2, 0.2, 0.2], 
+                        subplot_titles=("XSP Index", "Execution Flow", "VIX MACD", "VIX RSI"))
+
+    if not date_str:
+        return fig, "Select Date", []
+
+    trades, xsp, vix, _ = fetch_session_data(date_str, source)
     
-    # --- BUILD STATS ---
-    trade_count = len(trd) if not trd.empty else 0
-    pnl_display = "N/A"
-    
-    # Simple P&L Logic for Report Card (Approximate)
-    if not trd.empty:
-        buys = trd[trd['action'] == 'BUY']['price'].sum()
-        sells = trd[trd['action'] == 'SELL']['price'].sum()
-        net = (sells - buys) * 100 # Assuming 1 contract for simple view
-        color = "text-success" if net >= 0 else "text-danger"
-        pnl_display = html.Div(f"${net:,.2f}", className=f"fw-bold {color}")
-    else:
-        pnl_display = html.Div("$0.00", className="fw-bold text-white")
+    clean_date_str = str(date_str).split(' ')[0]
+    dt_base = datetime.strptime(clean_date_str, '%Y-%m-%d')
+    day_start = dt_base.replace(hour=6, minute=30)
+    day_end = dt_base.replace(hour=13, minute=0)
 
-    report_html = html.Div([
-        dbc.Row([
-            dbc.Col([html.Div("TOTAL TRADES", className="small text-muted"), html.Div(f"{trade_count}", className="fw-bold text-white")], width=6),
-            dbc.Col([html.Div("EST. SESSION P&L", className="small text-muted"), pnl_display], width=6),
-        ])
-    ], className="text-center font-monospace w-100")
-
-    # --- BUILD TABLE ---
-    table_html = html.Div("No trades.", className="text-muted text-center p-3")
-    if not trd.empty:
-        df_view = trd.copy()
-        df_view['time'] = df_view['datetime_local'].dt.strftime('%H:%M:%S')
-        df_view = df_view[['time', 'action', 'price', 'ticker']]
-        
-        table_html = dash_table.DataTable(
-            data=df_view.to_dict('records'),
-            columns=[{'name': i.upper(), 'id': i} for i in df_view.columns],
-            style_header={'backgroundColor': '#283878', 'color': '#fde722', 'fontWeight': 'bold'},
-            style_cell={'backgroundColor': '#101830', 'color': '#f3f5f9', 'border': '1px solid #444', 'fontFamily': "'VT323', monospace"},
-            style_data_conditional=[
-                {'if': {'filter_query': '{action} = "BUY"'}, 'color': '#00ff41'},
-                {'if': {'filter_query': '{action} = "SELL"'}, 'color': '#ff9900'},
-            ],
-            page_size=50,
-            style_table={'height': '120px', 'overflowY': 'auto'}
-        )
-
-    # --- BUILD CHART ---
-    fig = make_subplots(
-        rows=4, cols=1, 
-        shared_xaxes=True, 
-        vertical_spacing=0.03, 
-        row_heights=[0.35, 0.25, 0.2, 0.2], 
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]],
-        subplot_titles=("CONTEXT: XSP + LinReg + ES", f"MIRROR: {source.upper()} EXECUTION TAPE", "VIX FRACTAL FLOW", "VIX RSI")
-    )
-
-    day_start = xsp['datetime_local'].iloc[0].replace(hour=6, minute=30) if not xsp.empty else None
-    day_end = day_start.replace(hour=13, minute=0) if day_start else None
-
-    # 1. CONTEXT (XSP)
+    # 1. XSP
     if not xsp.empty:
         fig.add_trace(go.Candlestick(x=xsp['datetime_local'], open=xsp['open'], high=xsp['high'], low=xsp['low'], close=xsp['close'], name="XSP"), row=1, col=1)
-        
         if 'reg_line' in xsp.columns:
-            fig.add_trace(go.Scatter(x=xsp['datetime_local'], y=xsp['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Mean"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=xsp['datetime_local'], y=xsp['upper_band'], line=dict(color='cyan', width=1), name="+2σ"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=xsp['datetime_local'], y=xsp['lower_band'], line=dict(color='cyan', width=1), name="-2σ"), row=1, col=1)
-            
-            # ORB
-            start_window = day_start
-            end_window = day_start + timedelta(minutes=30)
-            orb_df = xsp[(xsp['datetime_local'] >= start_window) & (xsp['datetime_local'] <= end_window)]
-            if not orb_df.empty:
-                fig.add_hline(y=orb_df['high'].max(), line_dash="solid", line_color="green", opacity=0.5, row=1, col=1)
-                fig.add_hline(y=orb_df['low'].min(), line_dash="solid", line_color="red", opacity=0.5, row=1, col=1)
-
-    if not es.empty:
-        fig.add_trace(go.Scatter(x=es['datetime_local'], y=es['scaled_close'], name="/ES", line=dict(color='#00d2ff', width=1, dash='dot')), row=1, col=1)
-
-    # 2. MIRROR (Executions)
-    if not trd.empty:
-        buys = trd[trd['action'] == 'BUY']
-        sells = trd[trd['action'] == 'SELL']
-        
-        # Use simple markers since we have multiple tickers
-        if not buys.empty:
-            fig.add_trace(go.Scatter(
-                x=buys['datetime_local'], y=buys['price'], 
-                mode='markers', name='BUY', 
-                marker=dict(symbol='triangle-up', size=15, color='#00FF00', line=dict(width=1, color='white')),
-                hovertemplate="BUY<br>Time: %{x}<br>Price: $%{y:.2f}<extra></extra>"
-            ), row=2, col=1)
-            
-        if not sells.empty:
-            fig.add_trace(go.Scatter(
-                x=sells['datetime_local'], y=sells['price'], 
-                mode='markers', name='SELL', 
-                marker=dict(symbol='triangle-down', size=15, color='#FF4500', line=dict(width=1, color='white')),
-                hovertemplate="SELL<br>Time: %{x}<br>Price: $%{y:.2f}<extra></extra>"
-            ), row=2, col=1)
+            fig.add_trace(go.Scatter(x=xsp['datetime_local'], y=xsp['reg_line'], line=dict(color='yellow', width=1, dash='dot'), name="Reg"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=xsp['datetime_local'], y=xsp['upper_band'], line=dict(color='cyan', width=1), name="+2"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=xsp['datetime_local'], y=xsp['lower_band'], line=dict(color='cyan', width=1), name="-2"), row=1, col=1)
     else:
-        fig.add_annotation(x=day_start + timedelta(hours=3), y=0.5, yref="y2", text="NO TRADES FOUND", showarrow=False, font=dict(color="gray", size=20))
+        fig.add_annotation(text="MARKET DATA MISSING", row=1, col=1, font=dict(color="red", size=14))
 
-    # 3. VIX FRACTAL
+    # 2. TRADES
+    total_pnl = 0.0
+    pnl_pct = 0.0
+    trade_count = len(trades)
+    
+    if not trades.empty:
+        # ⚡ FIX: Case-Insensitive PnL & Percentage
+        try:
+            trades['action_upper'] = trades['action'].astype(str).str.upper()
+            
+            # Use Quantity if available, else 100 shares per contract assumption standard
+            qty_col = 'quantity' if 'quantity' in trades.columns else None
+            
+            # Buys
+            buy_mask = trades['action_upper'].str.contains('BUY')
+            if qty_col:
+                buys = (trades.loc[buy_mask, 'price'] * trades.loc[buy_mask, qty_col] * 100).sum()
+            else:
+                buys = (trades.loc[buy_mask, 'price'] * 100).sum()
+                
+            # Sells
+            sell_mask = trades['action_upper'].str.contains('SELL')
+            if qty_col:
+                sells = (trades.loc[sell_mask, 'price'] * trades.loc[sell_mask, qty_col] * 100).sum()
+            else:
+                sells = (trades.loc[sell_mask, 'price'] * 100).sum()
+            
+            total_pnl = sells - buys
+            
+            # P/L % Calculation
+            if buys > 0:
+                pnl_pct = (total_pnl / buys) * 100
+            else:
+                pnl_pct = 0.0
+                
+        except Exception as e:
+            log.error(f"PnL Calc Error: {e}")
+            total_pnl = 0
+
+        # Plot Markers
+        for _, t in trades.iterrows():
+            t_ts = t['datetime_local']
+            y_val = t['price']
+            
+            # Align marker with XSP price if possible
+            if not xsp.empty:
+                try:
+                    idx = (xsp['datetime_local'] - t_ts).abs().idxmin()
+                    y_val = xsp.loc[idx, 'close']
+                except: pass
+
+            act = str(t['action']).upper()
+            color = 'lime' if 'BUY' in act else 'cyan'
+            symbol = 'triangle-up' if 'BUY' in act else 'triangle-down'
+            
+            fig.add_trace(go.Scatter(
+                x=[t_ts], y=[y_val], mode='markers',
+                marker=dict(color=color, size=14, symbol=symbol, line=dict(width=2, color='white')),
+                name=f"{t['action']}", hoverinfo='text',
+                hovertext=f"{t['action']} @ ${t['price']}<br>{t.get('ticker','OPT')}"
+            ), row=1, col=1)
+
+    # 3/4. VIX
     if not vix.empty:
         fig.add_trace(go.Bar(x=vix['datetime_local'], y=vix['hist'], name="Hist", marker_color='rgba(255, 255, 255, 0.3)'), row=3, col=1)
-        fig.add_trace(go.Scatter(x=vix['datetime_local'], y=vix['macd'], name="MACD", line=dict(color='#f1c40f', width=1)), row=3, col=1)
-
-    # 4. VIX RSI
-    if not vix.empty:
+        fig.add_trace(go.Scatter(x=vix['datetime_local'], y=vix['macd'], name="MACD", line=dict(color='#f1c40f', width=1.5)), row=3, col=1)
         fig.add_trace(go.Scatter(x=vix['datetime_local'], y=vix['rsi'], name="RSI", line=dict(color='#a855f7', width=1.5, shape='spline')), row=4, col=1)
         fig.add_hline(y=70, line_dash="dot", line_color="red", row=4, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="green", row=4, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="lime", row=4, col=1)
 
-    # ⚡ ZOOM LOCKED & DARK HOVER
-    if day_start:
-        fig.update_xaxes(matches='x', range=[day_start, day_end], type='date', fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
-    
+    # ⚡ FIX: Standardized Hover Label
     fig.update_layout(
         template="plotly_dark", 
         paper_bgcolor='rgba(0,0,0,0)', 
@@ -393,7 +368,51 @@ def update_mirror(date_str, source):
         legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5),
         hovermode="x unified",
         font=dict(family="'VT323', monospace", size=14, color="#f3f5f9"),
-        hoverlabel=dict(bgcolor="#1e1e1e", font=dict(color="#f3f5f9", family="monospace"))
+        hoverlabel=dict(
+            bgcolor="black", 
+            font=dict(color="white", family="monospace"),
+            bordercolor="#333"
+        )
     )
+    
+    if day_start:
+        fig.update_xaxes(matches='x', range=[day_start, day_end], type='date', fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
 
-    return fig, report_html, table_html
+    # Report HTML with P/L %
+    pnl_color = "text-success" if total_pnl >= 0 else "text-danger"
+    report_html = html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.Div("TRADES", className="small text-muted"), 
+                html.Div(f"{trade_count}", className="fw-bold text-white")
+            ], width=4),
+            dbc.Col([
+                html.Div("EST. PnL", className="small text-muted"), 
+                html.Div(f"${total_pnl:,.2f}", className=f"fw-bold {pnl_color}")
+            ], width=4),
+            dbc.Col([
+                html.Div("RETURN", className="small text-muted"), 
+                html.Div(f"{pnl_pct:+.2f}%", className=f"fw-bold {pnl_color}")
+            ], width=4),
+        ])
+    ], className="text-center font-monospace w-100")
+
+    # Table
+    if not trades.empty:
+        tbl_data = trades.copy()
+        tbl_data['time'] = tbl_data['datetime_local'].dt.strftime('%H:%M:%S')
+        view_cols = ['time', 'action', 'price', 'ticker']
+        tbl = dash_table.DataTable(
+            data=tbl_data[view_cols].to_dict('records'),
+            columns=[{'name': i.upper(), 'id': i} for i in view_cols],
+            style_header={'backgroundColor': '#1e293b', 'color': 'white', 'fontWeight': 'bold', 'fontFamily': 'monospace'},
+            style_cell={'backgroundColor': '#0f172a', 'color': '#e2e8f0', 'fontFamily': 'monospace', 'fontSize': '12px'},
+            page_size=50, style_table={'height': '120px', 'overflowY': 'auto'}
+        )
+    else:
+        tbl = html.Div("No trades recorded.", className="text-muted text-center p-3 font-monospace")
+    
+    tbl_container = html.Div(tbl, style={'marginBottom': '50px'})
+
+    return fig, report_html, tbl_container

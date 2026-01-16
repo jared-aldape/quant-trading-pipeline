@@ -1,157 +1,128 @@
-/* QUANT OS THEME: FINAL FANTASY VI (SNES) */
-/* "There's no reason to be afraid. I'm just a Magitek Knight." */
+/* QUANT OS INSTITUTIONAL FRAMEWORK v3.5.2 */
+/* "Clarity is the ultimate sophistication in algorithmic command." */
 
-@import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Roboto+Mono:wght@400;500&display=swap');
 
 :root {
-    --ff-blue-bg: #283878;       /* The Classic Window Blue */
+    --ff-blue-bg: #11141d;       /* Midnight Blue */
     --ff-text: #f3f5f9;          /* Off-White Text */
-    --ff-gold: #fde722;          /* Cursor/Highlight Gold */
-    --ff-border: #b5b8b9;        /* Window Frame Grey */
+    --ff-gold: #fde722;          /* Highlight Gold */
+    --ff-border: #333;           /* Muted Border */
     --ff-black: #000000;         /* Void Background */
-    --ff-shadow: rgba(0, 0, 0, 0.6);
+    --ff-shadow: rgba(0, 0, 0, 0.4);
+    
+    /* Institutional Primary Fonts */
+    --font-main: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: 'Roboto Mono', 'SFMono-Regular', Consolas, "Liberation Mono", monospace;
 }
 
 /* 1. THE VOID (Global Reset) */
 body {
     background-color: var(--ff-black);
-    background-image: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
-    background-size: 100% 2px, 3px 100%;
-    font-family: 'VT323', monospace;
-    font-size: 1.3rem;
+    background-image: none !important; /* Stripping scanlines */
+    font-family: var(--font-main) !important;
+    font-size: 0.95rem;
     color: var(--ff-text);
+    -webkit-font-smoothing: antialiased;
 }
 
 /* 2. THE WINDOW (Card Override) */
 .card {
-    background: linear-gradient(to bottom, #283878 0%, #1c2855 100%);
-    border: 4px solid var(--ff-border);
-    border-radius: 12px;
-    box-shadow: 
-        inset 0 0 10px #000, 
-        0 0 0 2px #000,      
-        5px 5px 0px rgba(0,0,0,0.5);
+    background: #11141d !important;
+    border: 1px solid var(--ff-border) !important;
+    border-radius: 4px !important;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1) !important;
     margin-bottom: 20px;
 }
 
 .card-header {
-    background: transparent;
-    border-bottom: 2px solid rgba(181, 184, 185, 0.3);
-    color: var(--ff-gold);
-    text-shadow: 2px 2px #000;
-    font-size: 1.6rem;
+    background: rgba(255, 255, 255, 0.03) !important;
+    border-bottom: 1px solid var(--ff-border) !important;
+    color: var(--ff-text) !important;
+    text-shadow: none !important;
+    font-size: 0.85rem !important;
+    font-weight: 700 !important;
     letter-spacing: 1px;
     text-transform: uppercase;
-    font-family: 'VT323', monospace;
+    font-family: var(--font-main) !important;
 }
 
-/* 3. THE MENU (Sidebar) */
-#offcanvas {
-    background: linear-gradient(to right, #283878, #182248) !important;
-    border-right: 4px double var(--ff-border) !important;
+/* 3. THE MENU (Sidebar Override) */
+#sidebar_drawer, .offcanvas {
+    background-color: #0a0c10 !important;
+    border-right: 1px solid var(--ff-border) !important;
     color: var(--ff-text);
 }
 
-/* 4. THE GLOVED HAND (Navigation) */
+/* 4. NAVIGATION (Clean List) */
 .nav-link {
-    color: var(--ff-text) !important;
-    font-size: 1.4rem;
-    padding-left: 20px;
-    transition: all 0.1s;
-    font-family: 'VT323', monospace;
+    color: #a0aec0 !important;
+    font-size: 0.9rem;
+    padding: 10px 20px !important;
+    transition: all 0.2s;
+    font-family: var(--font-main) !important;
+    font-weight: 500;
 }
 
 .nav-link:hover, .nav-link.active {
-    color: var(--ff-gold) !important;
-    text-shadow: 0 0 5px var(--ff-gold);
-    transform: translateX(10px);
+    color: #00d2ff !important;
+    background-color: rgba(0, 210, 255, 0.05) !important;
+    text-shadow: none !important;
+    transform: none !important;
 }
 
 .nav-link.active::before {
-    content: "☛";
-    color: #fff;
-    margin-right: 10px;
-    font-size: 1.2rem;
-    text-shadow: 2px 2px #000;
+    content: "" !important; /* Removing the RPG Finger */
 }
 
-/* 5. INPUTS (The Config Screen) */
-.form-control, .Select-control, .Select-menu-outer {
-    background-color: #101830 !important;
-    border: 2px solid var(--ff-border) !important;
+/* 5. INPUTS (High Density) */
+.form-control, .Select-control, .Select-menu-outer, .form-select {
+    background-color: #000 !important;
+    border: 1px solid #444 !important;
     color: var(--ff-text) !important;
-    font-family: 'VT323', monospace;
-    border-radius: 4px;
+    font-family: var(--font-mono) !important;
+    border-radius: 2px !important;
+    font-size: 0.85rem !important;
 }
 
-/* 6. BUTTONS (Fight / Item / Magic) */
+/* 6. BUTTONS (Institutional Strike) */
 .btn {
-    font-family: 'VT323', monospace;
+    font-family: var(--font-main) !important;
     text-transform: uppercase;
-    border: 2px solid #fff;
-    box-shadow: 2px 2px 0px #000;
-    border-radius: 6px;
-    font-size: 1.2rem;
+    font-weight: 700;
+    border-radius: 2px !important;
+    letter-spacing: 0.5px;
+    box-shadow: none !important;
 }
 
-.btn-success { background-color: #006400; color: #fff; }
-.btn-primary { background-color: var(--ff-blue-bg); color: var(--ff-gold); }
-.btn-danger { background-color: #8b0000; color: #fff; }
-
-/* 7. TABLES */
+/* 7. TABLES (Bloomberg Density) */
 .table {
     color: var(--ff-text);
-    border-collapse: separate;
-    border-spacing: 0;
-    font-family: 'VT323', monospace;
+    font-family: var(--font-mono) !important;
+    font-size: 0.85rem;
 }
 
 .table thead th {
     border-bottom: 2px solid var(--ff-border);
-    color: var(--ff-gold);
-    font-size: 1.3rem;
-    background-color: #1a1a1a;
+    color: #718096;
+    font-weight: 600;
+    background-color: #0a0c10;
 }
 
-.table tbody tr:hover {
-    background-color: rgba(253, 231, 34, 0.15) !important;
-    cursor: pointer;
-}
-
-/* 8. ALERTS & STATUS */
-.text-danger { color: #ff4d4d !important; text-shadow: 0 0 5px #ff0000; }
-.text-success { color: #55ff55 !important; text-shadow: 0 0 5px #00ff00; }
-.text-info { color: #00d2ff !important; }
-.text-warning { color: var(--ff-gold) !important; }
-
-/* 9. STYLE GUIDE ENFORCEMENT CLASSES (NEW) */
-
-/* Unified Page Title */
+/* 8. STYLE GUIDE CLASSES */
 .magitek-h2 {
-    color: var(--ff-text);
-    font-family: 'VT323', monospace;
-    font-size: 2.5rem;
-    letter-spacing: 2px;
-    text-shadow: 3px 3px #000;
-    margin-bottom: 0;
-    font-weight: bold;
-}
-
-/* Unified Subtitle / Note */
-.magitek-note {
-    color: var(--ff-border);
-    font-family: 'VT323', monospace;
-    font-size: 1.4rem;
-    letter-spacing: 0.5px;
-    margin-top: -5px;
-    margin-bottom: 20px;
-}
-
-/* Unified Sidebar Header */
-.magitek-sidebar-header {
     color: #fff;
-    font-family: 'VT323', monospace;
-    font-size: 2.2rem;
-    font-weight: bold;
-    text-shadow: 2px 2px #000;
+    font-family: var(--font-main) !important;
+    font-size: 1.75rem !important;
+    letter-spacing: -0.5px !important;
+    text-shadow: none !important;
+    font-weight: 700 !important;
+}
+
+.magitek-note {
+    color: #718096 !important;
+    font-family: var(--font-main) !important;
+    font-size: 0.9rem !important;
+    letter-spacing: 0px !important;
+    margin-top: 0px !important;
 }

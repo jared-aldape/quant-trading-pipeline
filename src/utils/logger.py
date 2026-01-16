@@ -44,6 +44,16 @@ def get_logger(name="QuantOS"):
     if logger.hasHandlers():
         return logger
 
+    # --- WINDOWS CONSOLE FIX (CRITICAL) ---
+    # Forces UTF-8 encoding for the console to support Emojis (🚀, 💎, etc.)
+    # preventing UnicodeEncodeError on Windows systems (cp1252 default).
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+    # --------------------------------------
+
     # 1. FILE HANDLER (The Black Box - Plain Text, Detailed)
     # Stores full history in logs/system.log
     file_formatter = logging.Formatter(

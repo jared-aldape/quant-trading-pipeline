@@ -19,7 +19,7 @@ from src.core import engine_forensics as forensics
 from src.utils import config
 
 # ==============================================================================
-# 1. CORE LOGIC
+# 1. CORE LOGIC (UPDATED FOR NET GOAL)
 # ==============================================================================
 def get_business_days(start_date, days_forward=252):
     """Generates valid US business days."""
@@ -29,16 +29,17 @@ def get_business_days(start_date, days_forward=252):
 
 def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, target_goal=None, history_df=None):
     """
-    Generates projection with 'Stop at Goal' logic and 'Low Balance' safety.
+    Generates projection targeting a NET TAKE HOME goal.
     """
     # ⚡ SAFETY: Handle low/zero balance
     if start_bal is None or start_bal <= 0: start_bal = 100.0
     
-    days = 252 * 2 # Cap at 2 years max calculation
+    # Cap calculation at 5 years (approx 1260 business days) to prevent infinite loops on high goals
+    max_days = 1260 
     daily_rate = daily_rate_pct / 100.0
     tax_rate = tax_rate_pct / 100.0
     
-    dates = get_business_days(start_date, days)
+    dates = get_business_days(start_date, max_days)
     
     data = []
     current_bal = start_bal
@@ -50,8 +51,11 @@ def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, ta
         gain = current_bal * daily_rate
         end_bal = current_bal + gain
         
-        tax_liability = (end_bal - start_bal) * tax_rate
-        net_profit = (end_bal - start_bal) - tax_liability
+        # Calculate Tax & Net for this specific day's standing
+        total_profit = end_bal - start_bal
+        tax_liability = total_profit * tax_rate
+        net_profit = total_profit - tax_liability
+        take_home = start_bal + net_profit
         
         row = {
             'Day': day_num,
@@ -59,19 +63,20 @@ def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, ta
             'BeginBal': current_bal,
             'TargetGain': gain,
             'ProjectedBal': end_bal,
-            'TaxLiability': max(0, tax_liability), # No negative tax
-            'TakeHome': start_bal + net_profit
+            'TaxLiability': max(0, tax_liability),
+            'TakeHome': take_home
         }
         data.append(row)
         current_bal = end_bal 
         
-        # ⚡ STOP AT GOAL LOGIC
-        if target_goal and end_bal >= target_goal:
+        # ⚡ UPDATED STOP LOGIC: Target the NET TAKE HOME, not the Gross
+        if target_goal and take_home >= target_goal:
             goal_reached = True
             break
         
     df = pd.DataFrame(data)
-    df['Date'] = pd.to_datetime(df['Date'])
+    if not df.empty:
+        df['Date'] = pd.to_datetime(df['Date'])
     
     # Pre-Initialize Columns
     df['ActualBal'] = np.nan
@@ -116,70 +121,88 @@ def calculate_projection(start_bal, daily_rate_pct, tax_rate_pct, start_date, ta
 # 2. LAYOUT
 # ==============================================================================
 def render():
+    # ⚡ NUCLEAR STYLE: HIGH CONTRAST (Black Text / White Background)
+    INPUT_STYLE = {
+        'color': '#000000', 
+        'backgroundColor': '#ffffff', 
+        'fontFamily': 'monospace',
+        'border': '1px solid #ccc'
+    }
+    
+    PICKER_STYLE = {
+        'backgroundColor': 'white', 
+        'color': 'black', 
+        'padding': '5px',
+        'borderRadius': '4px', 
+        'border': '1px solid #ccc'
+    }
+
     return dbc.Container([
         
         # --- TITLE ROW ---
         dbc.Row([
             dbc.Col([
-                html.H2("CAPITAL LAB COMMAND", className="magitek-h2"),
-                html.P("COMPOUND GROWTH | TAX SIMULATOR | REALITY CHECK", className="magitek-note")
+                html.H2("CAPITAL GROWTH ENGINE", className="fw-bold text-white mb-0"),
+                html.P("TRUE NET GOAL | COMPOUND PROJECTIONS | REALITY CHECK", className="text-muted small fw-bold mb-0")
             ], width=8),
             
             dbc.Col([
                 html.Div("SYSTEM STATUS: ONLINE", className="text-end text-success font-monospace fw-bold"),
-                html.Div("MODE: PROJECTION", className="text-end text-warning font-monospace")
+                html.Div("MODE: NET PROJECTION", className="text-end text-warning font-monospace small")
             ], width=4, className="align-self-center")
-        ], className="mb-4 p-3 card flex-row align-items-center", style={"border": "2px solid #b5b8b9", "backgroundColor": "#283878", "color": "#f3f5f9"}),
+        ], className="mb-4 py-3 border-bottom border-secondary"),
 
         # CONTROLS & KPIs
         dbc.Row([
             # INPUT CARD
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("PARAMETERS", className="card-header"),
+                    dbc.CardHeader("GROWTH PARAMETERS", className="fw-bold font-monospace"),
                     dbc.CardBody([
                         # ROW 1: MONEY
                         dbc.Row([
                             dbc.Col([
-                                html.Label("START CAPITAL ($)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-start', type='number', value=2000, step=100, className="mb-2", style={"fontFamily": "monospace"})
+                                html.Label("START CAPITAL ($)", className="small text-muted fw-bold"),
+                                dbc.Input(id='cap-start', type='number', value=2000, step=100, className="mb-2 text-dark", style=INPUT_STYLE)
                             ], width=6),
                             dbc.Col([
-                                html.Label("TARGET GOAL ($)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-goal', type='number', value=25000, step=1000, className="mb-2", style={"fontFamily": "monospace"})
+                                html.Label("NET TARGET GOAL ($)", className="small text-muted fw-bold"),
+                                dbc.Input(id='cap-goal', type='number', value=1000000, step=1000, className="mb-2 text-dark", style=INPUT_STYLE)
                             ], width=6),
                         ], className="mb-3"),
                         
                         # ROW 2: RATES
                         dbc.Row([
                             dbc.Col([
-                                html.Label("DAILY TARGET (%)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-rate', type='number', value=2.0, step=0.1, className="mb-2", style={"fontFamily": "monospace"})
+                                html.Label("DAILY TARGET (%)", className="small text-muted fw-bold"),
+                                dbc.Input(id='cap-rate', type='number', value=2.0, step=0.1, className="mb-2 text-dark", style=INPUT_STYLE)
                             ], width=6),
                             dbc.Col([
-                                html.Label("TAX RATE (%)", className="small text-muted font-monospace"),
-                                dbc.Input(id='cap-tax', type='number', value=30.0, step=1.0, className="mb-2", style={"fontFamily": "monospace"})
+                                html.Label("TAX RATE (%)", className="small text-muted fw-bold"),
+                                dbc.Input(id='cap-tax', type='number', value=30.0, step=1.0, className="mb-2 text-dark", style=INPUT_STYLE)
                             ], width=6),
                         ], className="mb-3"),
                         
                         # ROW 3: DATE
                         dbc.Row([
                             dbc.Col([
-                                html.Label("START DATE", className="small text-muted font-monospace"),
-                                dcc.DatePickerSingle(
-                                    id='cap-date',
-                                    date=date.today() - timedelta(days=30), 
-                                    className="d-block",
-                                    style={"fontFamily": "monospace"}
-                                )
+                                html.Label("START DATE", className="small text-muted fw-bold"),
+                                html.Div([
+                                    dcc.DatePickerSingle(
+                                        id='cap-date',
+                                        date=date.today() - timedelta(days=30), 
+                                        display_format='YYYY-MM-DD',
+                                        style={'border': 'none'}
+                                    )
+                                ], className="mb-2", style=PICKER_STYLE)
                             ], width=12),
                         ], className="mb-3"),
                         
                         html.Hr(className="border-secondary"),
                         
                         # DATA SOURCE
-                        html.Label("COMPARISON SOURCE", className="small text-muted font-monospace mb-2"),
-                        dcc.Dropdown(
+                        html.Label("COMPARISON SOURCE", className="small text-muted fw-bold mb-2"),
+                        dbc.Select(
                             id='cap-source',
                             options=[
                                 {'label': 'NONE (Pure Sim)', 'value': 'none'},
@@ -189,13 +212,12 @@ def render():
                                 {'label': '📡 RAW SIGNAL HISTORY', 'value': 'sig'}
                             ],
                             value='none',
-                            clearable=False,
-                            className="mb-3",
-                            style={"fontFamily": "monospace"}
+                            className="mb-3 text-dark",
+                            style=INPUT_STYLE
                         ),
                         
                         # DIRECTION FILTER
-                        html.Label("FILTER DIRECTION (STRESS TEST)", className="small text-muted font-monospace mb-2"),
+                        html.Label("FILTER DIRECTION", className="small text-muted fw-bold mb-2"),
                         dbc.RadioItems(
                             id='cap-direction',
                             options=[
@@ -210,7 +232,7 @@ def render():
 
                         dbc.Button("CALCULATE TRAJECTORY", id='cap-btn', color="primary", className="w-100 mt-4 fw-bold font-monospace")
                     ])
-                ], className="shadow h-100", style={"backgroundColor": "#101830", "border": "1px solid #444"})
+                ], className="shadow-sm border-secondary h-100")
             ], width=4),
 
             # KPI OUTPUTS
@@ -218,21 +240,21 @@ def render():
                 dbc.Row(id='cap-kpi-row', className="mb-3"),
                 # Large Chart Area
                 dbc.Card([
-                    dbc.CardHeader("GROWTH TRAJECTORY", className="card-header text-center"),
+                    dbc.CardHeader("GROWTH TRAJECTORY (GROSS vs NET)", className="fw-bold font-monospace small"),
                     dbc.CardBody(dcc.Graph(id='cap-growth-chart', style={'height': '380px'}, config={'displayModeBar': False}))
-                ], className="shadow h-100", style={"backgroundColor": "#101830", "border": "1px solid #444"})
+                ], className="shadow-sm border-secondary h-100")
             ], width=8)
         ], className="mb-4"),
 
         # DETAILED TABLE
         dbc.Row([
             dbc.Col([
-                html.H4("PROJECTION LEDGER", className="text-info font-monospace"),
+                html.H5("PROJECTION LEDGER", className="text-info font-monospace fw-bold"),
                 html.Div(id='cap-table-container')
             ], width=12)
         ])
 
-    ], fluid=True)
+    ], fluid=True, className="px-4 py-3")
 
 # ==============================================================================
 # 3. CALLBACKS
@@ -266,49 +288,54 @@ def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_
             if direction != 'ALL':
                 history_df = history_df[history_df['ticker'].str.contains(direction, na=False)]
 
-    # 2. Calculate Projection (Stop at Goal Enabled)
+    # 2. Calculate Projection (Stop at NET Goal Enabled)
     df, goal_reached = calculate_projection(start_bal, daily_rate, tax_rate, start_date, target_goal, history_df)
     
     if df.empty:
-        return [], go.Figure(), html.Div("Calculation Error", className="text-danger")
+        return [], go.Figure(), html.Div("Calculation Error", className="text-danger font-monospace")
 
     # 3. Goal Math
     days_to_goal_str = "∞"
     goal_date_str = "Never"
     
-    # If already reached, get actual date
     if goal_reached:
         days_to_goal_str = f"{len(df)} Days"
         goal_date_str = df.iloc[-1]['Date'].strftime('%b %d, %Y')
     elif daily_rate > 0 and target_goal > start_bal:
-        # Theoretical calculation if not reached in window
-        rate_dec = daily_rate / 100.0
+        # Theoretical calc
         try:
-            t_days = math.log(target_goal / start_bal) / math.log(1 + rate_dec)
+            # Note: This is rough approx, loop handles tax accurately
+            rate_dec = daily_rate / 100.0
+            tax_dec = tax_rate / 100.0
+            # Rough: How many days to gross required?
+            gross_needed = target_goal / (1 - tax_dec) # Very rough approximation
+            t_days = math.log(gross_needed / start_bal) / math.log(1 + rate_dec)
             t_days_int = int(np.ceil(t_days))
-            days_to_goal_str = f"{t_days_int} Days"
+            days_to_goal_str = f"~{t_days_int} Days"
         except: pass
 
-    # 4. KPIs
+    # 4. KPIs (Institutional Cards)
     end_bal = df.iloc[-1]['ProjectedBal']
     tax_bill = df.iloc[-1]['TaxLiability']
     take_home = df.iloc[-1]['TakeHome']
     
+    card_style = {"backgroundColor": "#1e293b", "borderColor": "#334155", "color": "white"}
+    
     kpis = [
-        dbc.Col(dbc.Card([html.H6("PROJECTED END", className="font-monospace"), html.H3(f"${end_bal:,.0f}", className="text-info font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
-        dbc.Col(dbc.Card([html.H6("GOAL REACHED", className="font-monospace"), html.H3(days_to_goal_str, className="text-success font-monospace"), html.Small(goal_date_str, className="text-muted font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
-        dbc.Col(dbc.Card([html.H6("EST. TAXES", className="font-monospace"), html.H3(f"${tax_bill:,.0f}", className="text-danger font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
-        dbc.Col(dbc.Card([html.H6("NET TAKE HOME", className="font-monospace"), html.H3(f"${take_home:,.0f}", className="text-warning font-monospace")], body=True, color="dark", inverse=True, style={"border": "1px solid #444"})),
+        dbc.Col(dbc.Card([html.H6("GROSS ENDING", className="text-muted small fw-bold"), html.H3(f"${end_bal:,.0f}", className="text-white font-monospace")], body=True, style=card_style)),
+        dbc.Col(dbc.Card([html.H6("GOAL REACHED", className="text-muted small fw-bold"), html.H3(days_to_goal_str, className="text-success font-monospace"), html.Small(goal_date_str, className="text-muted font-monospace")], body=True, style=card_style)),
+        dbc.Col(dbc.Card([html.H6("EST. TAXES", className="text-muted small fw-bold"), html.H3(f"${tax_bill:,.0f}", className="text-danger font-monospace")], body=True, style=card_style)),
+        dbc.Col(dbc.Card([html.H6("NET TAKE HOME", className="text-muted small fw-bold"), html.H3(f"${take_home:,.0f}", className="text-warning font-monospace")], body=True, style=card_style)),
     ]
 
-    # 5. Chart (With Milestones & Drawdown Sim)
+    # 5. Chart
     fig = go.Figure()
     
-    # Target Path
-    fig.add_trace(go.Scatter(x=df['Date'], y=df['ProjectedBal'], mode='lines', name='Target Path', line=dict(color='#00bc8c', width=3)))
+    # Gross Path
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['ProjectedBal'], mode='lines', name='Gross Path', line=dict(color='#00bc8c', width=3)))
     
-    # Drawdown Simulation (Risk Path - 50% of Target)
-    fig.add_trace(go.Scatter(x=df['Date'], y=df['ProjectedBal'] * 0.5, mode='lines', name='Risk Path (-50%)', line=dict(color='#e74c3c', width=1, dash='dot'), opacity=0.5))
+    # Net Path (The Truth)
+    fig.add_trace(go.Scatter(x=df['Date'], y=df['TakeHome'], mode='lines', name='Net Take Home', line=dict(color='#f39c12', width=2, dash='dash')))
 
     # Actuals
     if 'ActualBal' in df.columns and not df['ActualBal'].isna().all():
@@ -318,7 +345,8 @@ def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_
     if target_goal >= 25000:
         fig.add_hline(y=25000, line_dash="dash", line_color="cyan", annotation_text="PDT ($25k)", annotation_position="bottom right")
     
-    fig.add_hline(y=target_goal, line_dash="solid", line_color="#00ff41", annotation_text="GOAL", annotation_position="top right")
+    # The Goal Line now matches the NET path termination
+    fig.add_hline(y=target_goal, line_dash="solid", line_color="#00ff41", annotation_text="NET GOAL", annotation_position="top right")
 
     fig.update_layout(
         template="plotly_dark", 
@@ -327,10 +355,10 @@ def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_
         margin=dict(l=40, r=40, t=40, b=40), 
         legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"), 
         yaxis_tickprefix="$",
-        font=dict(family="'VT323', monospace", size=14, color="#f3f5f9")
+        font=dict(family="monospace", size=12, color="#f3f5f9")
     )
 
-    # 6. Table
+    # 6. Table (Institutional Style)
     df_view = df.copy()
     df_view['Date'] = df_view['Date'].dt.strftime('%Y-%m-%d')
     cols = ['Day', 'Date', 'BeginBal', 'TargetGain', 'ProjectedBal', 'TaxLiability', 'TakeHome']
@@ -341,18 +369,27 @@ def update_capital_model(n, start_bal, target_goal, daily_rate, tax_rate, start_
         if c in df_view.columns:
             df_view[c] = df_view[c].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "-")
 
-    # MAGITEK TABLE STYLES
-    header_style = {'backgroundColor': '#283878', 'color': '#fde722', 'borderBottom': '2px solid #b5b8b9', 'fontWeight': 'bold'}
-    cell_style = {'backgroundColor': '#101830', 'color': '#f3f5f9', 'border': '1px solid #444', 'textAlign': 'left', 'fontFamily': "'VT323', monospace", 'fontSize': '1.1rem'}
-
     tbl = dash_table.DataTable(
         data=df_view[cols].to_dict('records'),
         columns=[{'name': i, 'id': i} for i in cols],
-        style_header=header_style,
-        style_cell=cell_style,
+        style_header={
+            'backgroundColor': '#1e293b', 
+            'color': '#f8fafc', 
+            'fontWeight': 'bold', 
+            'borderBottom': '2px solid #475569',
+            'fontFamily': 'monospace'
+        },
+        style_cell={
+            'backgroundColor': '#0f172a', 
+            'color': '#e2e8f0', 
+            'border': '1px solid #334155', 
+            'textAlign': 'left', 
+            'fontFamily': 'monospace', 
+            'fontSize': '13px'
+        },
         style_data_conditional=[
-            {'if': {'filter_query': '{Variance} contains "$"', 'column_id': 'Variance'}, 'color': '#00ff41'}, 
-            {'if': {'filter_query': '{Variance} contains "-"', 'column_id': 'Variance'}, 'color': '#ff5555'}, 
+            {'if': {'filter_query': '{Variance} contains "$"', 'column_id': 'Variance'}, 'color': '#22c55e', 'fontWeight': 'bold'}, 
+            {'if': {'filter_query': '{Variance} contains "-"', 'column_id': 'Variance'}, 'color': '#ef4444', 'fontWeight': 'bold'}, 
         ],
         page_size=10, style_table={'overflowX': 'auto'}
     )
