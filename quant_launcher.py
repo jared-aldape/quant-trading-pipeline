@@ -173,4 +173,4 @@ if __name__ == "__main__":
     #         print(f"⚠️ PIPELINE START FAILED: {e}")
     
     # ⚡ DASH 2.0 STARTUP
-    app.run(debug=True, port=8050)
+    app.run(debug=True, use_reloader=True, port=8050)
