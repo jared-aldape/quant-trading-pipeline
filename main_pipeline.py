@@ -16,7 +16,7 @@ log = get_logger("DailyPipeline")
 
 # --- CONFIGURATION (VACATION PROOFING) ---
 # Always check last 30 days to auto-repair gaps from weekends/holidays/downtime
-DEEP_LOOKBACK = 30
+DEEP_LOOKBACK = 60
 
 # ==============================================================================
 # 2. DYNAMIC IMPORTER (The Adapter Layer)
