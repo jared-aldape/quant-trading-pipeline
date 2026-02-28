@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, callback, Input, Output, State, no_update
+from dash import dcc, html, dash_table, callback, Input, Output, State, no_update
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
@@ -13,14 +13,17 @@ sys.path.append(str(ROOT_DIR))
 
 from src.core import engine_backtest
 from src.utils import config
-from src.utils.date_profiles import DATE_PROFILES 
+
+try:
+    from src.utils.date_profiles import DATE_PROFILES 
+except ImportError:
+    DATE_PROFILES = {"Last 30 Days": None}
 
 # ==============================================================================
 # 1. LAYOUT
 # ==============================================================================
 def render():
     return dbc.Container([
-        # --- TITLE ROW ---
         dbc.Row([
             dbc.Col([
                 html.H2("BACKTEST SEQUENCE GENERATOR", className="fw-bold text-white mb-0"),
@@ -33,15 +36,12 @@ def render():
             ], width=4, className="align-self-center")
         ], className="mb-4 py-3 border-bottom border-secondary"),
 
-        # --- MAIN CONSOLE ROW ---
         dbc.Row([
-            # LEFT: SYSTEM CONFIGURATION
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader("SYSTEM CONFIGURATION", className="fw-bold font-monospace"),
                     dbc.CardBody([
                         html.Label("STRATEGY PROFILE", className="small text-muted fw-bold"),
-                        # ⚡ SWITCHED TO dbc.Select (Native HTML Dropdown)
                         dbc.Select(
                             id='gen-profile',
                             options=[
@@ -51,7 +51,7 @@ def render():
                                 {'label': 'CALLS ONLY', 'value': 'ALL_CALL'},
                                 {'label': 'PUTS ONLY', 'value': 'ALL_PUT'}
                             ],
-                            value='ALGO_SIGNALS',
+                            value='ALL_CALL',
                             className="mb-3 bg-white text-dark font-monospace"
                         ),
 
@@ -75,7 +75,7 @@ def render():
                         ]),
 
                         html.Label("STARTING CAPITAL ($)", className="small text-muted fw-bold mt-2"),
-                        dbc.Input(id='gen-capital', type='number', value=2000, step=100, className="mb-3 font-monospace bg-white text-dark"),
+                        dbc.Input(id='gen-capital', type='number', value=150, step=10, className="mb-3 font-monospace bg-white text-dark"),
 
                         html.Label("SELECTION LOGIC", className="small text-muted fw-bold"),
                         dbc.Select(
@@ -94,7 +94,6 @@ def render():
                 ], className="shadow-sm border-secondary h-100")
             ], width=4),
 
-            # MIDDLE: MISSION PARAMETERS
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader("MISSION PARAMETERS", className="fw-bold font-monospace"),
@@ -102,18 +101,18 @@ def render():
                         dbc.Row([
                             dbc.Col([
                                 html.Label("IDEAL GAIN %", className="small text-muted fw-bold"),
-                                dbc.Input(id='gen-ideal-gain', type='number', value=30, step=5, className="mb-2 font-monospace bg-white text-dark")
+                                dbc.Input(id='gen-ideal-gain', type='number', value=1000, step=5, className="mb-2 font-monospace bg-white text-dark")
                             ], width=6),
                             dbc.Col([
                                 html.Label("TRAILING STOP %", className="small text-muted fw-bold"),
-                                dbc.Input(id='gen-trail-stop', type='number', value=15, step=5, className="mb-2 font-monospace bg-white text-dark")
+                                dbc.Input(id='gen-trail-stop', type='number', value=30, step=5, className="mb-2 font-monospace bg-white text-dark")
                             ], width=6),
                         ], className="mb-3"),
 
                         dbc.Row([
                             dbc.Col([
                                 html.Label("MAX LOSS %", className="small text-muted fw-bold"),
-                                dbc.Input(id='gen-max-loss', type='number', value=50, step=10, className="mb-2 font-monospace bg-white text-dark")
+                                dbc.Input(id='gen-max-loss', type='number', value=30, step=10, className="mb-2 font-monospace bg-white text-dark")
                             ], width=6),
                         ], className="mb-3"),
 
@@ -146,7 +145,6 @@ def render():
                 ], className="shadow-sm border-secondary h-100")
             ], width=4),
 
-            # RIGHT: ANALYTICS REPORT
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader("ANALYTICS REPORT", className="fw-bold font-monospace text-success"),
@@ -202,8 +200,7 @@ def render():
     Input('gen-profile', 'value')
 )
 def toggle_selection_mode(profile):
-    if profile in ['LIVE_RH', 'MANUAL_SIM']:
-        return 'FIRST', True
+    if profile in ['LIVE_RH', 'MANUAL_SIM']: return 'FIRST', True
     return 'FIRST', False
 
 @callback(
@@ -211,7 +208,7 @@ def toggle_selection_mode(profile):
     Input('gen-date-profile', 'value')
 )
 def update_date_range(profile_name):
-    if not profile_name or profile_name not in DATE_PROFILES:
+    if not profile_name or profile_name not in DATE_PROFILES or DATE_PROFILES[profile_name] is None:
         return no_update, no_update
     profile = DATE_PROFILES[profile_name]
     return profile.start_date, profile.end_date
@@ -237,7 +234,6 @@ def update_gen_stats(n, start_date, end_date, capital, profile, selection,
         'max_loss': max_loss, 'fee_model': fee_model, 'tax_rate': tax_rate
     }
 
-    # ⚡ ENGINE CALL WITH ERROR HANDLING
     try:
         trades, equity, final_bal, ret_pct, report = engine_backtest.run_backtest(
             start_date, end_date, capital, profile, selection, mission_params
@@ -258,16 +254,47 @@ def update_gen_stats(n, start_date, end_date, capital, profile, selection,
     if not trades:
         tbl = html.Div("No strategy execution found.", className="text-center text-muted py-5 font-monospace")
     else:
-        rows = [html.Tr([
-            html.Td(t['Date'], className="text-muted"), html.Td(t['Ticker'], className="text-white fw-bold"),
-            html.Td(t['Type'], className="text-info" if 'CALL' in str(t['Type']).upper() else "text-danger"),
-            html.Td(t['Entry_Time'], className="text-muted"), html.Td(t['Exit_Time'], className="text-muted"),
-            html.Td(t['Duration'], className="text-white"),
-            html.Td(f"{t['Return']:.1f}%", style={'color': "var(--inst-success)" if t.get('PnL', 0) >= 0 else "var(--inst-danger)"}),
-            html.Td(f"${t['Balance']:,.2f}", className="text-white"),
-            html.Td(f"${t['Tax']:,.2f}", className="text-danger small"),
-            html.Td(f"${t['TakeHome']:,.2f}", className="text-success fw-bold")
-        ]) for t in trades]
-        tbl = dbc.Table([html.Thead(html.Tr([html.Th("DATE"), html.Th("TICKER"), html.Th("TYPE"), html.Th("ENTRY"), html.Th("EXIT"), html.Th("DUR"), html.Th("ROI %"), html.Th("EQUITY"), html.Th("TAX"), html.Th("NET")]))] + [html.Tbody(rows)], className="table font-monospace", style={"backgroundColor": "#0f172a", "fontSize": "12px"})
+        # ⚡ THE IMMUNE TABLE FIX: Nuking Bootstrap dependency entirely.
+        df_t = pd.DataFrame(trades)
+        df_t['Return_str'] = df_t['Return'].apply(lambda x: f"{x:+.1f}%")
+        df_t['Balance_str'] = df_t['Balance'].apply(lambda x: f"${x:,.2f}")
+        df_t['Tax_str'] = df_t['Tax'].apply(lambda x: f"${x:,.2f}")
+        df_t['TakeHome_str'] = df_t['TakeHome'].apply(lambda x: f"${x:,.2f}")
+
+        tbl = dash_table.DataTable(
+            data=df_t.to_dict('records'),
+            columns=[
+                {'name': 'DATE', 'id': 'Date'}, {'name': 'TICKER', 'id': 'Ticker'},
+                {'name': 'TYPE', 'id': 'Type'}, {'name': 'ENTRY', 'id': 'Entry_Time'},
+                {'name': 'EXIT', 'id': 'Exit_Time'}, {'name': 'DUR', 'id': 'Duration'},
+                {'name': 'ROI %', 'id': 'Return_str'}, {'name': 'EQUITY', 'id': 'Balance_str'},
+                {'name': 'TAX', 'id': 'Tax_str'}, {'name': 'NET', 'id': 'TakeHome_str'}
+            ],
+            style_header={
+                'backgroundColor': '#1e293b', 
+                'color': '#f8fafc', 
+                'fontWeight': 'bold', 
+                'borderBottom': '2px solid #475569', 
+                'fontFamily': 'monospace'
+            },
+            style_data={
+                'backgroundColor': '#0f172a', 
+                'color': '#f8fafc', 
+                'border': '1px solid #334155', 
+                'fontFamily': 'monospace', 
+                'fontSize': '12px'
+            },
+            style_cell={'textAlign': 'left', 'padding': '8px'},
+            style_data_conditional=[
+                {'if': {'column_id': 'Type', 'filter_query': '{Type} = "CALL"'}, 'color': '#38bdf8', 'fontWeight': 'bold'},
+                {'if': {'column_id': 'Type', 'filter_query': '{Type} = "PUT"'}, 'color': '#f43f5e', 'fontWeight': 'bold'},
+                {'if': {'column_id': 'Return_str'}, 'color': '#10b981', 'fontWeight': 'bold'},
+                {'if': {'column_id': 'Return_str', 'filter_query': '{Return_str} contains "-"'}, 'color': '#ef4444', 'fontWeight': 'bold'},
+                {'if': {'column_id': 'TakeHome_str'}, 'color': '#10b981', 'fontWeight': 'bold'},
+                {'if': {'column_id': 'TakeHome_str', 'filter_query': '{TakeHome_str} contains "-"'}, 'color': '#ef4444', 'fontWeight': 'bold'},
+                {'if': {'column_id': 'Tax_str'}, 'color': '#ef4444'}
+            ],
+            page_size=15
+        )
 
     return f"${final_bal:,.2f}", f"{ret_pct:+.1f}%", f"{report['win_rate']:.1f}%", f"{report['count']}", f"{report['wins']}/{report['losses']}", f"${report['gross_pnl']:,.2f}", f"${report['friction']:,.2f}", f"${report['net_pnl']:,.2f}", fig, tbl

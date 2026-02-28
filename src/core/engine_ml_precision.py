@@ -86,14 +86,16 @@ def build_precision_dataset():
                 is_call = 0
                 rsi = 50.0
 
-            # SIMPLE FEATURE SET: [Is_Call, VIX, RSI]
-            # (In v4.1 we can expand this to include slope/momentum)
             vix = row['vix_val'] if pd.notnull(row['vix_val']) else 15.0
             
-            X.append([is_call, vix, rsi])
+            # ⚡ UPGRADE: Extract Historical Hour for Time-of-Day Context
+            trade_hour = row['entry_time'].hour if pd.notnull(row['entry_time']) else 9
+            
+            # ⚡ UPGRADE: Expanded Feature Set
+            X.append([is_call, vix, rsi, trade_hour])
             y.append(label)
 
-        return pd.DataFrame(X, columns=['is_call', 'vix', 'rsi']), pd.Series(y)
+        return pd.DataFrame(X, columns=['is_call', 'vix', 'rsi', 'hour']), pd.Series(y)
 
     except Exception as e:
         log.error(f"Dataset Build Error: {e}")
@@ -152,10 +154,10 @@ def train_precision_oracle():
 # ==============================================================================
 # 4. INFERENCE (The Guard)
 # ==============================================================================
-def predict_success(signal_type, vix_val, rsi_val):
+def predict_success(signal_type, vix_val, rsi_val, trade_hour=None):
     """
     Returns probability of success (0-100).
-    Now robust against 'Single Class' model errors.
+    Now robust against 'Single Class' model errors and Time-Travel bugs.
     """
     if not MODEL_PATH.exists(): return 50.0
     
@@ -166,8 +168,11 @@ def predict_success(signal_type, vix_val, rsi_val):
         s_type = str(signal_type).upper()
         is_call = 1 if ('LONG' in s_type or 'BULL' in s_type or 'CALL' in s_type) else 0
         
-        # Construct Vector
-        X_new = pd.DataFrame([[is_call, vix_val, rsi_val]], columns=['is_call', 'vix', 'rsi'])
+        # ⚡ UPGRADE: Use passed historical hour, or fallback to current hour for Live Scope
+        target_hour = trade_hour if trade_hour is not None else datetime.now().hour
+        
+        # ⚡ UPGRADE: Expanded Vector Map
+        X_new = pd.DataFrame([[is_call, vix_val, rsi_val, target_hour]], columns=['is_call', 'vix', 'rsi', 'hour'])
         
         # 🛡️ ROBUST PREDICTION
         try:
@@ -191,3 +196,6 @@ def predict_success(signal_type, vix_val, rsi_val):
     except Exception as e:
         # log.error(f"Prediction Error: {e}") # Silenced to prevent spam
         return 50.0
+
+if __name__ == "__main__":
+    train_precision_oracle()

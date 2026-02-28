@@ -140,6 +140,9 @@ def scout_day_performance(date_str, trade_type_filter='call'):
 
 def fetch_available_strikes(entry_ts, trade_type):
     try:
+        # SANITIZE INPUT: explicitly cast to integer
+        entry_ts = int(entry_ts)
+        
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
         
         res = con.execute(f"SELECT xsp_price, date FROM {TBL_MANIFEST} WHERE entry_timestamp_utc={entry_ts}").fetchone()
@@ -487,7 +490,14 @@ def update_strike_options(entry_ts, mode):
 def update_chart(entry_ts, ticker, stop_pct, mode):
     empty_fig = go.Figure()
     empty_fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)') 
+    
     if not entry_ts or not ticker: return empty_fig, "NO DATA", ""
+
+    # SANITIZE INPUT: Explicitly cast to integer
+    try:
+        entry_ts = int(entry_ts)
+    except ValueError:
+        return empty_fig, "INVALID TIMESTAMP", ""
 
     if not config.DB_FILE.exists(): return empty_fig, "DB MISSING", ""
     
