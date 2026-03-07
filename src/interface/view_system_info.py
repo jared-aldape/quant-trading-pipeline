@@ -8,6 +8,7 @@ import shutil
 import pandas as pd
 from pathlib import Path
 import sys
+import subprocess
 from datetime import datetime, date, timedelta
 
 # ==============================================================================
@@ -38,25 +39,32 @@ MARKET_EVENTS = [
 # 1. HELPERS
 # ==============================================================================
 def get_db_stats():
-    """Returns file size and row counts."""
+    """Returns file size, row counts, and last updated time."""
     if not config.DB_FILE.exists():
-        return "N/A", 0, 0
+        return "N/A", 0, 0, "NEVER"
     
     try:
         size_mb = config.DB_FILE.stat().st_size / (1024 * 1024)
         size_str = f"{size_mb:.2f} MB"
         
+        # Track the exact moment the DB was last written to
+        last_modified = datetime.fromtimestamp(config.DB_FILE.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        
         # ⚡ FIX: Read Only to prevent locks
         con = duckdb.connect(str(config.DB_FILE), read_only=True)
         tables = [x[0] for x in con.execute("SHOW TABLES").fetchall()]
         
-        t_opts = con.execute(f"SELECT COUNT(*) FROM {config.TBL_OPTIONS}").fetchone()[0] if config.TBL_OPTIONS in tables else 0
-        t_sigs = con.execute(f"SELECT COUNT(*) FROM {config.TBL_MANIFEST}").fetchone()[0] if config.TBL_MANIFEST in tables else 0
+        # Flexible attribute fetching for tables
+        opt_table = getattr(config, 'TBL_OPTIONS', 'options_1m')
+        sig_table = getattr(config, 'TBL_MANIFEST', 'trade_manifest')
+        
+        t_opts = con.execute(f"SELECT COUNT(*) FROM {opt_table}").fetchone()[0] if opt_table in tables else 0
+        t_sigs = con.execute(f"SELECT COUNT(*) FROM {sig_table}").fetchone()[0] if sig_table in tables else 0
         con.close()
     except Exception as e:
-        size_str, t_opts, t_sigs = "ERR", 0, 0
+        size_str, t_opts, t_sigs, last_modified = "ERR", 0, 0, "ERROR"
         
-    return size_str, t_opts, t_sigs
+    return size_str, t_opts, t_sigs, last_modified
 
 def get_disk_usage():
     """Returns % of disk used."""
@@ -114,11 +122,12 @@ def render():
             dbc.Col([
                 html.H2("SYSTEM STATUS MONITOR", className="fw-bold text-white mb-0"),
                 html.P("ENGINEERING DECK | DATABASE DIAGNOSTICS | LOGS", className="text-muted small fw-bold mb-0")
-            ], width=8),
+            ], width=7),
             dbc.Col([
                 html.Div("OPERATIONAL STATUS: NOMINAL", className="text-end text-success font-monospace fw-bold"),
-                html.Div(id="sys-latency", className="text-end text-muted font-monospace small")
-            ], width=4, className="align-self-center")
+                html.Div(id="sys-last-updated", className="text-end text-muted font-monospace small mb-2"),
+                dbc.Button("🔄 REFRESH DATA (PIPELINE)", id="sys-btn-refresh", color="info", size="sm", className="float-end font-monospace fw-bold")
+            ], width=5, className="align-self-center text-end")
         ], className="mb-4 py-3 border-bottom border-secondary"),
 
         dbc.Row([
@@ -224,7 +233,8 @@ def render():
             ], style={"backgroundColor": "#0f172a", "borderTop": "1px solid #333"})
         ], id="sys-reset-modal", is_open=False),
         
-        html.Div(id="sys-dummy-out")
+        html.Div(id="sys-dummy-out"),
+        html.Div(id="sys-dummy-refresh", style={"display": "none"})
 
     ], fluid=True, className="px-4 py-3")
 
@@ -237,15 +247,16 @@ def render():
      Output("sys-rows-sig", "children"),
      Output("sys-ping", "children"),
      Output("sys-disk-bar", "value"),
-     Output("sys-log-tail", "children")],
+     Output("sys-log-tail", "children"),
+     Output("sys-last-updated", "children")],
     [Input("sys-pulse", "n_intervals")]
 )
 def update_diagnostics(n):
-    size, opts, sigs = get_db_stats()
+    size, opts, sigs, last_updated = get_db_stats()
     ping = check_latency()
     disk = get_disk_usage()
     log_tail = get_system_log_tail()
-    return size, f"{opts:,}", f"{sigs:,}", ping, disk, log_tail
+    return size, f"{opts:,}", f"{sigs:,}", ping, disk, log_tail, f"LAST DB WRITE: {last_updated}"
 
 @callback(
     [Output("sys-reset-modal", "is_open"), Output("sys-dummy-out", "children")],
@@ -260,3 +271,16 @@ def handle_reset(n_req, n_conf, n_canc, is_open):
         return False, "RESET COMPLETE"
     if trig == "sys-reset-cancel": return False, no_update
     return is_open, no_update
+
+@callback(
+    Output("sys-dummy-refresh", "children"),
+    Input("sys-btn-refresh", "n_clicks"),
+    prevent_initial_call=True
+)
+def trigger_refresh(n_clicks):
+    if n_clicks:
+        # Launch the main pipeline script as a non-blocking subprocess
+        pipeline_path = ROOT_DIR / "main_pipeline.py"
+        subprocess.Popen([sys.executable, str(pipeline_path)])
+        return "REFRESH TRIGGERED"
+    return no_update

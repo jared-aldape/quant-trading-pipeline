@@ -12,13 +12,13 @@ ROOT_DIR = pathlib.Path(__file__).parent.resolve()
 sys.path.append(str(ROOT_DIR))
 
 # ==============================================================================
-# 2. MODULE IMPORTS (The Institutional 12)
+# 2. MODULE IMPORTS (The Institutional 13)
 # ==============================================================================
 from src.interface import view_live_scope, view_options_sim, view_replay_analysis
 from src.interface import view_chart_analysis, view_audit, view_rh_ledger
 from src.interface import view_statistics, view_capital_growth
 from src.interface import view_data_generator, view_rh_mirror, view_system_info
-from src.interface import view_optimal_lab 
+from src.interface import view_optimal_lab, view_tactical_strike 
 
 # BACKGROUND ENGINE (Root Level Import)
 try:
@@ -86,6 +86,7 @@ sidebar = html.Div(
         dbc.Nav(
             [
                 dbc.NavLink("LIVE SCOPE", href="/scope", active="exact", className="fw-bold font-monospace py-1"),
+                dbc.NavLink("TACTICAL STRIKE", href="/strike", active="exact", className="fw-bold font-monospace py-1 text-warning"),
                 dbc.NavLink("OPTIONS SIMULATOR", href="/sim", active="exact", className="fw-bold font-monospace py-1"),
                 dbc.NavLink("REPLAY ANALYSIS", href="/replay", active="exact", className="fw-bold font-monospace py-1"),
             ], vertical=True, pills=True,
@@ -119,7 +120,7 @@ sidebar = html.Div(
 
         html.Div([
             html.Hr(className="border-secondary"),
-            html.Small("v4.0.9 STRUCTURED", className="text-muted font-monospace")
+            html.Small("v4.1.0 TACTICAL", className="text-muted font-monospace")
         ], style={"marginTop": "auto", "paddingTop": "20px"})
     ],
     style=SIDEBAR_STYLE,
@@ -136,6 +137,7 @@ app.layout = html.Div([dcc.Location(id="url"), sidebar, content])
 def render_page_content(pathname):
     if pathname == "/" or pathname == "/info": return view_system_info.render()
     elif pathname == "/scope": return view_live_scope.render()
+    elif pathname == "/strike": return view_tactical_strike.render()
     elif pathname == "/sim": return view_options_sim.render()
     elif pathname == "/replay": return view_replay_analysis.render()
     elif pathname == "/chart": return view_chart_analysis.render()

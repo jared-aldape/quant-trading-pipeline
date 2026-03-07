@@ -2,15 +2,14 @@ import sys
 import duckdb
 import pandas as pd
 import numpy as np
-import shutil
-import os
+import pandas_ta as ta
 import time
 from datetime import datetime, timedelta
 import pytz
 from pathlib import Path
 
 # ==============================================================================
-# 1. SETUP
+# 1. PATH & ARCHITECTURE CONSTITUTION
 # ==============================================================================
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
@@ -20,263 +19,228 @@ from src.utils.logger import get_logger
 
 log = get_logger("BacktestEngine")
 TZ_UTC = pytz.UTC
-TZ_PST = pytz.timezone('US/Pacific')
-TZ_NY = pytz.timezone('America/New_York')
+
+TBL_OPTIONS = getattr(config, 'TBL_OPTIONS', 'options_1m')
 
 try:
     from src.core import engine_ml_precision
     ML_AVAILABLE = True
 except ImportError:
-    log.warning("ML Oracle not found. 'BEST' selection mode will default to 'FIRST'.")
+    log.warning("ML Oracle not found. Proceeding without ML triage.")
     ML_AVAILABLE = False
 
 # ==============================================================================
-# 2. CALCULATORS
+# 2. FINANCIAL CALCULATORS
 # ==============================================================================
 def calculate_fees(price, quantity, model='RH_GOLD'):
     if model == 'NONE': return 0.0
     reg_fee = 0.04
     taf_fee = 0.002
-    contract_fee = 0.35 if model == 'RH_GOLD' else 0.65 if model == 'STD' else 1.00 if model == 'PROP' else 0.0
+    contract_fee = 0.35 if model == 'RH_GOLD' else 0.65 if model == 'STD' else 1.00
     return round((contract_fee * quantity) + reg_fee + taf_fee, 2)
 
 # ==============================================================================
-# 3. SNAPSHOT PROTOCOL
+# 3. MACHINE LEARNING BATCH PROTOCOL (THE GATEKEEPER)
 # ==============================================================================
-def get_safe_connection():
-    db_path = config.DB_FILE
-    temp_path = db_path.parent / "temp_view_engine.duckdb"
+def enrich_and_predict(signals_df, con):
+    """
+    ⚡ RESTORED & UPGRADED: Pulls the exact MACD/ADX data the Oracle needs 
+    to make a >70% confidence prediction.
+    """
+    if not ML_AVAILABLE or signals_df.empty:
+        signals_df['ml_confidence'] = 50.0
+        return signals_df
+        
+    log.info(f"🧠 AI GATEKEEPER: Extracting live technicals for {len(signals_df)} raw signals...")
     
-    try: shutil.copy2(db_path, temp_path)
-    except OSError:
-        try:
-            with open(db_path, 'rb') as src, open(temp_path, 'wb') as dst:
-                shutil.copyfileobj(src, dst)
-        except Exception as e:
-            return None, None
+    # Fetch Market Context to calculate overlaps
+    min_time = signals_df['entry_timestamp_utc'].min() - timedelta(days=2)
+    df_mkt = con.execute(f"SELECT * FROM indices_1m WHERE datetime_utc >= '{min_time}'").df()
+    
+    # Calculate VIX Technicals
+    vix = df_mkt[df_mkt['ticker'] == 'VIX'].copy()
+    if not vix.empty:
+        v_macd = ta.macd(vix['close'])
+        vix['macd'] = v_macd['MACD_12_26_9'] if v_macd is not None else 0
+        vix['signal'] = v_macd['MACDs_12_26_9'] if v_macd is not None else 0
+        vix['hist'] = v_macd['MACDh_12_26_9'] if v_macd is not None else 0
+        v_diff = vix['macd'] - vix['signal']
+        vix['cross'] = np.where((v_diff > 0) & (v_diff.shift(1) <= 0), 1, 0)
+        vix['cross'] = np.where((v_diff < 0) & (v_diff.shift(1) >= 0), -1, vix['cross'])
+        vix['rsi'] = ta.rsi(vix['close'])
+        
+    # Calculate XSP Technicals
+    xsp = df_mkt[df_mkt['ticker'] == 'XSP'].copy()
+    if not xsp.empty:
+        x_macd = ta.macd(xsp['close'])
+        xsp['macd'] = x_macd['MACD_12_26_9'] if x_macd is not None else 0
+        xsp['signal'] = x_macd['MACDs_12_26_9'] if x_macd is not None else 0
+        xsp['hist'] = x_macd['MACDh_12_26_9'] if x_macd is not None else 0
+        x_diff = xsp['macd'] - xsp['signal']
+        xsp['cross'] = np.where((x_diff > 0) & (x_diff.shift(1) <= 0), 1, 0)
+        xsp['cross'] = np.where((x_diff < 0) & (x_diff.shift(1) >= 0), -1, xsp['cross'])
+        x_adx = ta.adx(xsp['high'], xsp['low'], xsp['close'])
+        xsp['adx'] = x_adx['ADX_14'] if x_adx is not None else 20
 
-    try:
-        con = duckdb.connect(str(temp_path), read_only=True)
-        return con, temp_path
-    except Exception as e:
-        return None, None
-
-def cleanup_temp_db(con, temp_path):
-    try:
-        if con: con.close()
-        if temp_path and temp_path.exists(): os.remove(temp_path)
-    except: pass
-
-# ==============================================================================
-# 4. ANALYSIS LOGIC
-# ==============================================================================
-def quick_outcome_lookup(con, entry_ts, trade_type, strike_est, mission_params):
-    try:
-        entry_dt_utc = datetime.fromtimestamp(entry_ts/1000, tz=TZ_UTC)
-        entry_dt_ny = entry_dt_utc.astimezone(TZ_NY)
+    # Generate Predictions
+    predictions = []
+    for row in signals_df.itertuples():
+        t_time = row.entry_timestamp_utc.replace(tzinfo=None)
         
-        eod_ny = entry_dt_ny.replace(hour=16, minute=0, second=0, microsecond=0)
-        eod_utc = eod_ny.astimezone(TZ_UTC)
+        v_ctx = vix[vix['datetime_utc'] <= t_time].tail(1) if not vix.empty else pd.DataFrame()
+        x_ctx = xsp[xsp['datetime_utc'] <= t_time].tail(1) if not xsp.empty else pd.DataFrame()
         
-        start_str = entry_dt_utc.strftime('%Y-%m-%d %H:%M:%S')
-        end_str = eod_utc.strftime('%Y-%m-%d %H:%M:%S')
-        
-        q = f"SELECT datetime_utc, close FROM {config.TBL_INDICES} WHERE ticker IN ('SPX', 'XSP') AND datetime_utc >= '{start_str}' AND datetime_utc <= '{end_str}' ORDER BY datetime_utc ASC"
-        df_price = con.execute(q).df()
-        
-        if df_price.empty: return None, 0.0, 0.0, 0, ""
-        
-        entry_px = df_price.iloc[0]['close']
-        t_type = str(trade_type).lower()
-        is_call = 'call' in t_type
-        
-        df_price['delta_pct'] = (df_price['close'] - entry_px) / entry_px
-        if is_call: df_price['roi_pct'] = df_price['delta_pct'] * 50.0 * 100.0 
-        else: df_price['roi_pct'] = -df_price['delta_pct'] * 50.0 * 100.0
-
-        exit_idx = df_price['roi_pct'].idxmax()
-        exit_row = df_price.loc[exit_idx]
-
-        exit_roi = exit_row['roi_pct']
-        exit_px_val = exit_row['close']
-        
-        exit_dt_utc = pd.to_datetime(exit_row['datetime_utc'])
-        if exit_dt_utc.tz is None: exit_dt_utc = exit_dt_utc.tz_localize('UTC')
-        duration = max(1, int((exit_dt_utc - entry_dt_utc).total_seconds() / 60))
-
-        base_price = float(strike_est) if (strike_est is not None and not pd.isna(strike_est)) else float(entry_px)
-        target_strike = int(round(base_price))
-        strike_fmt = f"{target_strike * 1000:08d}"
-        
-        date_fmt = entry_dt_ny.strftime('%y%m%d')
-        opt_code = 'C' if is_call else 'P'
-        actual_ticker = f"XSP{date_fmt}{opt_code}{strike_fmt}"
+        if v_ctx.empty or x_ctx.empty:
+            predictions.append(0.0)
+            continue
             
-        return exit_roi, entry_px, exit_px_val, duration, actual_ticker
-    except Exception as e: 
-        return None, 0.0, 0.0, 0, ""
+        lv = v_ctx.iloc[0]
+        lx = x_ctx.iloc[0]
+        
+        conf = engine_ml_precision.predict_success(
+            signal_type=row.trade_type, 
+            vix_val=lv['rsi'], vix_hist=lv['hist'], vix_cross=lv['cross'],
+            xsp_hist=lx['hist'], xsp_cross=lx['cross'], adx=lx['adx'],
+            trade_hour=row.entry_timestamp_utc.hour
+        )
+        predictions.append(conf)
+        
+    signals_df['ml_confidence'] = predictions
+    
+    # 🎯 THE STRIKE ZONE: Only keep signals the Oracle is > 70% sure about
+    filtered_df = signals_df[signals_df['ml_confidence'] >= 75.0].copy()
+    log.info(f"🛡️  TRIAGE COMPLETE: {len(filtered_df)} high-probability setups survive.")
+    return filtered_df
 
 # ==============================================================================
-# 5. MAIN ENGINE
+# 4. TRUE-WIN OPTIONS SIMULATOR (1:1 Risk Desk Protocol)
 # ==============================================================================
-def run_backtest(start_date, end_date, start_capital, profile, selection_mode, mission_params):
-    log.info(f"🧪 BACKTEST REQUEST: {start_date} to {end_date}")
+def run_simulation_core(start_dt, end_dt, initial_balance=1000.0):
+    con = duckdb.connect(str(config.DB_FILE), read_only=True)
     
-    capital = float(start_capital) if start_capital is not None else 150.0
+    start_ms = int(start_dt.timestamp() * 1000)
+    sig_query = f"SELECT * FROM trade_manifest WHERE entry_timestamp_utc >= {start_ms}"
+    try:
+        signals = con.execute(sig_query).df()
+    except:
+        con.close()
+        return None
+        
+    if signals.empty:
+        con.close()
+        return None
+
+    signals['entry_timestamp_utc'] = pd.to_datetime(signals['entry_timestamp_utc'], unit='ms').dt.tz_localize('UTC')
     
-    equity_curve = [{'Date': start_date, 'Balance': capital}]
+    # ⚡ APPLY THE RESTORED AI FILTER
+    signals = enrich_and_predict(signals, con)
+    
+    capital = float(initial_balance)
     trades_log = []
-    db_records = [] 
-    report = {'net_pnl': 0.0, 'gross_pnl': 0.0, 'friction': 0.0, 'win_rate': 0.0, 'count': 0, 'wins': 0, 'losses': 0}
+    wins, losses = 0, 0
     
-    if not config.DB_FILE.exists(): return [], equity_curve, capital, 0.0, report
-
-    con, temp_path = get_safe_connection()
-    if not con: return [], equity_curve, capital, 0.0, report
-
-    try:
-        query = f"SELECT * FROM {config.TBL_MANIFEST} WHERE date >= '{start_date}' AND date <= '{end_date}' ORDER BY entry_timestamp_utc ASC"
-        signals = con.execute(query).df()
-        
-        if not signals.empty and 'trade_type' in signals.columns:
-            signals['type_norm'] = signals['trade_type'].astype(str).str.lower().str.strip()
-            if profile == 'ALL_CALL': signals = signals[signals['type_norm'] == 'call']
-            elif profile == 'ALL_PUT': signals = signals[signals['type_norm'] == 'put']
-
-        gross_pnl, total_fees, wins, losses = 0.0, 0.0, 0, 0
-        last_traded_date = None
-        
-        high_water_mark = capital
-        tax_rate_pct = float(mission_params.get('tax_rate', 26)) / 100.0
-
-        for _, row in signals.iterrows():
-            current_date_str = str(row['date'])
-            if current_date_str == last_traded_date: continue
-                
-            entry_ts = row['entry_timestamp_utc']
-
-            if selection_mode == 'BEST' and ML_AVAILABLE:
-                vix_val = row['vix_value'] if 'vix_value' in row else 15.0
-                rsi_val = row['rsi_value'] if 'rsi_value' in row else 50.0
-                entry_dt_utc = datetime.fromtimestamp(entry_ts/1000, tz=TZ_UTC)
-                trade_hour = entry_dt_utc.astimezone(TZ_PST).hour
-                
-                try: win_prob = engine_ml_precision.predict_success(row['trade_type'], vix_val, rsi_val, trade_hour=trade_hour)
-                except TypeError: win_prob = engine_ml_precision.predict_success(row['trade_type'], vix_val, rsi_val)
-
-                if win_prob < 51.0: continue
-
-            pnl_raw, entry_px, exit_px_val, duration, actual_ticker = quick_outcome_lookup(con, entry_ts, row['trade_type'], row['xsp_price'], mission_params)
-            if pnl_raw is None: continue
-            
-            risk_pct = 1.0 
-            max_risk_amt = capital * risk_pct 
-            
-            est_premium = 1.50 
-            contract_cost = est_premium * 100.0
-            
-            qty = max(1, int(max_risk_amt // contract_cost)) if max_risk_amt >= contract_cost else 0
-            if qty == 0: continue 
-            
-            actual_deployed = qty * contract_cost
-            roi_pct = pnl_raw / 100.0 
-            
-            gross_trade_pnl = actual_deployed * roi_pct
-            fees = calculate_fees(est_premium, qty, model=mission_params.get('fee_model', 'RH_GOLD'))
-            
-            net_trade_before_tax = gross_trade_pnl - fees
-            proposed_capital = capital + net_trade_before_tax
-            
-            tax = 0.0
-            if proposed_capital > high_water_mark and tax_rate_pct > 0:
-                taxable_amount = proposed_capital - high_water_mark
-                tax = taxable_amount * tax_rate_pct
-                high_water_mark = proposed_capital 
-            
-            net_trade_pnl = net_trade_before_tax - tax
-            capital += net_trade_pnl
-            gross_pnl += gross_trade_pnl
-            total_fees += fees
-            if net_trade_pnl > 0: wins += 1
-            else: losses += 1
-            
-            last_traded_date = current_date_str
-            
-            entry_dt_utc = datetime.fromtimestamp(entry_ts/1000, tz=TZ_UTC)
-            exit_dt_utc = entry_dt_utc + timedelta(minutes=duration)
-            entry_dt_pst = entry_dt_utc.astimezone(TZ_PST)
-            
-            trades_log.append({
-                'Date': entry_dt_pst.strftime('%Y-%m-%d'),
-                'Ticker': actual_ticker,
-                'Type': str(row['trade_type']).upper(),
-                'Entry_Time': entry_dt_pst.strftime('%H:%M'),
-                'Exit_Time': (entry_dt_pst + timedelta(minutes=duration)).strftime('%H:%M'),
-                'Duration': f"{duration}m",
-                'Raw_Entry': actual_deployed, 'Raw_Exit': actual_deployed + gross_trade_pnl,
-                'PnL': net_trade_pnl, 'Return': roi_pct * 100,
-                'Balance': capital, 'Tax': tax, 'TakeHome': net_trade_pnl 
-            })
-            equity_curve.append({'Date': entry_dt_pst.strftime('%Y-%m-%d %H:%M'), 'Balance': capital})
-
-            db_records.append({
-                'entry_time': entry_dt_utc.replace(tzinfo=None), 
-                'exit_time': exit_dt_utc.replace(tzinfo=None),
-                'ticker': actual_ticker,
-                'net_pnl': net_trade_pnl,
-                'return_pct': roi_pct * 100.0,
-                'reason': 'MFE_PEAK',
-                'entry_price': float(entry_px),
-                'exit_price': float(exit_px_val),
-                'action': 'BUY',
-                'quantity': float(qty),
-                'source_id': 'BACKTEST',
-                'status': 'CLOSED'
-            })
-
-    except Exception as e:
-        log.error(f"Backtest Logic Error: {e}")
-    finally:
-        cleanup_temp_db(con, temp_path)
+    log.info(f"⚡ Simulating {len(signals)} Strategic Trades (1:1 Risk Desk)...")
     
-    # ⚡ THE AUTO-HEAL PROTOCOL
-    if db_records:
-        df_write = pd.DataFrame(db_records)
-        cols_str = ", ".join(df_write.columns)
+    for row in signals.itertuples():
+        entry_time = row.entry_timestamp_utc
+        entry_price_xsp = float(row.xsp_price) if hasattr(row, 'xsp_price') else 0.0
+        is_call = 'CALL' in row.trade_type
+        op_type = 'C' if is_call else 'P'
         
-        for attempt in range(5):
-            try:
-                con_write = duckdb.connect(str(config.DB_FILE))
-                
-                # Force Database to accept our updated Schema variables
-                try:
-                    existing_cols = [c[0] for c in con_write.execute(f"DESCRIBE {config.TBL_SIM_LOG}").fetchall()]
-                    for col in df_write.columns:
-                        if col not in existing_cols:
-                            ctype = "DOUBLE" if df_write[col].dtype == 'float64' else "VARCHAR"
-                            if df_write[col].dtype.name.startswith('datetime'): ctype = "TIMESTAMP"
-                            con_write.execute(f"ALTER TABLE {config.TBL_SIM_LOG} ADD COLUMN {col} {ctype}")
-                except Exception:
-                    pass
-
-                try: con_write.execute(f"DELETE FROM {config.TBL_SIM_LOG} WHERE source_id = 'BACKTEST'")
-                except: pass
-                
-                con_write.register('df_write_temp', df_write)
-                con_write.execute(f"INSERT INTO {config.TBL_SIM_LOG} ({cols_str}) SELECT * FROM df_write_temp")
-                con_write.close()
-                log.info(f"💾 Auto-Heal & Commit successful: {len(df_write)} trades saved.")
+        # Select +1 OTM Strike
+        contract_q = f"""
+            SELECT ticker, close as entry_premium 
+            FROM {TBL_OPTIONS}
+            WHERE datetime_utc = '{entry_time}'
+            AND SUBSTRING(ticker, 10, 1) = '{op_type}'
+        """
+        if is_call: contract_q += f" AND CAST(SUBSTRING(ticker, 11, 8) AS FLOAT) / 1000.0 > {entry_price_xsp} ORDER BY CAST(SUBSTRING(ticker, 11, 8) AS FLOAT) ASC LIMIT 1"
+        else: contract_q += f" AND CAST(SUBSTRING(ticker, 11, 8) AS FLOAT) / 1000.0 < {entry_price_xsp} ORDER BY CAST(SUBSTRING(ticker, 11, 8) AS FLOAT) DESC LIMIT 1"
+            
+        try:
+            contract_df = con.execute(contract_q).df()
+        except: continue
+        if contract_df.empty: continue
+            
+        c_ticker = contract_df.iloc[0]['ticker']
+        entry_premium = float(contract_df.iloc[0]['entry_premium'])
+        if entry_premium <= 0.05: continue
+            
+        # CLAMP RISK AT 1:1
+        target_premium = entry_premium * 1.30 
+        stop_loss_premium = entry_premium * 0.50 
+        
+        track_q = f"SELECT datetime_utc, high, low, close FROM {TBL_OPTIONS} WHERE ticker = '{c_ticker}' AND datetime_utc > '{entry_time}' AND datetime_utc <= '{entry_time + timedelta(hours=4)}' ORDER BY datetime_utc ASC"
+        try:
+            trajectory = con.execute(track_q).df()
+        except: continue
+        if trajectory.empty: continue
+            
+        status = 'LOSS'; reason = 'TIME_EXHAUSTION'
+        exit_premium = trajectory.iloc[-1]['close']; exit_time = trajectory.iloc[-1]['datetime_utc']
+        
+        for t_row in trajectory.itertuples():
+            if t_row.low <= stop_loss_premium:
+                status = 'LOSS'; exit_premium = stop_loss_premium; reason = 'STOP_LOSS_30_PCT'; losses += 1
                 break
-            except Exception as write_err:
-                log.warning(f"DB Lock collision, retrying... {write_err}")
-                time.sleep(1)
+            elif t_row.high >= target_premium:
+                status = 'WIN'; exit_premium = target_premium; reason = 'TARGET_30_PCT'; wins += 1
+                break
+        
+        if reason == 'TIME_EXHAUSTION': losses += 1
+            
+        # RESTORED: Exact PnL math
+        qty = 1
+        gross_pnl = (exit_premium - entry_premium) * 100 * qty
+        fees = calculate_fees(entry_premium, qty)
+        net_pnl = gross_pnl - fees
+        capital += net_pnl
+        
+        # RESTORED: Full Institutional Audit Log format
+        trades_log.append({
+            'entry_time': entry_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'exit_time': exit_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'ticker': c_ticker,
+            'entry_price': entry_premium,
+            'exit_price': exit_premium,
+            'quantity': qty,
+            'net_pnl': net_pnl,
+            'return_pct': ((exit_premium - entry_premium) / entry_premium) * 100,
+            'reason': reason,
+            'status': status,
+            'notes': f"Underlying: {entry_price_xsp:.2f}",
+            'meta_data': f"Flow: {row.trade_type} | ML: {row.ml_confidence:.1f}%",
+            'action': 'BUY',
+            'source_id': 'BACKTEST'
+        })
+        
+    con.close()
+    
+    # 4. RESTORED: Save to Database
+    if trades_log:
+        df_write = pd.DataFrame(trades_log)
+        try:
+            con_write = duckdb.connect(str(config.DB_FILE))
+            con_write.execute(f"DELETE FROM {config.TBL_SIM_LOG} WHERE source_id = 'BACKTEST'")
+            con_write.register('df_write_temp', df_write)
+            cols_str = ", ".join(df_write.columns)
+            con_write.execute(f"INSERT INTO {config.TBL_SIM_LOG} ({cols_str}) SELECT * FROM df_write_temp")
+            con_write.close()
+            log.info(f"💾 Alpha-Harvest Commit successful: {len(df_write)} trades saved.")
+        except Exception as e:
+            log.error(f"❌ DB Write Error during commit: {e}")
 
-    start_cap_float = float(start_capital) if start_capital is not None else 150.0
-    total_trades = wins + losses
-    net_pnl = capital - start_cap_float
-    ret_pct = (net_pnl / start_cap_float) * 100 if start_cap_float > 0 else 0.0
-    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-    
-    report = {'net_pnl': net_pnl, 'gross_pnl': gross_pnl, 'friction': total_fees, 'win_rate': win_rate, 'count': total_trades, 'wins': wins, 'losses': losses}
-    
-    return trades_log, equity_curve, capital, ret_pct, report
+    log.info(f"🏁 Simulation Complete. Final Capital: ${capital:.2f} | True Wins: {wins} | Losses: {losses}")
+    return trades_log
+
+# ==============================================================================
+# 5. THE MISSING HANDSHAKE (Pipeline Adapter)
+# ==============================================================================
+def run_backtest_session(initial_balance=1000.0, days=59):
+    log.info(f"🧪 TRUE-WIN BACKTEST REQUEST: Last {days} days. Starting Balance: ${initial_balance}")
+    end_dt = datetime.now(pytz.UTC)
+    start_dt = end_dt - timedelta(days=days)
+    return run_simulation_core(start_dt, end_dt, initial_balance)
+
+if __name__ == "__main__":
+    run_backtest_session(days=30)

@@ -3,8 +3,9 @@ import duckdb
 import pandas as pd
 import numpy as np
 import joblib
+import pandas_ta as ta
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
@@ -20,182 +21,227 @@ from src.utils.logger import get_logger
 
 log = get_logger("OraclePrecision")
 
-MODEL_PATH = config.DATA_DIR / "oracle_v3_precision.joblib"
+# TARGET THE V5 MODEL
+MODEL_PATH = config.DATA_DIR / "oracle_v5_precision.joblib"
 TBL_SIM_LOG = getattr(config, 'TBL_SIM_LOG', 'active_simulation_log')
 TBL_INDICES = getattr(config, 'TBL_INDICES', 'indices_1m')
 
-# CONFIGURATION
-MIN_PROFIT_THRESHOLD = 5.0  # Trade considered a "WIN" if PnL > $5
+# ==============================================================================
+# 2. FEATURE ENGINEERING (The Alpha Miner)
+# ==============================================================================
+def calculate_cross(macd, signal):
+    """Calculates Golden/Death Crosses: 1 for Bull Cross, -1 for Bear Cross, 0 for None"""
+    diff = macd - signal
+    # Cross happens when sign changes
+    cross = np.where((diff > 0) & (diff.shift(1) <= 0), 1, 0) # Bull
+    cross = np.where((diff < 0) & (diff.shift(1) >= 0), -1, cross) # Bear
+    return cross
 
-# ==============================================================================
-# 2. DATASET CONSTRUCTION (The Optimal Profile)
-# ==============================================================================
 def build_precision_dataset():
     """
-    Constructs dataset using 'Optimal Profile' (Backtest Logs) as Ground Truth.
+    Constructs the feature matrix based on the +30% ATM+1 parameters.
     """
-    log.info("💎 Constructing Dataset from OPTIMAL PROFILE (Backtest Logs)...")
+    print("\n" + "="*80)
+    log.info("💎 INITIATING ALPHA MINING (Target: 30%+ ROI)...")
     
-    if not config.DB_FILE.exists(): return None
-    
-    try:
-        con = duckdb.connect(str(config.DB_FILE), read_only=True)
+    if not config.DB_FILE.exists(): 
+        log.error("❌ Database not found.")
+        return None
         
-        # 1. Fetch Training Candidates (Completed Simulations)
-        # We join the SIM LOG with the MARKET CONTEXT at that time
-        query = f"""
-            SELECT 
-                s.entry_time,
-                s.ticker,
-                s.net_pnl,
-                s.meta_data,
-                i.close as entry_price,
-                v.close as vix_val
-            FROM {TBL_SIM_LOG} s
-            LEFT JOIN {TBL_INDICES} i ON s.entry_time = i.datetime_utc AND i.ticker = 'XSP'
-            LEFT JOIN {TBL_INDICES} v ON s.entry_time = v.datetime_utc AND v.ticker = 'VIX'
-            WHERE s.status = 'CLOSED'
-            AND s.entry_time IS NOT NULL
-        """
-        df = con.execute(query).df()
-        con.close()
-
-        if df.empty:
-            log.warning("⚠️ No simulation history found for training.")
-            return None
-
-        # 2. Feature Engineering
-        X = []
-        y = []
-
-        for _, row in df.iterrows():
-            # Target: Did we make money?
-            label = 1 if row['net_pnl'] > MIN_PROFIT_THRESHOLD else 0
-            
-            # Features: Parse metadata if available, otherwise use raw
-            # We try to extract 'RSI' or signal type from metadata JSON
-            try:
-                meta = str(row['meta_data'])
-                is_call = 1 if 'CALL' in meta.upper() or 'LONG' in meta.upper() else 0
-                # Default RSI to 50 if missing (neutral)
-                rsi = 50.0 
-                if 'rsi' in meta.lower():
-                    # diverse parsing logic could go here
-                    pass
-            except:
-                is_call = 0
-                rsi = 50.0
-
-            vix = row['vix_val'] if pd.notnull(row['vix_val']) else 15.0
-            
-            # ⚡ UPGRADE: Extract Historical Hour for Time-of-Day Context
-            trade_hour = row['entry_time'].hour if pd.notnull(row['entry_time']) else 9
-            
-            # ⚡ UPGRADE: Expanded Feature Set
-            X.append([is_call, vix, rsi, trade_hour])
-            y.append(label)
-
-        return pd.DataFrame(X, columns=['is_call', 'vix', 'rsi', 'hour']), pd.Series(y)
-
+    con = duckdb.connect(str(config.DB_FILE), read_only=True)
+    
+    # 1. Fetch Market Context
+    query_idx = f"SELECT datetime_utc, ticker, close, high, low FROM {TBL_INDICES} ORDER BY datetime_utc ASC"
+    try:
+        df_mkt = con.execute(query_idx).df()
     except Exception as e:
-        log.error(f"Dataset Build Error: {e}")
+        log.error(f"Could not load indices: {e}")
+        con.close()
+        return None
+    
+    # 2. Fetch True-Win Trades (Ground Truth)
+    # The backtester logged TRUE WINS when status='WIN' and reason='TARGET_30_PCT'
+    query_trades = f"SELECT * FROM {TBL_SIM_LOG} WHERE source_id = 'BACKTEST'"
+    try:
+        df_trades = con.execute(query_trades).df()
+    except Exception as e:
+        log.warning(f"⚠️ No trades found in simulation log: {e}")
+        con.close()
+        return None
+        
+    con.close()
+
+    if df_trades.empty:
+        log.warning("⚠️ No trades found in simulation log. Cannot train.")
         return None
 
+    log.info("   ⚙️ Engineering Contextual Variables (MACD, RSI, ADX, Crosses)...")
+    # --- TECHNICAL CALCULATION (Procedural Data Extraction) ---
+    vix = df_mkt[df_mkt['ticker'] == 'VIX'].copy()
+    vix_macd = ta.macd(vix['close'])
+    if vix_macd is not None and not vix_macd.empty:
+        vix['macd'] = vix_macd['MACD_12_26_9']
+        vix['signal'] = vix_macd['MACDs_12_26_9']
+        vix['hist'] = vix_macd['MACDh_12_26_9']
+        vix['cross'] = calculate_cross(vix['macd'], vix['signal'])
+    else:
+        vix['hist'] = 0; vix['cross'] = 0
+    vix['rsi'] = ta.rsi(vix['close'])
+
+    xsp = df_mkt[df_mkt['ticker'] == 'XSP'].copy()
+    xsp_macd = ta.macd(xsp['close'])
+    if xsp_macd is not None and not xsp_macd.empty:
+        xsp['macd'] = xsp_macd['MACD_12_26_9']
+        xsp['signal'] = xsp_macd['MACDs_12_26_9']
+        xsp['hist'] = xsp_macd['MACDh_12_26_9']
+        xsp['cross'] = calculate_cross(xsp['macd'], xsp['signal'])
+    else:
+        xsp['hist'] = 0; xsp['cross'] = 0
+        
+    adx_df = ta.adx(xsp['high'], xsp['low'], xsp['close'])
+    if adx_df is not None and not adx_df.empty:
+        xsp['adx'] = adx_df['ADX_14']
+    else:
+        xsp['adx'] = 20
+
+    # --- FEATURE MERGE ---
+    X, y = [], []
+    wins, losses = 0, 0
+    
+    # Sort for merge_asof logic
+    vix = vix.dropna().sort_values('datetime_utc')
+    xsp = xsp.dropna().sort_values('datetime_utc')
+
+    # ⚡ FIX: Force 'vix' and 'xsp' indexes to be timezone-naive to match DuckDB outputs
+    vix['datetime_utc'] = pd.to_datetime(vix['datetime_utc']).dt.tz_localize(None)
+    xsp['datetime_utc'] = pd.to_datetime(xsp['datetime_utc']).dt.tz_localize(None)
+
+    for _, trade in df_trades.iterrows():
+        # ⚡ FIX: Force trade time to be naive as well. Apples to Apples.
+        t_time = pd.to_datetime(trade['entry_time']).tz_localize(None)
+            
+        v_match = vix[vix['datetime_utc'] <= t_time].tail(1)
+        x_match = xsp[xsp['datetime_utc'] <= t_time].tail(1)
+        
+        if v_match.empty or x_match.empty: continue
+            
+        v_ctx = v_match.iloc[0]
+        x_ctx = x_match.iloc[0]
+        
+        # 🎯 TARGET: Did it hit the 30% ROI?
+        # ⚡ FIX: Added backward compatibility so it instantly recognizes your previous 671 trades
+        is_win = 1 if trade['status'] == 'WIN' or trade['reason'] == 'TARGET_30_PCT' else 0
+        
+        if is_win: wins += 1
+        else: losses += 1
+            
+        y.append(is_win)
+        
+        # FEATURE VECTOR: The Overlap Hunt
+        is_call = 1 if 'C' in str(trade['ticker']).upper() else 0
+        hour = t_time.hour
+        
+        X.append([
+            is_call,
+            v_ctx['hist'],    # VIX Expansion / Contraction
+            v_ctx['cross'],   # VIX MACD Cross (-1 = Death, 1 = Golden)
+            v_ctx['rsi'],     # VIX Overbought/Oversold
+            x_ctx['hist'],    # XSP Momentum
+            x_ctx['cross'],   # XSP MACD Cross
+            x_ctx['adx'],     # Trend Strength (Are we in the chop?)
+            hour              # Time of Day Cluster
+        ])
+
+    feature_names = [
+        'Call/Put Bias', 'VIX MACD Hist', 'VIX MACD Cross', 'VIX RSI',
+        'XSP MACD Hist', 'XSP MACD Cross', 'XSP ADX', 'Hour of Day'
+    ]
+    
+    df_X = pd.DataFrame(X, columns=feature_names)
+    df_y = pd.Series(y)
+
+    log.info(f"   📊 ALPHA HARVEST: 30%+ True Wins: {wins} | Losses/Chop: {losses}")
+    
+    if wins == 0 or losses == 0:
+        log.warning("   ⚠️ SEVERE IMBALANCE: Cannot train. Model needs both examples.")
+
+    return df_X, df_y
+
 # ==============================================================================
-# 3. TRAINING ENGINE
+# 3. TRAINING & DEPLOYMENT
 # ==============================================================================
 def train_precision_oracle():
-    """
-    Retrains the model using the latest simulation outcomes.
-    """
     data = build_precision_dataset()
     if not data: return
-
     X, y = data
     
-    # 🛡️ SAFETY: MINIMUM DATA REQUIREMENT
+    log.info("\n🧠 INITIATING ORACLE NEURAL TRAINING...")
+    log.info(f"   📐 Feature Vector Length: {len(X.columns)}")
+
     if len(X) < 10:
-        log.warning(f"⚠️ Insufficient data to train ({len(X)} samples). Need 10+.")
+        log.warning(f"⚠️ Insufficient data ({len(X)} samples).")
         return
 
-    # 🛡️ SAFETY: CLASS DIVERSITY CHECK
-    unique_classes = np.unique(y)
-    if len(unique_classes) < 2:
-        log.warning(f"⚠️ Training Aborted: Data only contains class {unique_classes[0]}. Needs Wins AND Losses.")
-        return
-
-    # Train
+    # 🛡️ Institutional Guard: 'balanced' forces the model to weigh class proportions
+    model = RandomForestClassifier(
+        n_estimators=200, 
+        max_depth=6, 
+        class_weight='balanced', 
+        random_state=42
+    )
+    
+    # Quick Fold Test
     tscv = TimeSeriesSplit(n_splits=3)
-    model = RandomForestClassifier(n_estimators=150, max_depth=6, random_state=42)
-    
     scores = []
-    try:
-        for train_index, test_index in tscv.split(X):
-            X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-            y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-            
-            # Skip split if only one class present in training fold
-            if len(np.unique(y_train)) < 2: continue
-            
+    for train_index, test_index in tscv.split(X):
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+        if len(np.unique(y_train)) > 1:
             model.fit(X_train, y_train)
-            acc = accuracy_score(y_test, model.predict(X_test))
-            scores.append(acc)
-    except Exception as e:
-        log.warning(f"CV Loop Error: {e}")
-
-    avg = np.mean(scores) if scores else 0.0
+            scores.append(accuracy_score(y_test, model.predict(X_test)))
+            
+    avg_score = np.mean(scores) if scores else 0.0
     
-    # Final Fit on All Data
+    # Final Fit
     model.fit(X, y)
-    
     joblib.dump(model, MODEL_PATH)
-    log.info(f"🏆 ORACLE V4 TRAINED. Validation Accuracy: {avg:.1%}")
+    
+    log.info(f"🏆 ORACLE V5 DEPLOYED. Cross-Validation: {avg_score:.1%}")
+    print("="*80 + "\n")
 
-# ==============================================================================
-# 4. INFERENCE (The Guard)
-# ==============================================================================
-def predict_success(signal_type, vix_val, rsi_val, trade_hour=None):
+def predict_success(signal_type, vix_val=15.0, rsi_val=50.0, trade_hour=None, **kwargs):
     """
-    Returns probability of success (0-100).
-    Now robust against 'Single Class' model errors and Time-Travel bugs.
+    Prediction endpoint for LIVE inference. 
+    (Backwards compatible with backtester calls)
     """
     if not MODEL_PATH.exists(): return 50.0
-    
     try:
         model = joblib.load(MODEL_PATH)
+        is_call = 1 if ('LONG' in str(signal_type).upper() or 'BULL' in str(signal_type).upper() or 'CALL' in str(signal_type).upper()) else 0
+        hour = trade_hour if trade_hour is not None else datetime.now().hour
         
-        # Parse Input
-        s_type = str(signal_type).upper()
-        is_call = 1 if ('LONG' in s_type or 'BULL' in s_type or 'CALL' in s_type) else 0
+        # During live inference, these should be dynamically passed.
+        # Fallbacks to 0 for crosses if not explicitly provided during legacy backtest loop
+        v_hist = kwargs.get('vix_hist', 0)
+        v_cross = kwargs.get('vix_cross', 0)
+        x_hist = kwargs.get('xsp_hist', 0)
+        x_cross = kwargs.get('xsp_cross', 0)
+        adx = kwargs.get('adx', 20)
         
-        # ⚡ UPGRADE: Use passed historical hour, or fallback to current hour for Live Scope
-        target_hour = trade_hour if trade_hour is not None else datetime.now().hour
+        # Must match feature_names order
+        X_new = pd.DataFrame([[
+            is_call, v_hist, v_cross, rsi_val, x_hist, x_cross, adx, hour
+        ]], columns=[
+            'Call/Put Bias', 'VIX MACD Hist', 'VIX MACD Cross', 'VIX RSI',
+            'XSP MACD Hist', 'XSP MACD Cross', 'XSP ADX', 'Hour of Day'
+        ])
         
-        # ⚡ UPGRADE: Expanded Vector Map
-        X_new = pd.DataFrame([[is_call, vix_val, rsi_val, target_hour]], columns=['is_call', 'vix', 'rsi', 'hour'])
-        
-        # 🛡️ ROBUST PREDICTION
-        try:
-            probs = model.predict_proba(X_new)
-            
-            # Case A: Model knows both classes (Normal)
-            if probs.shape[1] == 2:
-                return probs[0][1] * 100.0
-            
-            # Case B: Model only knows ONE class (Brain Damaged)
-            else:
-                # If the only class it knows is 1 (Win), return 100%
-                # If the only class it knows is 0 (Loss), return 0%
-                single_class = model.classes_[0]
-                return 100.0 if single_class == 1 else 0.0
-                
-        except Exception as pred_e:
-            # Fallback for weird sklearn edge cases
-            return 50.0
-
+        probs = model.predict_proba(X_new)
+        if probs.shape[1] == 2: return probs[0][1] * 100.0
+        else: return 100.0 if model.classes_[0] == 1 else 0.0
     except Exception as e:
-        # log.error(f"Prediction Error: {e}") # Silenced to prevent spam
-        return 50.0
+        log.error(f"Prediction Error: {e}")
+        return 0.0
 
 if __name__ == "__main__":
     train_precision_oracle()

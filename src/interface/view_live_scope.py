@@ -9,6 +9,7 @@ import json
 import sys
 import subprocess
 import time as t_time 
+import pandas_ta as ta
 from datetime import datetime, time, timedelta
 import pytz
 from pathlib import Path
@@ -20,6 +21,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
 from src.utils import config
+# ⚡ NEURAL INJECTION: Import your trained Oracle
+from src.core import engine_ml_precision
 
 # FILE POINTERS
 SNAPSHOT_FILE = config.DATA_DIR / "live_snapshot.json"
@@ -187,19 +190,48 @@ def calculate_linreg(df):
     df['lower_band'] = df['reg_line'] - (2 * std)
     return df
 
-def fetch_market_internals(vix_df):
-    if vix_df is None or vix_df.empty: return None
-    df = vix_df.copy()
-    df['ema12'] = df['Close'].ewm(span=12).mean()
-    df['ema26'] = df['Close'].ewm(span=26).mean()
-    df['macd'] = df['ema12'] - df['ema26']
-    df['signal'] = df['macd'].ewm(span=9).mean()
-    df['hist'] = df['macd'] - df['signal']
-    delta = df['Close'].diff()
-    up = delta.clip(lower=0); down = -1 * delta.clip(upper=0)
-    rs = up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()
-    df['rsi'] = 100 - (100 / (1 + rs))
-    return df
+def fetch_market_internals(vix_df, xsp_df=None):
+    """
+    ⚡ UPGRADED: Calculates technicals for BOTH VIX and XSP so the Oracle has full context.
+    """
+    if vix_df is None or vix_df.empty: return None, None
+    v = vix_df.copy()
+    
+    # VIX MACD/RSI
+    try:
+        v_macd = ta.macd(v['Close'])
+        v['macd'] = v_macd['MACD_12_26_9']
+        v['signal'] = v_macd['MACDs_12_26_9']
+        v['hist'] = v_macd['MACDh_12_26_9']
+        
+        # Calculate Cross (-1, 0, 1)
+        v_diff = v['macd'] - v['signal']
+        v['cross'] = np.where((v_diff > 0) & (v_diff.shift(1) <= 0), 1, 0)
+        v['cross'] = np.where((v_diff < 0) & (v_diff.shift(1) >= 0), -1, v['cross'])
+    except:
+        v['macd'], v['signal'], v['hist'], v['cross'] = 0, 0, 0, 0
+
+    v['rsi'] = ta.rsi(v['Close'])
+
+    x = None
+    if xsp_df is not None and not xsp_df.empty:
+        x = xsp_df.copy()
+        try:
+            x_macd = ta.macd(x['Close'])
+            x['macd'] = x_macd['MACD_12_26_9']
+            x['signal'] = x_macd['MACDs_12_26_9']
+            x['hist'] = x_macd['MACDh_12_26_9']
+            
+            x_diff = x['macd'] - x['signal']
+            x['cross'] = np.where((x_diff > 0) & (x_diff.shift(1) <= 0), 1, 0)
+            x['cross'] = np.where((x_diff < 0) & (x_diff.shift(1) >= 0), -1, x['cross'])
+            
+            x_adx = ta.adx(x['High'], x['Low'], x['Close'])
+            x['adx'] = x_adx['ADX_14'] if x_adx is not None else 20
+        except:
+            x['macd'], x['signal'], x['hist'], x['cross'], x['adx'] = 0, 0, 0, 0, 20
+
+    return v, x
 
 def calculate_orb(df):
     if df is None or df.empty or len(df) < 5: return None, None
@@ -211,15 +243,12 @@ def calculate_orb(df):
 
 def generate_guardrails(xsp, vix):
     alerts = []
-    
-
     # 3. ALGO STATUS (Trigger Logic)
     _, is_open = get_market_status()
     if is_open:
         alerts.append(html.Div("🚀 ALGO: RUNNING", className="text-success fw-bold small"))
     else:
         alerts.append(html.Div("💤 ALGO: STANDBY", className="text-muted fw-bold small"))
-        
     return alerts
 
 # ==============================================================================
@@ -337,8 +366,36 @@ def update_hud(n):
     rth_end_dt = datetime.combine(anchor_date, time(13, 0)).replace(tzinfo=pytz.timezone('US/Pacific'))
 
     xsp = calculate_linreg(xsp)
-    vix = fetch_market_internals(vix)
+    vix, xsp = fetch_market_internals(vix, xsp)
     orb_h, orb_l = calculate_orb(xsp)
+
+    # ⚡ ORACLE V5 REAL-TIME PREDICTION
+    try:
+        if vix is not None and not vix.empty and xsp is not None and not xsp.empty:
+            lv = vix.iloc[-1]
+            lx = xsp.iloc[-1]
+            
+            p_call = engine_ml_precision.predict_success(
+                "CALL", vix_val=lv['rsi'], vix_hist=lv['hist'], vix_cross=lv['cross'],
+                xsp_hist=lx['hist'], xsp_cross=lx['cross'], adx=lx['adx'], trade_hour=now_local.hour
+            )
+            p_put = engine_ml_precision.predict_success(
+                "PUT", vix_val=lv['rsi'], vix_hist=lv['hist'], vix_cross=lv['cross'],
+                xsp_hist=lx['hist'], xsp_cross=lx['cross'], adx=lx['adx'], trade_hour=now_local.hour
+            )
+            
+            call_style = {'color': 'var(--inst-success)', 'fontWeight': 'bold'} if p_call > 70 else {'color': 'var(--inst-text-main)'}
+            put_style = {'color': 'var(--inst-danger)', 'fontWeight': 'bold'} if p_put > 70 else {'color': 'var(--inst-text-main)'}
+            
+            oracle_html = html.Div([
+                html.Span(f"CALL: {p_call:.1f}%", className="me-3", style=call_style),
+                html.Span(f"PUT: {p_put:.1f}%", style=put_style)
+            ])
+        else:
+            oracle_html = html.Span("ORACLE PENDING DATA...", className="text-muted")
+    except Exception as e:
+        print(f"Oracle Error: {e}")
+        oracle_html = html.Span("ORACLE OFFLINE", className="text-danger")
 
     # VIX LOGIC - COLORIZED TEXT
     curr_vix = vix.iloc[-1]['Close'] if (vix is not None and not vix.empty) else 0
@@ -385,8 +442,6 @@ def update_hud(n):
                       margin=dict(l=40, r=40, t=30, b=40), xaxis_rangeslider_visible=False, showlegend=False,
                       hovermode="x unified", font=dict(family="var(--font-data)", size=12, color="var(--inst-text-main)"),
                       uirevision=updated_str)
-
-    oracle_html = html.Span([html.Span("CALL: 54%", className="me-3 text-success"), html.Span("PUT: 46%", className="text-muted")])
 
     return fig, time_str, status_html, next_info, updated_str, vix_pct, therm_color, vix_display, guardrails, oracle_html, "NEUTRAL", macro_style
 

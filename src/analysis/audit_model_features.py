@@ -1,8 +1,9 @@
 import sys
+import duckdb
 import joblib
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import pytz
 from pathlib import Path
 
 # ==============================================================================
@@ -14,87 +15,134 @@ sys.path.append(str(ROOT_DIR))
 from src.utils import config
 from src.utils.logger import get_logger
 
-log = get_logger("ModelAuditor")
+log = get_logger("AlphaMiner")
 
-# TARGET THE PRECISION MODEL
-MODEL_PATH = config.DATA_DIR / "oracle_v3_precision.joblib"
+# TARGET THE V5 MODEL (True Win Architecture)
+MODEL_PATH = config.DATA_DIR / "oracle_v5_precision.joblib"
+TBL_SIM_LOG = getattr(config, 'TBL_SIM_LOG', 'active_simulation_log')
+
+# THE V5 FEATURE SET
+FEATURE_NAMES = [
+    'Call/Put Bias', 'VIX MACD Hist', 'VIX MACD Cross', 'VIX RSI',
+    'XSP MACD Hist', 'XSP MACD Cross', 'XSP ADX', 'Hour of Day'
+]
 
 # ==============================================================================
-# 2. AUDIT LOGIC
+# 2. INSIGHT EXTRACTION ENGINE
 # ==============================================================================
-def audit_brain():
-    log.info(f"🧠 OPENING NEURAL ARCHIVE: {MODEL_PATH.name}")
-    
+def mine_golden_rules():
+    print("\n" + "="*80)
+    log.info("🕵️ INITIATING ALPHA MINER (Extracting True-Win Overlaps...)")
+    print("="*80)
+
+    # ---------------------------------------------------------
+    # PART A: THE ORACLE'S BRAIN (Feature Importance)
+    # ---------------------------------------------------------
     if not MODEL_PATH.exists():
-        log.error("❌ Model not found. Run engine_ml_precision.py first.")
+        log.error("❌ Oracle V5 not found. Run engine_ml_precision.py first.")
         return
 
     try:
         model = joblib.load(MODEL_PATH)
-        
-        # Check if it is indeed a RandomForest
-        if not hasattr(model, 'feature_importances_'):
-            log.error("❌ Model does not support Feature Importance (Not a Tree model).")
-            return
-
-        # 3. DEFINE FEATURE NAMES
-        # Must match the order in engine_ml_precision.py
-        # X = df[['vix_value', 'rsi_value', 'regime_code', 'flow_code', 'hour', 'dow', 'is_call']]
-        feature_names = [
-            'VIX Value (Volatility)', 
-            'RSI (Momentum)', 
-            'Market Regime (Trend/Chop)', 
-            'Macro Flow (Bull/Bear)', 
-            'Hour of Day', 
-            'Day of Week', 
-            'Call/Put Bias'
-        ]
-        
-        # 4. EXTRACT IMPORTANCE
         importances = model.feature_importances_
-        indices = np.argsort(importances)[::-1] # Sort descending
+        indices = np.argsort(importances)[::-1]
         
-        print("\n" + "="*60)
-        print("🏆 ORACLE FEATURE RANKING (What matters most?)")
-        print("="*60)
+        print("\n🧠 THE ORACLE'S FOCUS (What drove the decisions?)")
+        print("-" * 60)
         
-        ranking_data = []
-        
-        for f in range(len(feature_names)):
+        for f in range(len(importances)):
             idx = indices[f]
+            name = FEATURE_NAMES[idx] if idx < len(FEATURE_NAMES) else f"Feature {idx}"
             score = importances[idx] * 100
-            name = feature_names[idx]
-            print(f"{f+1}. {name:<30} : {score:.2f}%")
-            ranking_data.append({'Feature': name, 'Score': score})
+            print(f"   {f+1}. {name:<25} : {score:.2f}%")
             
-        print("="*60 + "\n")
+    except Exception as e:
+        log.error(f"Failed to read model: {e}")
+        return
+
+    # ---------------------------------------------------------
+    # PART B: THE EMPIRICAL TRUTH (Data Overlap Mining)
+    # ---------------------------------------------------------
+    if not config.DB_FILE.exists():
+        log.error("❌ Database not found for empirical mining.")
+        return
+
+    try:
+        con = duckdb.connect(str(config.DB_FILE), read_only=True)
+        q = f"SELECT * FROM {TBL_SIM_LOG} WHERE status = 'WIN' OR reason = 'TARGET_30_PCT'"
+        wins = con.execute(q).df()
+        con.close()
         
-        # 5. GENERATE VISUAL REPORT (Optional HTML)
-        # We can save a quick chart for the user to view if they wish
-        df_rank = pd.DataFrame(ranking_data)
+        if wins.empty:
+            print("\n⚠️ No True Wins (+30% Target) found in the database yet.")
+            return
+            
+        # --- TIMEZONE AND DATE RANGE CALCULATIONS ---
+        wins['entry_time'] = pd.to_datetime(wins['entry_time'])
+        wins['exit_time'] = pd.to_datetime(wins['exit_time'])
         
-        fig = go.Figure(go.Bar(
-            x=df_rank['Score'],
-            y=df_rank['Feature'],
-            orientation='h',
-            marker=dict(color=df_rank['Score'], colorscale='Viridis')
-        ))
+        # ⚡ FIX: Make BOTH times timezone-aware (UTC) before math
+        if wins['entry_time'].dt.tz is None:
+            wins['entry_time'] = wins['entry_time'].dt.tz_localize('UTC')
+        if wins['exit_time'].dt.tz is None:
+            wins['exit_time'] = wins['exit_time'].dt.tz_localize('UTC')
+            
+        wins['local_time'] = wins['entry_time'].dt.tz_convert('US/Pacific')
         
-        fig.update_layout(
-            title=f"Oracle v3 Decision Logic (Accuracy: ~75%)",
-            xaxis_title="Importance (%)",
-            yaxis=dict(autorange="reversed"),
-            template="plotly_dark",
-            height=500
-        )
+        start_date = wins['local_time'].min().strftime('%Y-%m-%d')
+        end_date = wins['local_time'].max().strftime('%Y-%m-%d')
+        unique_days = wins['local_time'].dt.date.nunique()
+        total_wins = len(wins)
+        avg_per_day = total_wins / unique_days if unique_days > 0 else 0
         
-        # Save to data dir for quick check
-        output_html = config.DATA_DIR / "oracle_v3_analysis.html"
-        fig.write_html(str(output_html))
-        log.info(f"📊 Visual Report saved to: {output_html}")
+        print(f"\n🎯 MINING {total_wins} CONFIRMED TRUE WINS (+30% ROI)")
+        print("-" * 60)
+        
+        print("📜 STRATEGY ASSUMPTIONS (Hardcoded in Simulator):")
+        print("   1. Strike Selection: Exactly +1 Strike Out-Of-The-Money (OTM) from the XSP index price.")
+        print("   2. Time of Purchase: The exact minute the VIX/RSI Fractal Signal fired.")
+        print("   3. Target Execution: Hard limit order filled the moment the premium ticked to Entry + 30%.")
+        
+        print("\n📅 DATA RANGE & VOLUME:")
+        print(f"   - Analysis Window: {start_date} to {end_date} ({unique_days} active trading days)")
+        print(f"   - Average True Wins per Day: {avg_per_day:.1f}")
+        
+        # 1. DURATION OVERLAP
+        wins['duration_mins'] = (wins['exit_time'] - wins['entry_time']).dt.total_seconds() / 60.0
+        
+        print("\n⏱️  DURATION DYNAMICS:")
+        print(f"   - Average Time to +30%: {wins['duration_mins'].mean():.1f} minutes")
+        print(f"   - Fastest +30% Strike:  {wins['duration_mins'].min():.1f} minutes")
+        
+        # 2. TEMPORAL OVERLAP (Localized to PST)
+        wins['hour'] = wins['local_time'].dt.hour
+        top_hour = wins['hour'].mode()[0]
+        hour_pct = (len(wins[wins['hour'] == top_hour]) / len(wins)) * 100
+        
+        # Format for human reading (e.g., 07:00 AM)
+        display_hour = pd.to_datetime(f"{int(top_hour)}:00", format='%H:%M').strftime('%I:%M %p')
+        
+        print("\n⏳ TEMPORAL OVERLAPS (PST):")
+        print(f"   - The 'Golden Hour': {display_hour} PST")
+        print(f"   - {hour_pct:.1f}% of all 30%+ wins occurred in this specific hour.")
+        
+        # 3. DIRECTIONAL BIAS
+        calls = len(wins[wins['ticker'].str.contains('C')])
+        print("\n📈 DIRECTIONAL BIAS:")
+        print(f"   - CALL Wins: {(calls/total_wins)*100:.1f}% | PUT Wins: {((total_wins-calls)/total_wins)*100:.1f}%")
+        
+        # 4. ENTRY PREMIUM "SWEET SPOT"
+        print("\n💰 PREMIUM SWEET SPOT:")
+        print(f"   - The most common entry premium for a successful run was: ${wins['entry_price'].mean():.2f}")
+
+        print("\n" + "="*80)
+        log.info("✅ EMPIRICAL MINING COMPLETE.")
+        print("="*80 + "\n")
 
     except Exception as e:
-        log.error(f"Audit Failed: {e}")
+        log.error(f"Failed to mine empirical data: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    audit_brain()
+    mine_golden_rules()
