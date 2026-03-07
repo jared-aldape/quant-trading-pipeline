@@ -1,93 +1,126 @@
-# **⚔️ QUANT OS v4.0: INSTITUTIONAL COMMAND SYSTEM**
+# **📊 QUANT OS v4.1.0: INSTITUTIONAL EXECUTION SYSTEM**
 
-**"Precision in the Vault. Clarity on the Glass. Alpha in the Machine."**
+*"Hybrid Truth in the Vault. Surgical Precision on the Glass. Vigilance in the Void."*
 
-* **Version:** v4.0 (Institutional GUI / Snapshot Engine)  
-* **Status:** **LIVE / BATTLE READY**  
-* **Node:** Quant-OS-Node-1 (Local/AWS Hybrid)  
-* **Last Update:** January 14, 2026
+* **Version:** v4.1.0 (Institutional UI & Strategic Matrix Update)  
+* **Status:** **LIVE / PRODUCTION READY** \* **Node:** Quant-OS-Node-1 (Local/AWS Hybrid)  
+* **Last Update:** March 2026
 
 ## **I. THE PRIME DIRECTIVE**
 
-Quant OS is a **Tactical Command System** designed for high-frequency options trading on the **XSP** (Mini-SPX) instrument. It operates on a **Federated Architecture** with four distinct nodes:
+Quant OS is an **Institutional Execution System** designed to eliminate emotional bias through strict algorithmic enforcement, real-time probability density modeling, and superior data visualization. It operates on a **Hybrid Architecture**:
 
-1. **GEM 1 (The Gauntlet):** Root Config, Pipeline Orchestration, & Data Ingestion.  
-2. **GEM 2 (The Core):** Execution Logic, Fractal Scanners, & ML Models.  
-3. **GEM 3 (The Lab):** Backtesting Engines, Forensics, & Optimization.  
-4. **GEM 4 (The Glass):** The Visual Interface (Dash/Plotly).
+* **Truth (The Vault):** Polygon.io (Historical Ingestion) & DuckDB (High-Speed Local Storage).  
+* **Speed (The Glass):** Dash/Plotly (Visualization Interface) utilizing Zero-Latency layout protocols.  
+* **Vigilance (The Sentinel):** Python Daemon (Background Automation & Reconciliations).
 
-## **II. THE INSTITUTIONAL 12 (TOOL INVENTORY)**
+## **II. THE SIX LAWS OF QUANT OS (CORE PROTOCOL)**
 
-The system interface is divided into three operational domains.
+Non-negotiable rules for data integrity and execution.
 
-### **A. OPERATIONS (Real-Time Execution)**
+* 🕰️ **The Timezone Law:**  
+  * **Vault:** All database timestamps are **Naive UTC** (Universal Time).  
+  * **Glass:** All visualizations convert strictly to **Naive US/Pacific** (Local Time).  
+  * *Rationale:* Prevents "look-ahead bias" and "ghost signals" caused by timezone shifts.  
+* ⚖️ **The Scaling Law:**  
+  * **Reality:** We trade **XSP** (Mini-SPX) for optimal tax efficiency (Section 1256 60/40 rule).  
+  * **Context:** **SPY** is the proxy for trend context. SPX is purged to reduce API overhead and latency.  
+* 🛡️ **The Hard Deck Law:**  
+  * **RTH Only:** No signals generated outside 09:30 \- 16:00 ET.  
+  * **Orphan Control:** Trades left open at 16:00 ET are force-closed in all simulations.  
+* 💰 **The Friction Law:**  
+  * **Simulation:** $0.03 Reg Fee \+ $1.00 Slippage calculated per contract.  
+  * **Reality:** Actual fills execute directly via the Robinhood ledger API.  
+* 📉 **The Gatekeeper Law:**  
+  * **Filter:** Signals must pass a strict Fractal Trend \+ VIX Regime validation check.  
+  * **Oracle:** The ML model (Precision Engine) validates signals against 100k+ historical option outcomes.  
+* 🌊 **The Flow Law:**  
+  * **Context:** Intraday trades must align with the 20-Day Macro Flow (Bull/Bear Bias).
 
-* **1\. LIVE SCOPE (/scope):** The Real-Time Market Monitor. Displays XSP Price, VIX Momentum, and RSI Flow on a strictly locked RTH axis (06:30–13:00 PST).  
-* **2\. OPTIONS SIMULATOR (/sim):** The "Flight Deck" for paper trading. Features a high-contrast order entry panel and a local transaction ledger.  
-* **3\. REPLAY ANALYSIS (/replay):** The "VCR" for market data. Re-watches historical sessions bar-by-bar to study trade anatomy.
+## **III. SYSTEM ARCHITECTURE & INVENTORY**
 
-### **B. ANALYTICS & STRATEGY (Pattern Recognition)**
+### **A. The Core (Logic Engines)**
 
-* **4\. CHART SCANNER (/chart):** The heavy-duty forensic scanner. Visualizes the 4-Layer Truth (Price, Option, VIX, RSI).  
-* **5\. OPTIMAL LAB (/lab):** The "Expert-in-the-Loop" training system. Allows manual labeling of "Ground Truth" data for the ML engine.  
-* **6\. TRADE AUDIT & PATTERNS (/audit):** The behavioral analyst. Visualizes frequency (Hourly/Daily) and duration physics.  
-* **7\. STATISTICAL METRICS (/stats):** The quantitative companion to the Audit. Tracks Win Rate, Profit Factor, and Premium Burn.  
-* **8\. RH LEDGER (/ledger):** The raw transaction feed from Robinhood (Atomized).  
-* **9\. CAPITAL GROWTH (/growth):** The projection engine. Simulates compound growth trajectories with tax liabilities and "Net Goal" targeting.
+* quant\_launcher.py: **Central Command.** Unified dashboard entry point and thread manager.  
+* engine\_scanner.py: **The Brain.** Scans XSP/VIX for Fractal setups. Purges old signals daily to prevent fragmentation.  
+* engine\_backtest.py: **The Simulator.** Deterministic physics engine supporting "What If" parameters (Ideal Gain, Trailing Stop).  
+* engine\_forensics.py: **The Auditor.** FIFO Reconciler that pairs independent Buy/Sell rows into closed PnL trades.  
+* engine\_ml\_precision.py: **The Oracle.** Random Forest model trained on real 0DTE option pricing to predict setup success.
 
-### **C. SYSTEM INFRASTRUCTURE (Backend)**
+### **B. The Data (Ingestion Pipeline)**
 
-* **10\. BACKTEST SEQUENCER (/generator):** The simulation controller. Runs historical strategies against the database.  
-* **11\. RH MIRROR (/mirror):** The verification tool. Overlays actual executions onto historical charts to prove "Execution Quality."  
-* **12\. SYSTEM MONITOR (/info):** The engineering deck. Monitors DB size, latency, disk usage, and provides the "Nuclear Reset" option.
+* ingest\_indices.py: Fetches underlying XSP/VIX OHLCV data.  
+* ingest\_options\_daily.py: **Precision Harvester.** Downloads 1-minute bars for ATM \+/- 3 strikes *only*, minimizing database bloat.  
+* ingest\_ledger.py: **The Bookkeeper.** Hydrates the local database with raw Robinhood execution CSVs.
 
-## **III. CORE PROTOCOLS (THE LAWS)**
+### **C. The Interface (The Institutional 13\)**
 
-### **1\. The Timezone Law**
+*A strict Midnight Blue (\#0f172a) and Black (\#000000) theme utilizing Monospace fonts for rapid data parsing and reduced eye fatigue.*
 
-* **Vault (DB):** Always **UTC**.  
-* **Glass (UI):** Always **US/Pacific (PST)**.  
-* **Protocol:** Data is converted to PST and then *stripped* of timezone metadata (tz\_localize(None)) before rendering. This forces Plotly to display "Wall Clock" time, preventing UTC offsets from shifting the chart.
+**OPERATIONS (Real-Time Execution)**
 
-### **2\. The Snapshot Protocol (Anti-Lock)**
+1. **LIVE SCOPE (/scope):** The Real-Time Market Monitor. Displays XSP Price, VIX Momentum, and RSI Flow on a strictly locked RTH axis.  
+2. **STRATEGIC OPTIONS MATRIX (/strike):** The 0DTE Scenario Modeler. Features real-world Dollar PnL, dynamic Time-Decay velocity, VIX expected move boundaries, and comparative \+1/+2/+3 array visualization for precise target limits.  
+3. **OPTIONS SIMULATOR (/sim):** The paper-trading sandbox featuring a high-contrast order entry panel.  
+4. **REPLAY ANALYSIS (/replay):** The post-market tape playback system. Reconstructs market conditions tick-by-tick with VCR controls.
 
-* **Problem:** DuckDB on Windows does not allow concurrent reading while the Pipeline is writing.  
-* **Solution:** The Backtester and Lab use a **Binary Stream Copy** to clone the database to a temp file (temp\_view.duckdb) before reading. This bypasses the Write Lock, allowing you to run simulations while the pipeline downloads data.
+**ANALYTICS & STRATEGY (Research)**
 
-### **3\. The RTH Lock**
+5\. **CHART SCANNER (/chart):** Multi-timeframe deep analysis terminal overlaying signals with VIX Regime tinting.
 
-* **Definition:** Regular Trading Hours are **06:30 – 13:00 PST** (09:30 – 16:00 ET).  
-* **Enforcement:** All charts are hard-locked to this X-Axis range. Data outside this window is clipped to prevent "Pre-Market Distortion."
+6\. **OPTIMAL LAB (/lab):** ML Training ground for manual tagging of high-probability setups.
 
-### **4\. The High-Contrast Standard**
+7\. **TRADE AUDIT (/audit):** Behavioral forensics tool tracking manual errors vs. system discipline.
 
-* **Visuals:** The UI uses a "Midnight Blue" theme (\#0f172a) for containers.  
-* **Inputs:** All interactive inputs (Dropdowns, Inputs) are strictly **Black Text on White Background** to ensure 100% legibility in all lighting conditions.
+8\. **STATISTICAL METRICS (/stats):** High-level quantitative breakdown of system edge, win rate, and drawdown.
+
+9\. **RH LEDGER (/ledger):** Raw transaction data viewer.
+
+10\. **CAPITAL GROWTH (/growth):** Geometric growth forecaster with Reality Overlay and Compound Interest modeling.
+
+**INFRASTRUCTURE (System & Config)**
+
+11\. **BACKTEST SEQUENCER (/generator):** Headless simulation runner for bulk strategy testing.
+
+12\. **RH MIRROR (/mirror):** API connectivity verification and synchronization status.
+
+13\. **SYSTEM MONITOR (/info):** Database health, latency metrics, and pipeline status.
 
 ## **IV. OPERATIONAL WORKFLOWS**
 
-### **1\. The Morning Routine (06:00 PST)**
+### **1\. The Morning Protocol (06:00 PST)**
 
-1. **Launch:** Run python quant\_launcher.py.  
-2. **Verify:** Check **SYSTEM MONITOR** for "Nominal" status and DB connectivity.  
-3. **Deploy:** Open **LIVE SCOPE** on the main monitor.
+1. **Run:** python main\_pipeline.py (Updates XSP/VIX data).  
+2. **Ingest:** Harvester downloads missing option chains (Targeted Strike Ingestion).  
+3. **Scan:** Scanner engine generates fresh operational signals for the day.
 
-### **2\. The Analysis Routine (Post-Market)**
+### **2\. The Execution Watch (06:30 \- 10:30 PST)**
 
-1. **Ingest:** The background pipeline (DailyHarvest) auto-fills missing data.  
-2. **Audit:** Use **TRADE AUDIT** to review the day's performance and tag behavioral errors.  
-3. **Train:** Use **OPTIMAL LAB** to manually label missed opportunities ("Optimal Calls") to retrain the Oracle.
+1. **Launch:** python quant\_launcher.py \-\> Select **LIVE SCOPE**.  
+2. **Monitor:**  
+   * *VIX Thermometer:* Is volatility crushed (\<20%)? Exercise caution on Longs.  
+   * *RSI Flow:* Is the trend aligned with the 20-Day macro?  
+   * *Oracle Confidence:* Is the ML score \> 60%? **Green light.**  
+3. **Execute:** Upon signal, open **STRATEGIC MATRIX**. Input real-world premiums to calculate optimal strike, expected hold time, and limit price before routing to the broker.
 
-### **3\. The Development Routine**
+### **3\. The Forensic Review (Post-Market)**
 
-1. **Debug:** Comment out the main\_pipeline thread in quant\_launcher.py to stop the auto-downloader.  
-2. **Simulate:** Use **BACKTEST SEQUENCER** to run "What If" scenarios on the static data.
+1. **Export:** Download Robinhood execution CSV.  
+2. **Hydrate:** Run python src/data/ingest\_ledger.py to synchronize the local ledger.  
+3. **Audit:** Launch **TRADE AUDIT** to review performance, log slippage, and tag behavioral deviations.
 
 ## **V. STRATEGIC ROADMAP (v4.x)**
 
-* ✅ **v4.0:** Institutional GUI Overhaul (Completed).  
-* ✅ **v4.1:** Snapshot Protocol / Lock Bypass (Completed).  
-* ⚪ **v4.2:** **Headless Automation.** Wiring engine\_scanner to robin\_client for auto-execution.  
-* ⚪ **v4.3:** **Multi-Leg Spreads.** Automating Vertical Spreads to cap risk.
+* ✅ **Priority Alpha:** Unified Launcher & Institutional GUI Standardization (Completed).  
+* ✅ **Priority Bravo:** FIFO Reconciler & Behavioral Audit Integration (Completed).  
+* ✅ **Priority Charlie:** Oracle ML Integration & Strategic Options Matrix (Completed).  
+* ⚪ **Priority Delta: Headless Automation.** Connect engine\_scanner.py directly to robin\_client.py for automated signal execution.  
+* ⚪ **Priority Echo: Multi-Leg Spreads.** Automate Vertical Spreads and Iron Condors to mathematically cap risk parameters.
 
-*"We do not predict price. We predict volatility flow."*
+## **VI. PROJECT LOG (Recent)**
+
+* **v4.1.0:** Strategic Options Matrix implementation. Replaced theoretical modeling with real-world premium inputs and hold-time velocity scaling.  
+* **v4.0.0:** Institutional UI Overhaul. Transitioned all interfaces to high-contrast finance terminal aesthetics.  
+* **v3.9.0:** Launcher Consolidation. Retired disparate app files into a unified dashboard.  
+* **v3.8.0:** FIFO Engine. Built logic to automatically pair independent Buy/Sell transactions into closed trades for accurate PnL tracking.  
+* **v3.7.0:** Surgical Ingestion. Replaced bulk historical downloads with targeted ATM \+/- 3 daily harvester to optimize database latency.
