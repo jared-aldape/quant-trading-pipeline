@@ -21,3 +21,4 @@ data/quant_strategy.duckdb
 
 # --- Keep these! ---
 
+master_system_audit.json

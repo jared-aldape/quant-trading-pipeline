@@ -1,0 +1,571 @@
+====================================================================================================
+QUANT OS DATABASE SCHEMA AUDIT & SNAPSHOT
+Generated: 2026-03-11T23:02:14.021059
+====================================================================================================
+
+DATABASE: data\quant_strategy.duckdb
+Size: 1799.01 MB
+
+====================================================================================================
+TABLES
+====================================================================================================
+
+[active_rh_log]
+  Rows: 839
+  Columns: 13
+  Schema:
+    - source_id                      VARCHAR
+    - entry_time_utc                 TIMESTAMP
+    - action                         VARCHAR
+    - root                           VARCHAR
+    - strike                         DOUBLE
+    - option_right                   VARCHAR
+    - expiry_date                    DATE
+    - quantity                       DOUBLE
+    - fill_price                     DOUBLE
+    - net_pnl                        DOUBLE
+    - fees                           DOUBLE
+    - status                         VARCHAR
+    - opra_code                      VARCHAR
+  Sample Data (first 3 rows):
+    Row 1:
+      source_id: 1765483971-1
+      entry_time_utc: 2025-12-11 15:06:00
+      action: SELL
+      root: XSP
+      strike: 686.0
+      option_right: C
+      expiry_date: 2025-12-11
+      quantity: 2.0
+      fill_price: 0.89
+      net_pnl: 178.0
+      fees: 0.04
+      status: FILLED
+      opra_code: O:XSP251211C00686000
+    Row 2:
+      source_id: 1765483971-2
+      entry_time_utc: 2025-12-11 15:01:00
+      action: BUY
+      root: XSP
+      strike: 686.0
+      option_right: C
+      expiry_date: 2025-12-11
+      quantity: 2.0
+      fill_price: 0.67
+      net_pnl: -134.0
+      fees: 0.04
+      status: FILLED
+      opra_code: O:XSP251211C00686000
+    Row 3:
+      source_id: 1765483971-3
+      entry_time_utc: 2025-12-10 16:27:00
+      action: SELL
+      root: XSP
+      strike: 677.0
+      option_right: P
+      expiry_date: 2025-12-10
+      quantity: 1.0
+      fill_price: 0.31
+      net_pnl: 31.0
+      fees: 0.02
+      status: FILLED
+      opra_code: O:XSP251210P00677000
+
+[active_simulation_log]
+  Rows: 117
+  Columns: 14
+  Schema:
+    - entry_time                     TIMESTAMP
+    - exit_time                      TIMESTAMP
+    - ticker                         VARCHAR
+    - entry_price                    DOUBLE
+    - exit_price                     DOUBLE
+    - quantity                       INTEGER
+    - net_pnl                        DOUBLE
+    - return_pct                     DOUBLE
+    - reason                         VARCHAR
+    - status                         VARCHAR
+    - notes                          VARCHAR
+    - meta_data                      VARCHAR
+    - action                         VARCHAR
+    - source_id                      VARCHAR
+  Sample Data (first 3 rows):
+    Row 1:
+      entry_time: 2025-10-20 19:55:00
+      exit_time: 2025-10-20 20:40:00
+      ticker: SIM-PUT
+      entry_price: 1.0
+      exit_price: 0.5
+      quantity: 1
+      net_pnl: -50.39
+      return_pct: -50.0
+      reason: DATA_GENERATOR
+      status: CLOSED
+      notes: Dur: 45m
+      meta_data: {"source": "view_data_generator"}
+      action: None
+      source_id: None
+    Row 2:
+      entry_time: 2025-10-21 19:50:00
+      exit_time: 2025-10-21 20:35:00
+      ticker: SIM-CALL
+      entry_price: 1.0
+      exit_price: 1.3
+      quantity: 1
+      net_pnl: 21.250671
+      return_pct: 30.0
+      reason: DATA_GENERATOR
+      status: CLOSED
+      notes: Dur: 45m
+      meta_data: {"source": "view_data_generator"}
+      action: None
+      source_id: None
+    Row 3:
+      entry_time: 2025-10-23 19:55:00
+      exit_time: 2025-10-23 20:40:00
+      ticker: SIM-PUT
+      entry_price: 1.0
+      exit_price: 0.5
+      quantity: 1
+      net_pnl: -49.661516775
+      return_pct: -50.0
+      reason: DATA_GENERATOR
+      status: CLOSED
+      notes: Dur: 45m
+      meta_data: {"source": "view_data_generator"}
+      action: None
+      source_id: None
+
+[active_simulation_log_backup]
+  Rows: 1,278
+  Columns: 9
+  Schema:
+    - entry_time                     TIMESTAMP
+    - source_id                      VARCHAR
+    - ticker                         VARCHAR
+    - action                         VARCHAR
+    - quantity                       DOUBLE
+    - price                          DOUBLE
+    - net_cashflow                   DOUBLE
+    - status                         VARCHAR
+    - reason                         VARCHAR
+  Sample Data (first 3 rows):
+    Row 1:
+      entry_time: 2025-12-11 15:06:00
+      source_id: 1765483971-1
+      ticker: Sell XSP 686 Call 12/11
+      action: SELL
+      quantity: 2.0
+      price: 0.89
+      net_cashflow: 178.0
+      status: Filled
+      reason: USER_IMPORT_SCRAPE
+    Row 2:
+      entry_time: 2025-12-11 15:01:00
+      source_id: 1765483971-2
+      ticker: Buy XSP 686 Call 12/11
+      action: BUY
+      quantity: 2.0
+      price: 0.67
+      net_cashflow: -134.0
+      status: Filled
+      reason: USER_IMPORT_SCRAPE
+    Row 3:
+      entry_time: 2025-12-10 16:27:00
+      source_id: 1765483971-3
+      ticker: Sell XSP 677 Put 12/10
+      action: SELL
+      quantity: 1.0
+      price: 0.31
+      net_cashflow: 31.0
+      status: Filled
+      reason: USER_IMPORT_SCRAPE
+
+[futures_1m]
+  Rows: 13,954
+  Columns: 7
+  Schema:
+    - datetime_utc                   TIMESTAMP
+    - ticker                         VARCHAR
+    - open                           DOUBLE
+    - high                           DOUBLE
+    - low                            DOUBLE
+    - close                          DOUBLE
+    - volume                         DOUBLE
+  Sample Data (first 3 rows):
+    Row 1:
+      datetime_utc: 2025-09-30 07:00:00
+      ticker: ES
+      open: 6705.75
+      high: 6707.25
+      low: 6704.75
+      close: 6705.0
+      volume: 1354.0
+    Row 2:
+      datetime_utc: 2025-09-30 07:50:00
+      ticker: ES
+      open: 6696.0
+      high: 6701.5
+      low: 6696.0
+      close: 6700.75
+      volume: 1629.0
+    Row 3:
+      datetime_utc: 2025-09-30 08:25:00
+      ticker: ES
+      open: 6700.25
+      high: 6703.25
+      low: 6700.25
+      close: 6700.75
+      volume: 692.0
+
+[indices_1m]
+  Rows: 112,159
+  Columns: 7
+  Schema:
+    - datetime_utc                   TIMESTAMP
+    - open                           DOUBLE
+    - high                           DOUBLE
+    - low                            DOUBLE
+    - close                          DOUBLE
+    - volume                         DOUBLE
+    - ticker                         VARCHAR
+  Sample Data (first 3 rows):
+    Row 1:
+      datetime_utc: 2025-10-20 13:30:00
+      open: 669.010009765625
+      high: 670.969970703125
+      low: 669.010009765625
+      close: 670.6699829101562
+      volume: 0.0
+      ticker: XSP
+    Row 2:
+      datetime_utc: 2025-10-20 13:31:00
+      open: 669.3400024414062
+      high: 671.0379760742187
+      low: 669.3200073242188
+      close: 670.7219848632812
+      volume: 0.0
+      ticker: XSP
+    Row 3:
+      datetime_utc: 2025-10-20 13:32:00
+      open: 669.6699951171875
+      high: 671.1059814453125
+      low: 669.6300048828125
+      close: 670.7739868164062
+      volume: 0.0
+      ticker: XSP
+
+[live_trade_ledger]
+  Rows: 2
+  Columns: 11
+  Schema:
+    - trans_id                       VARCHAR
+    - timestamp                      TIMESTAMP
+    - ticker                         VARCHAR
+    - action                         VARCHAR
+    - qty                            DOUBLE
+    - price                          DOUBLE
+    - fees                           DOUBLE
+    - amount                         DOUBLE
+    - balance_snapshot               DOUBLE
+    - strategy_tag                   VARCHAR
+    - notes                          VARCHAR
+  Sample Data (first 3 rows):
+    Row 1:
+      trans_id: e792ec21-7ffd-45dc-abf4-be914e9f9331
+      timestamp: 2025-12-10 04:58:49
+      ticker: XSP 687 CALL
+      action: SELL
+      qty: 1.0
+      price: 1.6582202719646193
+      fees: 0.39
+      amount: 165.43202719646195
+      balance_snapshot: 1630.9154827697748
+      strategy_tag: MANUAL
+      notes: 
+    Row 2:
+      trans_id: d85797f6-061a-4615-8096-fcb6a862db1b
+      timestamp: 2025-12-10 04:58:51
+      ticker: XSP 687 PUT
+      action: SELL
+      qty: 1.0
+      price: 4.476775281766873
+      fees: 0.39
+      amount: 447.2875281766873
+      balance_snapshot: 2078.203010946462
+      strategy_tag: MANUAL
+      notes: 
+
+[macro_events]
+  Rows: 7
+  Columns: 3
+  Schema:
+    - date                           DATE
+    - event_type                     VARCHAR
+    - impact_score                   INTEGER
+  Sample Data (first 3 rows):
+    Row 1:
+      date: 2024-10-21
+      event_type: EARNINGS_TSLA_ANTICIPATION
+      impact_score: 3
+    Row 2:
+      date: 2024-11-05
+      event_type: US_ELECTION
+      impact_score: 3
+    Row 3:
+      date: 2024-11-07
+      event_type: FOMC_RATE_DECISION
+      impact_score: 3
+
+[macro_flow_state]
+  Rows: 187
+  Columns: 4
+  Schema:
+    - date                           DATE
+    - flow_bias                      VARCHAR
+    - bull_pct                       DOUBLE
+    - bear_pct                       DOUBLE
+  Sample Data (first 3 rows):
+    Row 1:
+      date: 2025-01-17
+      flow_bias: BEAR
+      bull_pct: 45.0
+      bear_pct: 55.0
+    Row 2:
+      date: 2025-01-21
+      flow_bias: NEUTRAL
+      bull_pct: 50.0
+      bear_pct: 50.0
+    Row 3:
+      date: 2025-01-22
+      flow_bias: BULL
+      bull_pct: 55.00000000000001
+      bear_pct: 44.99999999999999
+
+[optimal_training_manifest]
+  Rows: 21
+  Columns: 12
+  Schema:
+    - entry_time_utc                 TIMESTAMP
+    - exit_time_utc                  TIMESTAMP
+    - trade_type                     VARCHAR
+    - entry_price                    DOUBLE
+    - exit_price                     DOUBLE
+    - gain_points                    DOUBLE
+    - vix_rsi                        DOUBLE
+    - vix_macd_hist                  DOUBLE
+    - xsp_sigma                      DOUBLE
+    - trend_slope                    DOUBLE
+    - source                         VARCHAR
+    - created_at                     TIMESTAMP
+  Sample Data (first 3 rows):
+    Row 1:
+      entry_time_utc: 2025-12-19 07:40:00
+      exit_time_utc: 2025-12-19 08:01:00
+      trade_type: MANUAL
+      entry_price: 682.8099975585938
+      exit_price: 681.780029296875
+      gain_points: 1.02996826171875
+      vix_rsi: 37.39177215945134
+      vix_macd_hist: -0.010307271497662404
+      xsp_sigma: 0.3712559769824185
+      trend_slope: 0.010116778877536136
+      source: MANUAL
+      created_at: 2025-12-19 21:47:11.058144
+    Row 2:
+      entry_time_utc: 2025-12-19 07:01:00
+      exit_time_utc: 2025-12-19 07:27:00
+      trade_type: MANUAL
+      entry_price: 683.0399780273438
+      exit_price: 681.5900268554688
+      gain_points: 1.449951171875
+      vix_rsi: 24.393132290761898
+      vix_macd_hist: -0.01163798800234754
+      xsp_sigma: 0.10600286658468225
+      trend_slope: 0.08108843806202226
+      source: MANUAL
+      created_at: 2025-12-19 21:54:41.447575
+    Row 3:
+      entry_time_utc: 2025-12-16 10:01:00
+      exit_time_utc: 2025-12-16 12:36:00
+      trade_type: CALL
+      entry_price: 676.6900146484375
+      exit_price: 681.0040161132813
+      gain_points: 4.314001464843841
+      vix_rsi: 84.94711362816953
+      vix_macd_hist: 0.0010182861597125697
+      xsp_sigma: 0.04971195930097162
+      trend_slope: -0.052101155426819507
+      source: MANUAL
+      created_at: 2025-12-19 22:17:19.034027
+
+[options_1m]
+  Rows: 1,375,539
+  Columns: 17
+  Schema:
+    - datetime_utc                   TIMESTAMP
+    - ticker                         VARCHAR
+    - expiration                     DATE
+    - strike                         DOUBLE
+    - type                           VARCHAR
+    - open                           DOUBLE
+    - high                           DOUBLE
+    - low                            DOUBLE
+    - close                          DOUBLE
+    - volume                         DOUBLE
+    - iv                             DOUBLE
+    - delta                          DOUBLE
+    - gamma                          DOUBLE
+    - vega                           DOUBLE
+    - theta                          DOUBLE
+    - underlying_price               DOUBLE
+    - risk_free_rate                 DOUBLE
+  Sample Data (first 3 rows):
+    Row 1:
+      datetime_utc: 2025-12-02 14:40:00
+      ticker: O:XSP251202P00679000
+      expiration: 2025-12-02
+      strike: 679.0
+      type: P
+      open: 0.23
+      high: 0.26
+      low: 0.23
+      close: 0.26
+      volume: 9.0
+      iv: None
+      delta: -0.015446638267730961
+      gamma: 0.02305791743610871
+      vega: 0.003270715151486594
+      theta: -0.5876670213037893
+      underlying_price: None
+      risk_free_rate: None
+    Row 2:
+      datetime_utc: 2025-12-02 14:56:00
+      ticker: O:XSP251202P00679000
+      expiration: 2025-12-02
+      strike: 679.0
+      type: P
+      open: 0.35
+      high: 0.35
+      low: 0.34
+      close: 0.34
+      volume: 3.0
+      iv: None
+      delta: -0.026288858017943784
+      gamma: 0.04050492938456228
+      vega: 0.004586820773495064
+      theta: -1.0302297002999887
+      underlying_price: None
+      risk_free_rate: None
+    Row 3:
+      datetime_utc: 2025-12-02 15:26:00
+      ticker: O:XSP251202P00679000
+      expiration: 2025-12-02
+      strike: 679.0
+      type: P
+      open: 0.19
+      high: 0.2
+      low: 0.19
+      close: 0.2
+      volume: 2.0
+      iv: None
+      delta: -0.0005867415392022401
+      gamma: 0.0018767972774554503
+      vega: 0.00011312055240016149
+      theta: -0.04786957421746081
+      underlying_price: None
+      risk_free_rate: None
+
+[risk_free_rate_daily]
+  Rows: 8
+  Columns: 3
+  Schema:
+    - date                           DATE
+    - ticker                         VARCHAR
+    - rate                           DOUBLE
+  Sample Data (first 3 rows):
+    Row 1:
+      date: 2025-12-04
+      ticker: None
+      rate: 3.611999988555908
+    Row 2:
+      date: 2025-12-03
+      ticker: None
+      rate: 3.6349997520446777
+    Row 3:
+      date: 2025-12-05
+      ticker: None
+      rate: 3.6029999256134033
+
+[signal_history_log]
+  Rows: 0
+  Columns: 8
+  Schema:
+    - timestamp_utc                  TIMESTAMP
+    - ticker                         VARCHAR
+    - signal_type                    VARCHAR
+    - vix_value                      DOUBLE
+    - rsi_value                      DOUBLE
+    - market_regime                  VARCHAR
+    - flow_bias                      VARCHAR
+    - meta_data                      VARCHAR
+
+[trade_manifest]
+  Rows: 26
+  Columns: 7
+  Schema:
+    - entry_timestamp_utc            BIGINT
+    - date                           DATE
+    - signal_type                    VARCHAR
+    - xsp_price                      DOUBLE
+    - trade_type                     VARCHAR
+    - meta_data                      VARCHAR
+    - allocation_pct                 DOUBLE
+  Sample Data (first 3 rows):
+    Row 1:
+      entry_timestamp_utc: 1770388200000
+      date: 2026-02-06
+      signal_type: BULL_FRACTAL
+      xsp_price: 686.0900268554688
+      trade_type: CALL
+      meta_data: State: TREND | Flow: BULL | ML: 62.3%
+      allocation_pct: 1.0
+    Row 2:
+      entry_timestamp_utc: 1770393600000
+      date: 2026-02-06
+      signal_type: BULL_FRACTAL
+      xsp_price: 688.989990234375
+      trade_type: CALL
+      meta_data: State: TREND | Flow: BULL | ML: 58.9%
+      allocation_pct: 1.0
+    Row 3:
+      entry_timestamp_utc: 1770408300000
+      date: 2026-02-06
+      signal_type: BULL_FRACTAL
+      xsp_price: 691.8099975585938
+      trade_type: CALL
+      meta_data: State: CRITICAL_SQUEEZE | Flow: BULL | ML: 58.6%
+      allocation_pct: 1.0
+
+====================================================================================================
+DATA QUALITY CHECKS
+====================================================================================================
+
+Columns with NULL values:
+  active_simulation_log.action: 113 NULLs
+  active_simulation_log.source_id: 113 NULLs
+  options_1m.delta: 302583 NULLs
+  options_1m.expiration: 276821 NULLs
+  options_1m.gamma: 302583 NULLs
+  options_1m.iv: 1375539 NULLs
+  options_1m.risk_free_rate: 1375539 NULLs
+  options_1m.strike: 276821 NULLs
+  options_1m.theta: 302583 NULLs
+  options_1m.type: 276821 NULLs
+  options_1m.underlying_price: 1375539 NULLs
+  options_1m.vega: 302583 NULLs
+  risk_free_rate_daily.ticker: 8 NULLs
+
+====================================================================================================
+END OF REPORT
+====================================================================================================

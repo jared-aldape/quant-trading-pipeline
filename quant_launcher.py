@@ -18,7 +18,8 @@ from src.interface import view_live_scope, view_options_sim, view_replay_analysi
 from src.interface import view_chart_analysis, view_audit, view_rh_ledger
 from src.interface import view_statistics, view_capital_growth
 from src.interface import view_data_generator, view_rh_mirror, view_system_info
-from src.interface import view_optimal_lab, view_tactical_strike 
+from src.interface import view_optimal_lab, view_tactical_strike
+from src.interface import view_alpha_leak # <-- v4.1 INTEGRATION: Alpha Leak Monitor
 
 # BACKGROUND ENGINE (Root Level Import)
 try:
@@ -98,6 +99,7 @@ sidebar = html.Div(
             [
                 dbc.NavLink("CHART SCANNER", href="/chart", active="exact", className="fw-bold font-monospace py-1"),
                 dbc.NavLink("OPTIMAL LAB", href="/lab", active="exact", className="fw-bold font-monospace py-1"),
+                dbc.NavLink("ALPHA LEAK FORENSICS", href="/forensics", active="exact", className="fw-bold font-monospace py-1 text-danger"), # <-- ADDED LEAK FORENSICS ROUTE
                 
                 # Companion Tools
                 dbc.NavLink("TRADE AUDIT & PATTERNS", href="/audit", active="exact", className="fw-bold font-monospace py-1 text-info"),
@@ -142,6 +144,7 @@ def render_page_content(pathname):
     elif pathname == "/replay": return view_replay_analysis.render()
     elif pathname == "/chart": return view_chart_analysis.render()
     elif pathname == "/lab": return view_optimal_lab.render()
+    elif pathname == "/forensics": return view_alpha_leak.render() # <-- ADDED ROUTE HANDLER
     elif pathname == "/audit": return view_audit.render()
     elif pathname == "/ledger": return view_rh_ledger.render()
     elif pathname == "/stats": return view_statistics.render()

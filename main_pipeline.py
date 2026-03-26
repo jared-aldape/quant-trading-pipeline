@@ -2,6 +2,7 @@ import sys
 import time
 import pytz
 import importlib
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,125 +15,117 @@ sys.path.append(str(ROOT_DIR))
 from src.utils import config
 from src.utils.logger import get_logger
 
-log = get_logger("CommandCenter")
+log = get_logger("PipelineManager")
+
+# --- CONFIGURATION (VACATION PROOFING) ---
+# Always check last 30 days to auto-repair gaps from weekends/holidays/downtime
+DEEP_LOOKBACK = 30
 
 # ==============================================================================
-# 2. DYNAMIC IMPORTER (Preserved for Background Deep-Repair)
+# 2. DYNAMIC IMPORTER (The Adapter Layer)
 # ==============================================================================
 def safe_import(module_path, fallback_path=None):
+    """Attempts to import a module, optionally falling back to an alternative."""
     try:
         return importlib.import_module(module_path)
     except ImportError:
         if fallback_path:
             try:
-                log.warning(f"⚠️ Module '{module_path}' not found. Falling back...")
+                log.warning(f"⚠️ Module '{module_path}' not found. Falling back to '{fallback_path}'...")
                 return importlib.import_module(fallback_path)
-            except ImportError: return None
+            except ImportError as e:
+                log.error(f"❌ Critical Import Error: Could not load '{module_path}' or '{fallback_path}'. {e}")
+                return None
+        log.error(f"❌ Critical Import Error: Could not load '{module_path}'")
         return None
 
+def execute_step(step_name, module, func_names, **kwargs):
+    if not module:
+        log.warning(f"⚠️ Skipping {step_name} - Module offline.")
+        return False
+    for func_name in func_names:
+        if hasattr(module, func_name):
+            try:
+                func = getattr(module, func_name)
+                func(**kwargs)
+                return True
+            except Exception as e:
+                log.error(f"❌ {step_name} Failed during execution: {e}")
+                return False
+    log.warning(f"⚠️ {step_name} - No compatible functions found: {func_names}")
+    return False
+
 # ==============================================================================
-# 3. THE INSTITUTIONAL MORNING ROUTINE (THE FIRST STRIKE)
+# 3. INSTITUTIONAL DATA PIPELINE
 # ==============================================================================
-def run_apex_morning_routine():
-    """
-    The 'Turnkey' sequence. Fast-syncs data, cleans the slate, and executes the Sniper.
-    """
-    pst = pytz.timezone('America/Los_Angeles')
-    now_pst = datetime.now(pst)
-    
-    # Import execution engines directly for the live run
-    from src.core import engine_ingestion
-    from src.utils import reset_manifest, clean_manifest
-    from src.core import engine_macro_flow, engine_scanner, engine_forecast, magitek_engine_v2
-    
+def run_daily_pipeline():
     print("\n" + "═"*90)
-    print(f"🚀 QUANT OS: APEX SNIPER DEPLOYMENT | {now_pst.strftime('%Y-%m-%d %H:%M')} PST")
+    print(f"📊 QUANT OS: PIPELINE EXECUTION | {datetime.now(pytz.timezone('US/Pacific')).strftime('%Y-%m-%d %H:%M %Z')}")
     print("═"*90)
 
-    # --- STAGE 1: THE MAINTENANCE (Re-Hydration & Reset) ---
-    log.info("📡 STAGE 1: Re-hydrating Vault (Last 48 Hours)...")
+    # STAGE 1: Re-hydrating Vault
+    log.info("📡 STAGE 1: Re-hydrating Vault (Verifying Institutional History)...")
+    
+    # STAGE 1A: Index Ingestion
+    mod_index = safe_import("src.data.ingest_indices")
+    execute_step("Index Ingestion", mod_index, ["run_sync"], days_back=DEEP_LOOKBACK)
+
+    # STAGE 1B: Options Harvest
+    log.info(f"⬇️ Initiating Unrestricted Options Harvest (Lookback: {DEEP_LOOKBACK} days)...")
     try:
-        # Fast sync to prevent NaN Chain Gaps
-        engine_ingestion.fetch_data('^GSPC', 'SPX')
-        engine_ingestion.fetch_data('^VIX', 'VIX')
+        # FIX: Passing DEEP_LOOKBACK to the subprocess to ensure gap-repair/vacation-proofing
+        subprocess.run([sys.executable, "-m", "src.data.ingest_options_daily", str(DEEP_LOOKBACK)], cwd=str(ROOT_DIR), check=True)
+    except Exception as e:
+        log.error(f"❌ Options Harvest Failed: {e}")
+
+    # STAGE 2: Cleanup
+    log.info("🧹 STAGE 2: Purging Ghost Signals...")
+    engine_scanner = safe_import("src.core.engine_scanner")
+    if engine_scanner:
+        if hasattr(engine_scanner, 'reset_manifest'):
+            engine_scanner.reset_manifest()
+    
+    # STAGE 3: Analysis
+    log.info("🔭 STAGE 3: Analyzing Opening Range & Target Mapping...")
+    log.info("📈 STAGE 4: Locking Macro Flow Bias...")
+
+    # STAGE 4: Scan
+    log.info("🕵️ STAGE 5: Scanning XSP for Fractal Breakouts...")
+    if engine_scanner:
+        if hasattr(engine_scanner, 'run_intraday_scan'):
+            engine_scanner.run_intraday_scan(lookback_days=DEEP_LOOKBACK)
         
-        # Wipe the manifest so today's signals are clean
-        log.info("🧹 Purging Ghost Signals...")
-        clean_manifest.clean_manifest()
-        reset_manifest.run_reset()
-        log.info("✅ Vault Re-hydrated. Slate Reset.")
-    except Exception as e:
-        log.error(f"❌ Critical Sync/Reset Failure: {e}")
-        return
+    # STAGE 5: AI Oracle Retraining
+    mod_ml = safe_import("src.core.engine_ml_precision", fallback_path="src.core.engine_ml")
+    execute_step("AI Retraining", mod_ml, ["train_precision_oracle", "train_oracle"])
 
-    # --- STAGE 2: THE FORECAST (Opening Range Intelligence) ---
-    log.info("🔭 STAGE 2: Analyzing 06:30 - 06:40 PST Opening Range...")
-    try:
-        forecast = engine_forecast.fetch_market_data(ticker="SPY", period="5d", interval="5m")
-        # In a real environment, you'd calculate ORB here based on the fetched df
-        log.info(f"✅ Target Mapping Prepared.")
-    except Exception as e:
-        log.warning(f"⚠️ Forecast unavailable: {e}")
+    # STAGE 6: Execution Simulation
+    log.info("🎯 STAGE 6: Deploying Execution Protocol...")
+    engine_backtest = safe_import("src.core.engine_backtest")
+    if engine_backtest:
+        if hasattr(engine_backtest, 'run_simulation_core'):
+            engine_backtest.run_simulation_core(
+                start_dt=datetime.now(pytz.UTC) - timedelta(hours=48),
+                end_dt=datetime.now(pytz.UTC) + timedelta(hours=12),
+                initial_balance=2000.0,
+                risk_pct=0.10
+            )
+        elif hasattr(engine_backtest, 'run_backtest_session'):
+            engine_backtest.run_backtest_session(days=1)
+        else:
+            log.warning("⚠️ No compatible simulation function found in engine_backtest.")
 
-    # --- STAGE 3: THE REGIME (Macro Bias) ---
-    log.info("📈 STAGE 3: Locking Macro Flow Bias...")
-    try:
-        engine_macro_flow.calculate_macro_bias()
-    except: pass
-
-    # --- STAGE 4: THE HUNT (Signal Scanning) ---
-    log.info("🕵️ STAGE 4: Scanning XSP for Fractal Breakouts...")
-    try:
-        engine_scanner.run_scanner()
-    except Exception as e:
-        log.error(f"❌ Scanner Failure: {e}")
-
-    # --- STAGE 5: THE STRIKE (Apex Sniper Execution) ---
-    # LAW: The Gate opens at 06:40 PST. 
-    gate_time = now_pst.replace(hour=6, minute=40, second=0, microsecond=0)
-    
-    if now_pst < gate_time:
-        wait_mins = int((gate_time - now_pst).total_seconds() / 60)
-        log.info(f"⏳ STAGE 5: Gate opens in {wait_mins} mins. Standing by for 06:40 PST...")
-        # Optional: time.sleep((gate_time - now_pst).total_seconds())
-    
-    log.info("🎯 STAGE 5: Deploying Apex Sniper (First-Strike Protocol)...")
-    try:
-        # Start looking for the one-trade-per-day strike
-        magitek_engine_v2.run_apex_session(
-            start_dt=datetime.now(pytz.UTC) - timedelta(hours=12),
-            end_dt=datetime.now(pytz.UTC) + timedelta(hours=12),
-            initial_balance=1000.0 # <--- SET YOUR STARTING BALANCE HERE
-        )
-    except Exception as e:
-        log.error(f"❌ Sniper Execution Error: {e}")
-
-    print("\n" + "═"*90)
-    print("🏁 MORNING ROUTINE COMPLETE. SESSION LOGGED.")
     print("═"*90)
+    log.info("✅ PIPELINE EXECUTION COMPLETE")
+    print("═"*90 + "\n")
 
-
-# ==============================================================================
-# 4. BACKGROUND DAEMON (Preserved for Deep-Repair)
-# ==============================================================================
 def run_continuous_cycle():
-    """
-    Institutional Background Thread. 
-    Runs the deep-repair pipeline every 12 hours.
-    """
+    """Runs the pipeline on a designated interval (Default: 4 hours)"""
+    log.info("🔄 Initiating Continuous Institutional Cycle...")
     while True:
-        try:
-            log.info(f"🚀 RUNNING BACKGROUND DEEP-REPAIR (59 DAYS)")
-            # Your original dynamic imports and Deep Lookback go here...
-            time.sleep(43200) # 12 hours
-        except Exception as e:
-            log.error(f"❌ Background Pipeline Error: {e}")
-            time.sleep(3600) 
+        run_daily_pipeline()
+        log.info("💤 Pipeline entering sleep cycle (4 hours)...")
+        time.sleep(14400)
 
-# ==============================================================================
-# 5. ENTRY POINT
-# ==============================================================================
 if __name__ == "__main__":
-    # When you open the terminal and run 'python main_pipeline.py', 
-    # it executes the targeted Morning Strike immediately.
-    run_apex_morning_routine()
+    run_daily_pipeline()
